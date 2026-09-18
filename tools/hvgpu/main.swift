@@ -17,6 +17,7 @@
 //   --display s1|s2         our display device: s1 impersonates virtio-gpu (default),
 //                           s2 is the shared-surface Prose Display (docs/s2-display-device.md)
 //   --pool-mib N            s2 surface pool size (default 64)
+//   --screenshot PATH       s2: dump the presentation surface as PNG every 10 s (with the stats line)
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
 import AppKit

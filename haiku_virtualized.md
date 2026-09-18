@@ -347,9 +347,8 @@ Scope decision: we fork Haiku (PROSE) and change whatever the experience needs. 
 5. Time-boxed: a virtqueue dump in `hvgpu` (Haiku prints ring addresses; the host reads them from guest RAM) to close the VZ-GPU question. Drop it if it takes more than a day.
 
 **Sprint 2: S2, the zero-copy display.**
-- Host: the S2 device in `hvgpu` (shared region backed by Metal-visible memory, commit and event queues, `CADisplayLink` presentation). The presenter and RAM console carry over.
-- Guest: `virtio_pci` shared-memory capability (type 8) plus a bus-manager accessor; a new driver and accelerant modeled on `virtio_gpu` and `framebuffer`; the app_server commit hook after `_CopyBackToFront`; retrace semaphore fed by the event queue.
-- Then live resize (`MODE_HINT`) and vsync pacing in app_server (S3 items pulled forward if time allows).
+- ✅ **Milestone A (2026-09-18): the whole pipe, no accelerant yet.** Host: the S2 device in `hvgpu` (`--display s2`; `tools/hvgpu/prds.swift`: shared region, control and event queues, `CADisplayLink` vsync events, `--screenshot`). Guest (patch 0014): `virtio_pci` shared-memory capability plus `get_shared_memory()` in the bus manager, and the `prose_display` driver, which maps the pool, sets the mode, posts event buffers and — for now — draws a test pattern from a kernel thread. Verified on VZ: mode 1280x800, ~10 commits/s, 60 Hz vsync events with host and guest counts identical. Findings recorded in the spec §10.1/§12: `mapMemory` only after the VM starts and on the device queue; one region per device; the region is a 64-bit BAR above RAM; **no vsync while the host display sleeps**.
+- Next, milestone B: the accelerant (modeled on `framebuffer`, cloning the driver's shared info and the pool), the app_server commit hook after `_CopyBackToFront`, retrace semaphore fed by the event queue (with timeouts), then live resize (`MODE_HINT`) and vsync pacing.
 
 **Sprint 3: polish and reach.**
 - Our own virtio-input keyboard and tablet devices, driven from `hvgpu`'s window, so VZ's GPU no longer has to stay attached and the window is entirely ours.

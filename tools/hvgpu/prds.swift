@@ -355,12 +355,12 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         lastStats = now
         log("prds: \(commits) commits, \(commitRects) rects, \(commitBytes >> 10) KiB copied, "
             + "\(vsyncSeq) vsyncs, \(droppedEvents) events dropped, \(eventElements.count) event buffers posted")
-        if let path = option("--snapshot") { snapshot(to: path) }
+        if let path = option("--screenshot") { screenshot(to: path) }
     }
 
-    /// --snapshot PATH: write the presentation surface as PNG with each stats line,
+    /// --screenshot PATH: write the presentation surface as PNG with each stats line,
     /// so a headless run can be checked without anyone looking at the window.
-    private func snapshot(to path: String) {
+    private func screenshot(to path: String) {
         guard let surface, surface.width > 0, surface.height > 0, mode != nil else { return }
         let space = CGColorSpaceCreateDeviceRGB()
         let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
@@ -371,7 +371,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
               let image = ctx.makeImage(),
               let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL,
                                                          "public.png" as CFString, 1, nil)
-        else { log("prds: snapshot failed"); return }
+        else { log("prds: screenshot failed"); return }
         CGImageDestinationAddImage(dest, image, nil)
         CGImageDestinationFinalize(dest)
     }

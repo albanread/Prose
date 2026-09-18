@@ -212,9 +212,10 @@ Because both sides run on one coherent memory system, no cache flush or invalida
 ### 10.1 Host: `hvgpu` on Virtualization.framework (macOS 27)
 
 - `VZCustomVirtioDeviceConfiguration`: `deviceID = 63`, `pciClassID = 3`, `pciSubclassID = 0x80`, `virtioQueueCount = 2`, `optionalFeatures = VSYNC | RESIZE`, `deviceSpecificConfiguration` = the 64-byte `prds_config`, `sharedMemoryRegions = [ (regionID 0, size) ]`. Region size: 64 MiB by default (two 4K surfaces' worth).
-- The pool is `mmap`ed anonymous shared memory, 16 KiB aligned, wrapped once with `makeBuffer(bytesNoCopy:)`; `mapMemory(ptr, atOffset: 0, size:)` maps it into the guest in `didCreateDevice`. The pointer must be plain host memory (the VM runs in an XPC service) [measure: alignment and size limits, whether Metal-wrapped memory maps].
+- The pool is `mmap`ed anonymous shared memory (`MAP_ANON | MAP_SHARED`), 16 KiB aligned. `mapMemory(ptr, atOffset: 0, size:)` must be called **on the device queue** (`dispatch_assert_queue` traps otherwise) and **only once the VM is running** (before `start` completes it fails with "The virtual machine is not live"), so `hvgpu` maps it from the `start` completion handler, not from `didCreateDevice`. Measured (macOS 27.0): VZ allows one shared memory region per device; a 64 MiB region maps in well under a millisecond and lands in the guest as a 64-bit memory BAR (BAR 4 at `0x180000000`, above the 4 GiB RAM window). Wrapping the pool itself for Metal is still untested; milestone A copies commits into the presenter's own surface.
 - `COMMIT`: for each rect, a compute or blit pass copies from the buffer (any stride, via the same direct-sampling shader the presenter uses) into the presentation texture; the element is returned from the command buffer's completion handler, so completion means the GPU is done reading. A first implementation may `memcpy` on the device queue instead; the contract is the same.
 - Presentation: `CADisplayLink` on the window; each tick presents if a commit landed, and emits `VSYNC` (when enabled) with the tick's timestamp. Window resize → config update + `MODE_HINT`.
+- **The display link stops when the host display sleeps** (and in `--headless` runs there is none), so `VSYNC` events can stop at any time for any length of time. The guest must never wait on the retrace semaphore without a timeout; the driver and accelerant treat a missing vsync as "present immediately".
 - The RAM console, input handling and the overlay window carry over from S1. VZ's own virtio-gpu stays attached until we have our own input devices (Sprint 3).
 
 ### 10.2 Host: QEMU (development baseline and the Windows track)
@@ -231,14 +232,14 @@ A `prose-display` device in our QEMU fork: `virtio_pci_add_shm_cap()` exposes a 
 ## 11. Verification
 
 - **Framing tests** (host, no VM): pack/unpack every structure; sizes: `prds_hdr` 16, `prds_rect` 16, `prds_config` 64, events 32.
-- **Boot test** (`private_workspace/run-vz.sh`): markers `prose_display: bound`, mode set, first commit, `VSYNC` count > 0 with events enabled.
-- **Pixel test**: a Haiku test app draws a known pattern; `hvgpu --screenshot` dumps the presentation texture; compare pixel-exact (alpha 255, colours intact) — the same check the T5 presenter self-test does.
+- **Boot test** (`private_workspace/run-vz.sh <name> --display s2`): guest markers `prose_display: pool at …, mapped write-back`, `prose_display: mode WxH, stride S`, `test pattern committed`, `publish device: … graphics/prose_display/0`; host markers `prds: pool mapped into the guest`, `prds: DRIVER_OK`, `prds: mode …`, and the 10-second stats lines on both sides (`commits`, `vsyncs`; the two vsync counts must match and `events dropped` must stay 0).
+- **Pixel test**: milestone A's kernel test pattern (eight colour bars, a diagonal, a moving box); `hvgpu --screenshot PATH` dumps the presentation surface as PNG with every stats line; colours and geometry check out at 1280x800 (B8G8R8X8 read as BGRX, stride 5120 in the pool, 15360 in the 3840-wide presentation surface). Later: a Haiku test app and a pixel-exact compare, the T5 presenter self-test.
 - **Latency**: `hvgpu` logs commit → completion time and commit → presented-frame time (from the display link) percentiles; targets: completion < 1 ms for a 1080p rect, presentation on the next refresh.
 - **Lifecycle**: guest reboot, `SET_MODE` to a different size and back, resize the host window with and without `PRDS_F_RESIZE`, and the black-until-first-commit rule.
 
 ## 12. Open questions to settle on the host before freezing version 1
 
-1. Shared-region alignment and maximum size on VZ, and whether `mapMemory` accepts memory already wrapped by Metal (or must be `mmap`ed first and wrapped after).
-2. Whether `update(_:)` raises the config-change interrupt; the protocol does not depend on it, but the answer decides if `GET_INFO` polling is ever needed.
-3. Interrupt latency from `returnToQueue()` to the guest handler at 60–120 events per second, to decide whether `VSYNC` can stay on permanently.
+1. ✅ Shared-region alignment and size on VZ: a 16 KiB-aligned `mmap`ed 64 MiB pool maps; one region per device; it must be mapped after the VM starts, on the device queue (§10.1). Still open: whether memory already wrapped by Metal maps (milestone A does not need it).
+2. Whether `update(_:)` raises the config-change interrupt; the protocol does not depend on it, but the answer decides if `GET_INFO` polling is ever needed. (Not yet exercised: no window resize in the milestone A runs.)
+3. Partly measured: with `VSYNC` enabled the guest received every event at 60 Hz (host and guest counts identical, none dropped, eight 32-byte buffers never ran dry) while the ~10 commits/s test pattern ran. Latency numbers and the 120 Hz case are still to be measured, and the display-sleep behaviour in §10.1 means the guest side needs timeouts regardless.
 4. Whether VZ's own virtio-gpu can be dropped once we have our own input devices; until then two display devices coexist (patch 0002 keeps Haiku off VZ's).
