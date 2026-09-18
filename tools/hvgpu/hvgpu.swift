@@ -638,12 +638,15 @@ final class Presenter: NSObject {
     }
 
     @objc func tick(_ link: CADisplayLink) {
+        // --no-overlay: never cover VZ's own display (for testing VZ's virtio-gpu).
+        guard !args.contains("--no-overlay") else { return }
         guard let gpu = presenterGPU, let surface = gpu.surface else { return }
         if layer.drawableSize.width != view.bounds.width * window.backingScaleFactor {
             updateDrawableSize()
         }
         let current = gpu.seq.withLock { $0 }
-        if current == lastPresentedSeq { return }
+        // Nothing flushed yet: keep the overlay hidden so VZ's own display shows.
+        if current == 0 || current == lastPresentedSeq { return }
         lastPresentedSeq = current
         if view.isHidden {
             view.isHidden = false
@@ -795,7 +798,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
 
         if args.contains("--rng-probe") {
             config.customVirtioDevices = [rngProbe.configuration]
-        } else {
+        } else if !args.contains("--no-custom-gpu") {   // --no-custom-gpu: VZ's GPU only
             config.customVirtioDevices = [gpu.configuration]
         }
         // VZ's own virtio-gpu stays by default: VZVirtualMachineView maps the absolute pointer
