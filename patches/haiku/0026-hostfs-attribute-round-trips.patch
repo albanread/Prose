@@ -1,0 +1,87 @@
+From 5218555c4ad3d946644d99bc636ad54541386847 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 21:37:49 +0100
+Subject: [PATCH] HostFS: attributes in one round trip, keep data on a type
+ change
+
+- Attribute reads ask for up to 4 KiB straight away and fall back to the
+  size query only on ERANGE: one host round trip instead of two for
+  almost every attribute Tracker reads.
+- create_attr() on an existing attribute without O_TRUNC keeps its data;
+  the next write stores it with the new type (it used to be emptied).
+- hostfs is linked from kernel/boot too: the loader preloads every file
+  system, and the preloaded image now keeps a valid path after boot
+  ("failed to normalize path of module image ... hostfs" is gone).
+---
+ build/jam/packages/Haiku                      |  3 +++
+ .../kernel/file_systems/hostfs/attributes.cpp | 27 +++++++++++++++++--
+ 2 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 7e20362ea5..5843b0b90e 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -332,6 +332,9 @@ AddBootModuleSymlinksToPackage
+ 	efi_gpt
+ 	generic_ide_pci
+ 	highpoint_ide_pci
++	hostfs
++		# PROSE fork: the loader preloads every file system; linked here too,
++		# its preloaded image keeps a valid path after boot
+ 	hyperv@x86,x86_64
+ 	hyperv_scsi@x86,x86_64
+ 	ide_isa@x86
+diff --git a/src/add-ons/kernel/file_systems/hostfs/attributes.cpp b/src/add-ons/kernel/file_systems/hostfs/attributes.cpp
+index 35dbba8dea..8862293eba 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/attributes.cpp
++++ b/src/add-ons/kernel/file_systems/hostfs/attributes.cpp
+@@ -175,6 +175,28 @@ static status_t
+ read_xattr(Volume* volume, Node* node, const char* xattr, uint8** _value,
+ 	size_t* _length)
+ {
++	// Most attributes are small: ask for up to 4 KiB right away, which
++	// answers in one round trip. ERANGE means it is bigger.
++	{
++		const size_t guess = min_c((size_t)4096, volume->MaxData());
++		uint8* value = (uint8*)malloc(guess);
++		if (value == NULL)
++			return B_NO_MEMORY;
++		fuse_getxattr_in in = {};
++		in.size = guess;
++		size_t length = 0;
++		status_t status = volume->Request(FUSE_GETXATTR, node->nodeid, &in, sizeof(in),
++			xattr, NULL, NULL, 0, NULL, 0, value, guess, &length);
++		if (status == B_OK) {
++			*_value = value;
++			*_length = length;
++			return B_OK;
++		}
++		free(value);
++		if (status != ERANGE)
++			return status;
++	}
++
+ 	for (int attempt = 0; attempt < 3; attempt++) {
+ 		fuse_getxattr_in in = {};
+ 		fuse_getxattr_out out;
+@@ -440,14 +462,15 @@ hostfs_create_attr(fs_volume* _volume, fs_vnode* _node, const char* name, uint32
+ 		free(data);
+ 		if ((openMode & O_EXCL) != 0)
+ 			return B_FILE_EXISTS;
+-		if ((openMode & O_TRUNC) == 0 && oldType == type) {
++		if ((openMode & O_TRUNC) == 0) {
++			// keep the data; the next write stores it with the new type
+ 			*_cookie = cookieDeleter.Detach();
+ 			return B_OK;
+ 		}
+ 	} else if (status != B_ENTRY_NOT_FOUND)
+ 		return status;
+ 
+-	// new, truncated, or changing type: an empty value of the new type
++	// new or truncated: an empty value of the type
+ 	status = write_attribute(volume, node, name, type, NULL, 0,
+ 		(openMode & O_EXCL) != 0 ? LINUX_XATTR_CREATE : 0);
+ 	if (status != B_OK)
+-- 
+2.54.0 (Apple Git-157)
+
