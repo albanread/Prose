@@ -1,6 +1,6 @@
 // hvgpu: the Prose MIDI device — the guest's MIDI port, played by the host.
 //
-// A custom virtio device (ID 64) with two queues: 0 carries MIDI bytes from the
+// A custom virtio device (ID 62) with two queues: 0 carries MIDI bytes from the
 // guest (driver-readable buffers), 1 carries MIDI bytes to the guest (the driver
 // posts writable buffers). Haiku's fork driver publishes it as /dev/midi/prose/0,
 // midi_server turns that into a producer/consumer pair, and every MIDI app in the
@@ -108,7 +108,7 @@ final class HostSynth {
 
 final class ProseMIDIDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate, VZCustomVirtioDeviceDelegate {
     static let queue = DispatchQueue(label: "hvgpu.midi")
-    static let deviceID: UInt16 = 64
+    static let deviceID: UInt16 = 62      // 63 is the display; 64+ would map past virtio-pci's modern ID range
 
     private(set) var device: VZCustomVirtioDevice?
     private var rxElements: [VZVirtioQueueElement] = []      // guest's buffers for host -> guest bytes

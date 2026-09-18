@@ -1,0 +1,737 @@
+From f25d616f89c8e81954e0cb498296df798a59b551 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 18:29:20 +0100
+Subject: [PATCH] Prose MIDI: the guest's MIDI port, played by the host
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+drivers/midi/prose_midi: a custom virtio device (ID 62) with a queue in
+each direction, published as /dev/midi/prose/0 — a plain MIDI byte
+stream (blocking read for input, write for output), which is what
+midi_server expects from any port under /dev/midi. hvgpu forwards what
+the guest plays to Core Audio's General MIDI synth and to a CoreMIDI
+virtual source, and feeds a CoreMIDI virtual destination back in.
+
+The module installs under drivers/audio/hmulti: the device manager
+searches a virtio child's driver only when the node is registered, in
+the context of the /dev/<class> scan that triggered it — for a
+multimedia-class device that is media_server's /dev/audio/hmulti scan
+at boot — and never again for a later /dev/midi scan. (Two small
+"midi" additions to the device manager's path tables are kept for a
+future proper fix.) A virtio device ID of 64 would have mapped to PCI
+device 0x1080, outside the modern range virtio_pci accepts, so the
+device was invisible until it moved to 62.
+
+device_manager: publish_directories() no longer creates a directory for
+a module's own name (driver_v1).
+
+prose_midi_test [--direct] plays a scale through the Midi Kit
+(BMidiRoster -> midi_server -> the port) or directly into the device.
+
+Verified on VZ: midi_server publishes "/dev/midi/prose/0" as a
+consumer, both scales reach hvgpu (34 messages) and the Mac plays them.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ build/jam/images/definitions/minimum          |   1 +
+ build/jam/packages/Haiku                      |   1 +
+ src/add-ons/kernel/drivers/midi/Jamfile       |   1 +
+ .../kernel/drivers/midi/prose_midi/Jamfile    |   8 +
+ .../drivers/midi/prose_midi/prose_midi.cpp    | 477 ++++++++++++++++++
+ src/bin/Jamfile                               |   1 +
+ src/bin/prose_midi_test.cpp                   | 101 ++++
+ .../kernel/device_manager/device_manager.cpp  |  11 +-
+ 8 files changed, 599 insertions(+), 2 deletions(-)
+ create mode 100644 src/add-ons/kernel/drivers/midi/prose_midi/Jamfile
+ create mode 100644 src/add-ons/kernel/drivers/midi/prose_midi/prose_midi.cpp
+ create mode 100644 src/bin/prose_midi_test.cpp
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 6371d5bc72..d15c95d3ec 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -74,6 +74,7 @@ SYSTEM_BIN = [ FFilterByBuildFeatures
+ 	passwd
+ 	pc
+ 	ping
++	prose_midi_test
+ 	prose_tone
+ 	pkgman
+ 	prio
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 0d386f2cf3..1815464a32 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -154,6 +154,7 @@ AddNewDriversToPackage display :
+ #	display_adapter@x86
+ 	;
+ AddNewDriversToPackage audio hmulti :
++	prose_midi
+ 	virtio_sound
+ 	;
+ AddNewDriversToPackage hyperv :
+diff --git a/src/add-ons/kernel/drivers/midi/Jamfile b/src/add-ons/kernel/drivers/midi/Jamfile
+index 5ec9e43411..50d288bb08 100644
+--- a/src/add-ons/kernel/drivers/midi/Jamfile
++++ b/src/add-ons/kernel/drivers/midi/Jamfile
+@@ -2,3 +2,4 @@ SubDir HAIKU_TOP src add-ons kernel drivers midi ;
+ 
+ SubInclude HAIKU_TOP src add-ons kernel drivers midi mpu401 ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers midi usb_midi ;
++SubInclude HAIKU_TOP src add-ons kernel drivers midi prose_midi ;
+diff --git a/src/add-ons/kernel/drivers/midi/prose_midi/Jamfile b/src/add-ons/kernel/drivers/midi/prose_midi/Jamfile
+new file mode 100644
+index 0000000000..b514b3367e
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/midi/prose_midi/Jamfile
+@@ -0,0 +1,8 @@
++SubDir HAIKU_TOP src add-ons kernel drivers midi prose_midi ;
++
++UsePrivateKernelHeaders ;
++UsePrivateHeaders drivers virtio ;
++
++KernelAddon prose_midi :
++	prose_midi.cpp
++;
+diff --git a/src/add-ons/kernel/drivers/midi/prose_midi/prose_midi.cpp b/src/add-ons/kernel/drivers/midi/prose_midi/prose_midi.cpp
+new file mode 100644
+index 0000000000..48d9e5ba90
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/midi/prose_midi/prose_midi.cpp
+@@ -0,0 +1,477 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Prose MIDI: a MIDI port whose other end is the host (hvgpu plays it through
++ * the Mac's General MIDI synth and CoreMIDI). A custom virtio device, ID 62:
++ * queue 0 carries MIDI bytes to the host, queue 1 brings bytes from it. The
++ * device file /dev/midi/prose/0 is a plain MIDI byte stream, which is what
++ * midi_server expects from any port under /dev/midi.
++ */
++
++
++#include <KernelExport.h>
++#include <device_manager.h>
++#include <kernel.h>
++#include <lock.h>
++#include <util/AutoLock.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <virtio.h>
++
++
++// The module lives under drivers/audio: the device manager searches a virtio
++// child's driver only when its node is registered, in the context of the
++// /dev/<class> scan that triggered it, and for a multimedia-class device that
++// is media_server's /dev/audio scan at boot. Where the device file is published
++// (/dev/midi/prose/0) does not depend on it.
++#define PRMD_DRIVER_MODULE_NAME		"drivers/audio/hmulti/prose_midi/driver_v1"
++#define PRMD_DEVICE_MODULE_NAME		"drivers/audio/hmulti/prose_midi/device_v1"
++#define PRMD_DEVICE_ID_GENERATOR	"prose_midi/device_id"
++#define PRMD_VIRTIO_DEVICE_ID		62	// 63 is the Prose Display; >= 64 would leave virtio-pci's modern ID range
++
++#define INFO(x...)	dprintf("prose_midi: " x)
++#define ERROR(x...)	dprintf("prose_midi: " x)
++
++#define BUFFER_COUNT		8
++#define BUFFER_SIZE			256		// per transfer, both directions
++#define RX_RING_SIZE		4096
++
++
++struct prmd_info {
++	device_node*				node;
++	int32						id;
++	char						name[64];
++	virtio_device				device;
++	virtio_device_interface*	virtio;
++	uint64						features;
++	virtio_queue				txQueue;
++	virtio_queue				rxQueue;
++
++	area_id						area;			// tx buffers then rx buffers, contiguous
++	uint8*						buffers;
++	phys_addr_t					phys;
++
++	// to the host
++	sem_id						txFree;			// one count per free tx buffer
++	spinlock					lock;
++	uint32						txFreeList[BUFFER_COUNT];
++	uint32						txFreeHead;
++	uint32						txFreeTail;
++	mutex						txLock;
++
++	// from the host
++	sem_id						rxAvailable;
++	uint8						rxRing[RX_RING_SIZE];
++	uint32						rxHead;
++	uint32						rxTail;
++	uint32						rxDropped;
++
++	int32						openCount;
++	uint32						bytesOut;
++	uint32						bytesIn;
++};
++
++
++static device_manager_info* sDeviceManager;
++
++
++//	#pragma mark - queues
++
++
++static uint8*
++prmd_tx_buffer(prmd_info* info, uint32 index)
++{
++	return info->buffers + index * BUFFER_SIZE;
++}
++
++
++static uint8*
++prmd_rx_buffer(prmd_info* info, uint32 index)
++{
++	return info->buffers + (BUFFER_COUNT + index) * BUFFER_SIZE;
++}
++
++
++static status_t
++prmd_post_rx(prmd_info* info, uint32 index)
++{
++	physical_entry entry = { info->phys + (BUFFER_COUNT + index) * BUFFER_SIZE, BUFFER_SIZE };
++	return info->virtio->queue_request_v(info->rxQueue, &entry, 0, 1, (void*)(addr_t)(index + 1));
++}
++
++
++static void
++prmd_tx_callback(void* driverCookie, void* cookie)
++{
++	prmd_info* info = (prmd_info*)cookie;
++	void* tag;
++	while (info->virtio->queue_dequeue(info->txQueue, &tag, NULL)) {
++		uint32 index = (uint32)(addr_t)tag - 1;
++		if (index >= BUFFER_COUNT)
++			continue;
++		InterruptsSpinLocker locker(info->lock);
++		info->txFreeList[info->txFreeHead % BUFFER_COUNT] = index;
++		info->txFreeHead++;
++		locker.Unlock();
++		release_sem_etc(info->txFree, 1, B_DO_NOT_RESCHEDULE);
++	}
++}
++
++
++static void
++prmd_rx_callback(void* driverCookie, void* cookie)
++{
++	prmd_info* info = (prmd_info*)cookie;
++	void* tag;
++	uint32 length;
++	while (info->virtio->queue_dequeue(info->rxQueue, &tag, &length)) {
++		uint32 index = (uint32)(addr_t)tag - 1;
++		if (index >= BUFFER_COUNT)
++			continue;
++		if (length > BUFFER_SIZE)
++			length = BUFFER_SIZE;
++		const uint8* data = prmd_rx_buffer(info, index);
++		bool added = false;
++		{
++			InterruptsSpinLocker locker(info->lock);
++			for (uint32 i = 0; i < length; i++) {
++				if (info->rxHead - info->rxTail >= RX_RING_SIZE) {
++					info->rxDropped++;
++					break;
++				}
++				info->rxRing[info->rxHead % RX_RING_SIZE] = data[i];
++				info->rxHead++;
++				added = true;
++			}
++		}
++		info->bytesIn += length;
++		prmd_post_rx(info, index);
++		if (added)
++			release_sem_etc(info->rxAvailable, 1, B_DO_NOT_RESCHEDULE);
++	}
++}
++
++
++//	#pragma mark - driver
++
++
++static float
++prmd_supports_device(device_node* parent)
++{
++	const char* bus;
++	uint16 deviceType;
++	if (sDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false) != B_OK
++		|| strcmp(bus, "virtio") != 0)
++		return 0.0f;
++	if (sDeviceManager->get_attr_uint16(parent, VIRTIO_DEVICE_TYPE_ITEM, &deviceType, true)
++			!= B_OK || deviceType != PRMD_VIRTIO_DEVICE_ID)
++		return 0.0f;
++	return 1.0f;
++}
++
++
++static status_t
++prmd_register_device(device_node* node)
++{
++	device_attr attrs[] = {
++		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, { .string = "Prose MIDI" }},
++		{ NULL }
++	};
++	return sDeviceManager->register_node(node, PRMD_DRIVER_MODULE_NAME, attrs, NULL, NULL);
++}
++
++
++static void
++prmd_teardown(prmd_info* info)
++{
++	if (info->virtio != NULL && info->txQueue != NULL)
++		info->virtio->free_interrupts(info->device);
++	if (info->txFree >= 0)
++		delete_sem(info->txFree);
++	if (info->rxAvailable >= 0)
++		delete_sem(info->rxAvailable);
++	if (info->area >= 0)
++		delete_area(info->area);
++	mutex_destroy(&info->txLock);
++	free(info);
++}
++
++
++static status_t
++prmd_init_driver(device_node* node, void** _cookie)
++{
++	prmd_info* info = (prmd_info*)calloc(1, sizeof(prmd_info));
++	if (info == NULL)
++		return B_NO_MEMORY;
++	info->node = node;
++	info->area = -1;
++	info->txFree = -1;
++	info->rxAvailable = -1;
++	B_INITIALIZE_SPINLOCK(&info->lock);
++	mutex_init(&info->txLock, "prose_midi tx");
++
++	device_node* parent = sDeviceManager->get_parent_node(node);
++	sDeviceManager->get_driver(parent, (driver_module_info**)&info->virtio, (void**)&info->device);
++	sDeviceManager->put_node(parent);
++
++	status_t status = info->virtio->negotiate_features(info->device, 0, &info->features, NULL);
++	if (status != B_OK) {
++		ERROR("feature negotiation failed: %s\n", strerror(status));
++		goto error;
++	}
++
++	{
++		void* address;
++		size_t size = ROUNDUP(2 * BUFFER_COUNT * BUFFER_SIZE, B_PAGE_SIZE);
++		info->area = create_area("prose_midi buffers", &address, B_ANY_KERNEL_ADDRESS, size,
++			B_CONTIGUOUS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
++		if (info->area < 0) {
++			status = info->area;
++			goto error;
++		}
++		physical_entry entry;
++		status = get_memory_map(address, size, &entry, 1);
++		if (status != B_OK)
++			goto error;
++		info->buffers = (uint8*)address;
++		info->phys = entry.address;
++		memset(info->buffers, 0, size);
++	}
++	info->txFree = create_sem(BUFFER_COUNT, "prose_midi tx free");
++	info->rxAvailable = create_sem(0, "prose_midi rx");
++	if (info->txFree < 0 || info->rxAvailable < 0) {
++		status = B_NO_MEMORY;
++		goto error;
++	}
++	for (uint32 i = 0; i < BUFFER_COUNT; i++)
++		info->txFreeList[i] = i;
++	info->txFreeHead = BUFFER_COUNT;
++	info->txFreeTail = 0;
++
++	{
++		virtio_queue queues[2];
++		status = info->virtio->alloc_queues(info->device, 2, queues, NULL);
++		if (status != B_OK) {
++			ERROR("queue allocation failed: %s\n", strerror(status));
++			goto error;
++		}
++		info->txQueue = queues[0];
++		info->rxQueue = queues[1];
++	}
++	status = info->virtio->setup_interrupt(info->device, NULL, info);
++	if (status == B_OK)
++		status = info->virtio->queue_setup_interrupt(info->txQueue, prmd_tx_callback, info);
++	if (status == B_OK)
++		status = info->virtio->queue_setup_interrupt(info->rxQueue, prmd_rx_callback, info);
++	if (status != B_OK) {
++		ERROR("interrupt setup failed: %s\n", strerror(status));
++		goto error;
++	}
++	for (uint32 i = 0; i < BUFFER_COUNT; i++)
++		prmd_post_rx(info, i);
++
++	INFO("ready\n");
++	*_cookie = info;
++	return B_OK;
++
++error:
++	prmd_teardown(info);
++	return status;
++}
++
++
++static void
++prmd_uninit_driver(void* cookie)
++{
++	prmd_teardown((prmd_info*)cookie);
++}
++
++
++static status_t
++prmd_register_child_devices(void* cookie)
++{
++	prmd_info* info = (prmd_info*)cookie;
++	int32 id = sDeviceManager->create_id(PRMD_DEVICE_ID_GENERATOR);
++	if (id < 0)
++		return id;
++	info->id = id;
++	snprintf(info->name, sizeof(info->name), "midi/prose/%" B_PRId32, id);
++	return sDeviceManager->publish_device(info->node, info->name, PRMD_DEVICE_MODULE_NAME);
++}
++
++
++//	#pragma mark - device
++
++
++static status_t
++prmd_init_device(void* driverCookie, void** _cookie)
++{
++	*_cookie = driverCookie;
++	return B_OK;
++}
++
++
++static void
++prmd_uninit_device(void* cookie)
++{
++}
++
++
++static status_t
++prmd_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
++{
++	prmd_info* info = (prmd_info*)deviceCookie;
++	atomic_add(&info->openCount, 1);
++	*_cookie = info;
++	return B_OK;
++}
++
++
++static status_t
++prmd_close(void* cookie)
++{
++	return B_OK;
++}
++
++
++static status_t
++prmd_free(void* cookie)
++{
++	prmd_info* info = (prmd_info*)cookie;
++	atomic_add(&info->openCount, -1);
++	return B_OK;
++}
++
++
++/*!	MIDI bytes from the host; blocks until there are some. */
++static status_t
++prmd_read(void* cookie, off_t position, void* buffer, size_t* _length)
++{
++	prmd_info* info = (prmd_info*)cookie;
++	size_t wanted = *_length;
++	while (true) {
++		uint8 chunk[64];
++		size_t count = 0;
++		{
++			InterruptsSpinLocker locker(info->lock);
++			while (count < wanted && count < sizeof(chunk) && info->rxTail != info->rxHead) {
++				chunk[count++] = info->rxRing[info->rxTail % RX_RING_SIZE];
++				info->rxTail++;
++			}
++		}
++		if (count > 0) {
++			if (user_memcpy(buffer, chunk, count) != B_OK)
++				return B_BAD_ADDRESS;
++			*_length = count;
++			return B_OK;
++		}
++		status_t status = acquire_sem_etc(info->rxAvailable, 1, B_CAN_INTERRUPT, 0);
++		if (status != B_OK) {
++			*_length = 0;
++			return status;
++		}
++	}
++}
++
++
++/*!	MIDI bytes to the host, in transfers of up to BUFFER_SIZE. */
++static status_t
++prmd_write(void* cookie, off_t position, const void* buffer, size_t* _length)
++{
++	prmd_info* info = (prmd_info*)cookie;
++	MutexLocker locker(info->txLock);
++	size_t done = 0;
++	while (done < *_length) {
++		status_t status = acquire_sem_etc(info->txFree, 1, B_CAN_INTERRUPT, 0);
++		if (status != B_OK) {
++			*_length = done;
++			return done > 0 ? B_OK : status;
++		}
++		uint32 index;
++		{
++			InterruptsSpinLocker spin(info->lock);
++			index = info->txFreeList[info->txFreeTail % BUFFER_COUNT];
++			info->txFreeTail++;
++		}
++		size_t count = min_c(*_length - done, (size_t)BUFFER_SIZE);
++		if (user_memcpy(prmd_tx_buffer(info, index), (const uint8*)buffer + done, count) != B_OK) {
++			*_length = done;
++			return B_BAD_ADDRESS;
++		}
++		physical_entry entry = { info->phys + index * BUFFER_SIZE, count };
++		status = info->virtio->queue_request_v(info->txQueue, &entry, 1, 0,
++			(void*)(addr_t)(index + 1));
++		if (status != B_OK) {
++			ERROR("queueing %" B_PRIuSIZE " bytes failed: %s\n", count, strerror(status));
++			*_length = done;
++			return status;
++		}
++		done += count;
++		info->bytesOut += count;
++	}
++	return B_OK;
++}
++
++
++static status_t
++prmd_control(void* cookie, uint32 op, void* buffer, size_t length)
++{
++	return B_DEV_INVALID_IOCTL;
++}
++
++
++module_dependency module_dependencies[] = {
++	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info**)&sDeviceManager },
++	{}
++};
++
++
++struct device_module_info sPrmdDevice = {
++	{
++		PRMD_DEVICE_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	prmd_init_device,
++	prmd_uninit_device,
++	NULL,	// remove
++
++	prmd_open,
++	prmd_close,
++	prmd_free,
++	prmd_read,
++	prmd_write,
++	NULL,	// io
++	prmd_control,
++
++	NULL,	// select
++	NULL,	// deselect
++};
++
++
++struct driver_module_info sPrmdDriver = {
++	{
++		PRMD_DRIVER_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	prmd_supports_device,
++	prmd_register_device,
++	prmd_init_driver,
++	prmd_uninit_driver,
++	prmd_register_child_devices,
++	NULL,	// rescan
++	NULL,	// removed
++};
++
++
++module_info* modules[] = {
++	(module_info*)&sPrmdDriver,
++	(module_info*)&sPrmdDevice,
++	NULL
++};
+diff --git a/src/bin/Jamfile b/src/bin/Jamfile
+index 73a978049b..4198d6f0aa 100644
+--- a/src/bin/Jamfile
++++ b/src/bin/Jamfile
+@@ -247,6 +247,7 @@ DoCatalogs filepanel
+ 
+ # PROSE fork: audio path test
+ Application prose_tone : prose_tone.cpp : be media [ TargetLibsupc++ ] ;
++Application prose_midi_test : prose_midi_test.cpp : be midi2 [ TargetLibsupc++ ] ;
+ 
+ SubInclude HAIKU_TOP src bin acpi_call ;
+ SubInclude HAIKU_TOP src bin addattr ;
+diff --git a/src/bin/prose_midi_test.cpp b/src/bin/prose_midi_test.cpp
+new file mode 100644
+index 0000000000..d2f79a8b3d
+--- /dev/null
++++ b/src/bin/prose_midi_test.cpp
+@@ -0,0 +1,101 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * prose_midi_test [--direct]: plays a scale on the Prose MIDI port. By default
++ * through the Midi Kit (BMidiRoster -> midi_server -> /dev/midi/prose/0), with
++ * --direct straight into the device file.
++ */
++
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include <Application.h>
++#include <MidiConsumer.h>
++#include <MidiProducer.h>
++#include <MidiRoster.h>
++
++
++static const uint8 kScale[] = { 60, 62, 64, 65, 67, 69, 71, 72 };
++
++
++static int
++play_direct()
++{
++	int fd = open("/dev/midi/prose/0", O_WRONLY);
++	if (fd < 0) {
++		printf("prose_midi_test: cannot open /dev/midi/prose/0: %s\n", strerror(errno));
++		return 1;
++	}
++	uint8 program[] = { 0xC0, 0 };
++	write(fd, program, sizeof(program));
++	for (size_t i = 0; i < sizeof(kScale); i++) {
++		uint8 on[] = { 0x90, kScale[i], 100 };
++		uint8 off[] = { 0x80, kScale[i], 0 };
++		write(fd, on, sizeof(on));
++		snooze(250000);
++		write(fd, off, sizeof(off));
++	}
++	close(fd);
++	printf("prose_midi_test: direct: played %" B_PRIuSIZE " notes\n", sizeof(kScale));
++	return 0;
++}
++
++
++int
++main(int argc, char** argv)
++{
++	BApplication app("application/x-vnd.prose-midi-test");
++	if (argc > 1 && strcmp(argv[1], "--direct") == 0)
++		return play_direct();
++
++	BMidiRoster* roster = BMidiRoster::MidiRoster();
++	if (roster == NULL) {
++		printf("prose_midi_test: no MIDI roster (midi_server not running?)\n");
++		return 1;
++	}
++	// give midi_server a moment to publish the ports it found under /dev/midi
++	BMidiConsumer* target = NULL;
++	for (int attempt = 0; attempt < 20 && target == NULL; attempt++) {
++		int32 id = 0;
++		BMidiConsumer* consumer;
++		while ((consumer = roster->NextConsumer(&id)) != NULL) {
++			printf("prose_midi_test: consumer %" B_PRId32 ": %s\n", consumer->ID(), consumer->Name());
++			if (target == NULL && strstr(consumer->Name(), "prose") != NULL)
++				target = consumer;
++			else
++				consumer->Release();
++		}
++		if (target == NULL)
++			snooze(500000);
++	}
++	if (target == NULL) {
++		printf("prose_midi_test: no Prose MIDI consumer found\n");
++		return 1;
++	}
++
++	BMidiLocalProducer* producer = new BMidiLocalProducer("prose_midi_test");
++	producer->Register();
++	status_t status = producer->Connect(target);
++	printf("prose_midi_test: connected to \"%s\": %s\n", target->Name(), strerror(status));
++	if (status != B_OK)
++		return 1;
++	producer->SprayProgramChange(0, 0);
++	for (size_t i = 0; i < sizeof(kScale); i++) {
++		producer->SprayNoteOn(0, kScale[i], 100);
++		snooze(250000);
++		producer->SprayNoteOff(0, kScale[i], 0);
++	}
++	snooze(300000);
++	producer->Disconnect(target);
++	producer->Unregister();
++	producer->Release();
++	target->Release();
++	printf("prose_midi_test: played %" B_PRIuSIZE " notes through the Midi Kit\n", sizeof(kScale));
++	return 0;
++}
+diff --git a/src/system/kernel/device_manager/device_manager.cpp b/src/system/kernel/device_manager/device_manager.cpp
+index e5af5341f4..693c18033f 100644
+--- a/src/system/kernel/device_manager/device_manager.cpp
++++ b/src/system/kernel/device_manager/device_manager.cpp
+@@ -324,8 +324,11 @@ publish_directories(const char* subPath)
+ 
+ 		char* leaf = name + length;
+ 		char* end = strchr(leaf, '/');
+-		if (end != NULL)
+-			end[0] = '\0';
++		if (end == NULL) {
++			// the module's own name (driver_v1): not a directory
++			continue;
++		}
++		end[0] = '\0';
+ 
+ 		path.SetTo(subPath);
+ 		path.Append(leaf);
+@@ -1661,6 +1664,7 @@ device_node::_GetNextDriverPath(void*& cookie, KPath& _path)
+ 					case PCI_audio:
+ 					case PCI_hd_audio:
+ 						_AddPath(*stack, "drivers", "audio");
++						_AddPath(*stack, "drivers", "midi");	// PROSE fork
+ 						_AddPath(*stack, "busses", "virtio");
+ 						break;
+ 					case PCI_video:
+@@ -2025,6 +2029,9 @@ device_node::Probe(const char* devicePath, uint32 updateCycle)
+ 			} else if (!strcmp(devicePath, "input")) {
+ 				matches = type == PCI_input
+ 					|| (type == PCI_data_acquisition && subType == PCI_data_acquisition_other);
++			} else if (!strcmp(devicePath, "midi")) {
++				// PROSE fork: MIDI ports on multimedia-class devices (the Prose MIDI device)
++				matches = type == PCI_multimedia;
+ 			}
+ 		} else {
+ 			// This driver does not support types, but still wants to its
+-- 
+2.54.0 (Apple Git-157)
+
