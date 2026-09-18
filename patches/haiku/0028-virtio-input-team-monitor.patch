@@ -1,0 +1,256 @@
+From 2c260312226f56de311d9dde591a337f2230aeda Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 22:32:43 +0100
+Subject: [PATCH] virtio_input: Control+Command+Delete opens the Team Monitor
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Team Monitor lived only in the keyboard add-on (PS/2 and USB), so
+under Apple's Virtualization framework, where the keyboard is hvgpu's
+virtio-input device, Control+Alt+Delete never opened it: neither typed on
+the Mac (⌃⌘⌦) nor sent with Machine > Send Keys > Control-Alt-Delete.
+
+- KeyboardHandler checks every key event the way KeyboardDevice does:
+  Delete going down while the keymap's left Command and left Control keys
+  are down shows the window, and the key events that follow go to it
+  (kMsgCtrlAltDelPressed) until the first key-up. Held, the keys count
+  down to a forced reboot; the key-up stops the count and leaves the
+  window open.
+- VirtioInputDevice owns the window like KeyboardInputDevice: created on
+  first use, SYSTEM_SHUTTING_DOWN passed on, asked to quit when the
+  device goes away.
+- The window is the keyboard add-on's: TeamMonitorWindow.cpp and
+  TeamListItem.cpp are built into this add-on from the keyboard
+  directory, and Keyboard.rdef gives it the keyboard add-on's signature,
+  under which the Team Monitor's translations are found. The loader
+  resolves an add-on's own globals to itself, so the two copies of
+  gTeamMonitorWindow don't meet.
+
+Verified: VZ, hvgpu --script keys-cad: the window is up 3 s later, still
+open and no reboot 9 s later. QEMU virtio-keyboard-pci: sendkey
+ctrl-alt-delete, then Command+Option+T and a typed shell line in the
+Terminal it opened. QEMU usb-kbd (keyboard add-on) for comparison: the
+same window. Typing under VZ: hvgpu --input-test, Escape closes the
+Deskbar menu.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ .../input_server/devices/virtio/Jamfile       | 16 ++++-
+ .../devices/virtio/VirtioInputDevice.cpp      | 72 +++++++++++++++++++
+ .../devices/virtio/VirtioInputDevice.h        | 12 ++++
+ 3 files changed, 98 insertions(+), 2 deletions(-)
+
+diff --git a/src/add-ons/input_server/devices/virtio/Jamfile b/src/add-ons/input_server/devices/virtio/Jamfile
+index 3cd8c20e4c..12a0bd2df3 100644
+--- a/src/add-ons/input_server/devices/virtio/Jamfile
++++ b/src/add-ons/input_server/devices/virtio/Jamfile
+@@ -1,7 +1,19 @@
+ SubDir HAIKU_TOP src add-ons input_server devices virtio ;
+ 
+-UsePrivateHeaders input virtio shared ;
++UsePrivateHeaders input interface shared tracker virtio ;
++UsePrivateSystemHeaders ;
++
++# Control+Command+Delete opens the keyboard add-on's Team Monitor: built from
++# its sources, and with its resources, whose signature finds the Team Monitor's
++# translations.
++SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src add-ons input_server devices keyboard ] ;
++
++AddResources <input>virtio : Keyboard.rdef ;
+ 
+ Addon <input>virtio :
+ 	VirtioInputDevice.cpp
+-	: be input_server shared [ TargetLibsupc++ ] ;
++
++	TeamMonitorWindow.cpp
++	TeamListItem.cpp
++
++	: be input_server shared localestub [ TargetLibsupc++ ] ;
+diff --git a/src/add-ons/input_server/devices/virtio/VirtioInputDevice.cpp b/src/add-ons/input_server/devices/virtio/VirtioInputDevice.cpp
+index 52ddf65194..1ef63da466 100644
+--- a/src/add-ons/input_server/devices/virtio/VirtioInputDevice.cpp
++++ b/src/add-ons/input_server/devices/virtio/VirtioInputDevice.cpp
+@@ -19,9 +19,12 @@
+ #include <Directory.h>
+ #include <Entry.h>
+ #include <EvdevKeymap.h>
++#include <InputServerTypes.h>
+ #include <ObjectList.h>
+ #include <Path.h>
+ 
++#include "TeamMonitorWindow.h"
++
+ 
+ //#define TRACE_VIRTIO_INPUT_DEVICE
+ #ifdef TRACE_VIRTIO_INPUT_DEVICE
+@@ -37,6 +40,8 @@ enum {
+ 	kWatcherThreadPriority = B_FIRST_REAL_TIME_PRIORITY + 4,
+ };
+ 
++static const uint32 kDeleteKey = 0x34;
++
+ 
+ template<typename Type>
+ inline static void SetBit(Type &val, int bit) {val |= Type(1) << bit;}
+@@ -151,11 +156,17 @@ static void WriteInputPacket(const VirtioInputPacket &pkt)
+ 
+ 
+ VirtioInputDevice::VirtioInputDevice()
++	:
++	fTeamMonitorWindow(NULL)
+ {
+ }
+ 
+ VirtioInputDevice::~VirtioInputDevice()
+ {
++	if (fTeamMonitorWindow != NULL) {
++		fTeamMonitorWindow->PostMessage(B_QUIT_REQUESTED);
++		fTeamMonitorWindow = NULL;
++	}
+ }
+ 
+ 
+@@ -264,6 +275,41 @@ VirtioInputDevice::Control(const char* name, void* cookie, uint32 command,
+ }
+ 
+ 
++status_t
++VirtioInputDevice::SystemShuttingDown()
++{
++	if (fTeamMonitorWindow != NULL)
++		fTeamMonitorWindow->PostMessage(SYSTEM_SHUTTING_DOWN);
++
++	return B_OK;
++}
++
++
++// The Team Monitor is the keyboard add-on's (TeamMonitorWindow.cpp is built
++// into this add-on too), shown and fed the way KeyboardInputDevice does it.
++void
++VirtioInputDevice::ShowTeamMonitor()
++{
++	if (fTeamMonitorWindow == NULL)
++		fTeamMonitorWindow = new(std::nothrow) TeamMonitorWindow();
++
++	if (fTeamMonitorWindow != NULL)
++		fTeamMonitorWindow->Enable();
++}
++
++
++void
++VirtioInputDevice::CtrlAltDelPressed(bool keyDown)
++{
++	if (fTeamMonitorWindow == NULL)
++		return;
++
++	BMessage message(kMsgCtrlAltDelPressed);
++	message.AddBool("key down", keyDown);
++	fTeamMonitorWindow->PostMessage(&message);
++}
++
++
+ //#pragma mark VirtioInputHandler
+ 
+ 
+@@ -366,6 +412,7 @@ KeyboardHandler::KeyboardHandler(VirtioInputDevice* dev, const char* name)
+ 	VirtioInputHandler(dev, name, B_KEYBOARD_DEVICE),
+ 	fPendingUnmappedCount(0),
+ 	fActiveDeadKey(0),
++	fCtrlAltDelPressed(false),
+ 	fRepeatKey(0),
+ 	fRepeatThread(-1),
+ 	fRepeatThreadSem(-1)
+@@ -396,6 +443,7 @@ KeyboardHandler::Reset()
+ 	memcpy(&fState, &fNewState, sizeof(KeyboardState));
+ 	fPendingUnmappedCount = 0;
+ 	fActiveDeadKey = 0;
++	fCtrlAltDelPressed = false;
+ 	_StopRepeating();
+ }
+ 
+@@ -540,6 +588,8 @@ KeyboardHandler::_RepeatThread(void *arg)
+ status_t
+ KeyboardHandler::_SendKeyEvent(uint32 key, bool pressed)
+ {
++	_CheckTeamMonitor(key, pressed);
++
+ 	uint8 newDeadKey = 0;
+ 	if (fActiveDeadKey == 0 || !pressed)
+ 		newDeadKey = fKeymap.ActiveDeadKey(key, fNewState.modifiers);
+@@ -610,6 +660,28 @@ KeyboardHandler::_SendKeyEvent(uint32 key, bool pressed)
+ }
+ 
+ 
++// Control+Command+Delete opens the Team Monitor, checked on the key state
++// like the keyboard add-on does. The key events that follow go to the window
++// until the first key-up: while the keys are held it counts down to a forced
++// reboot, and the key-up stops the count and leaves the window open.
++void
++KeyboardHandler::_CheckTeamMonitor(uint32 key, bool pressed)
++{
++	if (pressed && key == kDeleteKey
++		&& _IsKeyPressed(fNewState, fKeymap.KeyForModifier(B_LEFT_COMMAND_KEY))
++		&& _IsKeyPressed(fNewState, fKeymap.KeyForModifier(B_LEFT_CONTROL_KEY))) {
++		Device()->ShowTeamMonitor();
++		fCtrlAltDelPressed = true;
++	}
++
++	if (fCtrlAltDelPressed) {
++		Device()->CtrlAltDelPressed(pressed);
++		if (!pressed)
++			fCtrlAltDelPressed = false;
++	}
++}
++
++
+ void
+ KeyboardHandler::_StateChanged()
+ {
+diff --git a/src/add-ons/input_server/devices/virtio/VirtioInputDevice.h b/src/add-ons/input_server/devices/virtio/VirtioInputDevice.h
+index 693263d7c7..ff333ddebb 100644
+--- a/src/add-ons/input_server/devices/virtio/VirtioInputDevice.h
++++ b/src/add-ons/input_server/devices/virtio/VirtioInputDevice.h
+@@ -13,6 +13,7 @@
+ 
+ 
+ struct VirtioInputPacket;
++class TeamMonitorWindow;
+ 
+ 
+ struct KeyboardState {
+@@ -44,6 +45,15 @@ public:
+ 
+ 	virtual	status_t		Control(const char* name, void* cookie,
+ 								uint32 command, BMessage* message);
++
++	virtual	status_t		SystemShuttingDown();
++
++			void			ShowTeamMonitor();
++			void			CtrlAltDelPressed(bool keyDown);
++
++private:
++			TeamMonitorWindow*
++							fTeamMonitorWindow;
+ };
+ 
+ 
+@@ -101,6 +111,7 @@ private:
+ 	static	status_t		_RepeatThread(void* arg);
+ 
+ 			status_t		_SendKeyEvent(uint32 key, bool pressed);
++			void			_CheckTeamMonitor(uint32 key, bool pressed);
+ 
+ 			void			_StateChanged();
+ 
+@@ -110,6 +121,7 @@ private:
+ 			bool			fPendingUnmappedPressed[8];
+ 			uint8			fPendingUnmappedCount;
+ 			uint8			fActiveDeadKey;
++			bool			fCtrlAltDelPressed;
+ 			BKeymap			fKeymap;
+ 			BLocker         fKeymapLock;
+ 			bigtime_t		fRepeatDelay;
+-- 
+2.54.0 (Apple Git-157)
+
