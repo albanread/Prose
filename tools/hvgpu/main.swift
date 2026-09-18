@@ -21,6 +21,7 @@
 //   --resize-after N WxH    resize our window after N seconds (tests MODE_HINT / live resize)
 //   --resize-drag N WxH     animate the window to WxH from N seconds on, like a hand drag (40 steps)
 //   --commit-stats          s2: list the most frequently committed rects with each stats line
+//   --no-snow               don't show analogue TV static while the guest has no picture
 //   --input own|vz          own: our virtio-input keyboard + tablet, window entirely ours (default);
 //                           vz: VZ's USB keyboard/pointer + virtio-gpu + VZVirtualMachineView
 //   --input-test            own input: click the Deskbar leaf, Escape, park the pointer (screenshots)
@@ -158,7 +159,76 @@ fragment float4 fmain(VOut in [[stage_in]],
     uint v = fb[p.offsetWords + y * p.strideWords + x];
     return float4(float((v >> 16) & 0xFF), float((v >> 8) & 0xFF), float(v & 0xFF), 255.0) / 255.0;
 }
+
+// No signal: an untuned analogue TV. Snow is luminance noise smeared
+// horizontally (a scanline is a band-limited continuous signal, so the grain
+// is wider than it is tall - that is what makes it read as analogue rather
+// than as digital dither), under scanlines, a slow hum bar, rare vertical-hold
+// slips and a little corner falloff.
+struct SnowParams { float2 size; float time; uint frame; float scale; };
+
+static inline float hash(uint3 v) {
+    uint h = v.x * 0x8da6b343u + v.y * 0xd8163841u + v.z * 0xcb1ab31fu;
+    h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12; h *= 0x297a2d39u; h ^= h >> 15;
+    return float(h & 0x00ffffffu) / float(0x01000000u);
+}
+
+fragment float4 fsnow(VOut in [[stage_in]], constant SnowParams &p [[buffer(0)]]) {
+    // Work in logical pixels: on a Retina drawable, hashing per device pixel
+    // halves the grain and it stops looking like a tube.
+    float2 px = in.uv * p.size / max(p.scale, 1.0);
+
+    // vertical hold: every few seconds the picture slips for a frame or two
+    float slipSeed = hash(uint3(0u, uint(p.time * 3.0), 99u));
+    if (slipSeed > 0.97)
+        px.y += (slipSeed - 0.97) * 600.0;
+
+    // snow: three horizontal taps, so the grain is ~3px wide and 1px tall
+    uint row = uint(max(px.y, 0.0));
+    uint col = uint(max(px.x, 0.0));
+    float n = 0.0;
+    n += hash(uint3(col, row, p.frame)) * 0.5;
+    n += hash(uint3(col - 1u, row, p.frame)) * 0.25;
+    n += hash(uint3(col + 1u, row, p.frame)) * 0.25;
+
+    // snow sits in the greys with plenty of contrast, plus bright sparkle
+    float luma = 0.10 + pow(n, 0.85) * 0.82;
+    float sparkle = hash(uint3(col, row, p.frame ^ 0x5bd1u));
+    if (sparkle > 0.990)
+        luma = min(1.0, luma + 0.5);
+
+    // hum bar: a wide soft band drifting slowly down the screen
+    float bar = fract(in.uv.y - p.time * 0.08);
+    luma *= 1.0 + 0.16 * exp(-pow((bar - 0.5) * 3.2, 2.0));
+
+    // scanlines
+    luma *= (row & 1u) == 0u ? 1.0 : 0.88;
+
+    // a hint of chroma noise, as a colour decoder guessing at nothing
+    float3 rgb = float3(luma);
+    float chroma = hash(uint3(col, row, p.frame ^ 0x2f19u));
+    if (chroma > 0.90) {
+        float3 tint = float3(hash(uint3(col, row, p.frame ^ 1u)),
+                             hash(uint3(col, row, p.frame ^ 2u)),
+                             hash(uint3(col, row, p.frame ^ 3u)));
+        rgb = mix(rgb, rgb * (0.6 + tint * 0.8), 0.35);
+    }
+
+    // corner falloff, like light dropping off at the edge of the tube
+    float2 c = in.uv * 2.0 - 1.0;
+    rgb *= 1.0 - 0.28 * dot(c, c) * 0.5;
+
+    return float4(rgb, 1.0);
+}
 """
+
+struct SnowParams {
+    var width: Float = 0
+    var height: Float = 0
+    var time: Float = 0
+    var frame: UInt32 = 0
+    var scale: Float = 1
+}
 
 struct ShaderParams {
     var width: UInt32
@@ -631,6 +701,7 @@ final class Presenter: NSObject {
     var queue: MTLCommandQueue!
     var buffer: MTLBuffer!
     var pipeline: MTLRenderPipelineState!
+    var snowPipeline: MTLRenderPipelineState!
     var layer: CAMetalLayer!
     var window: NSWindow!
     var view: MetalView!
@@ -649,6 +720,8 @@ final class Presenter: NSObject {
             desc.fragmentFunction = library.makeFunction(name: "fmain")
             desc.colorAttachments[0].pixelFormat = .bgra8Unorm
             pipeline = try device.makeRenderPipelineState(descriptor: desc)
+            desc.fragmentFunction = library.makeFunction(name: "fsnow")
+            snowPipeline = try device.makeRenderPipelineState(descriptor: desc)
         } catch {
             log("FATAL: shader: \(error)")
             exit(1)
@@ -728,6 +801,7 @@ final class Presenter: NSObject {
     }
 
     private var ticks = 0
+    private var noSignalFrame: UInt32 = 0
 
     @objc func tick(_ link: CADisplayLink) {
         ticks += 1
@@ -739,9 +813,15 @@ final class Presenter: NSObject {
         if layer.drawableSize.width != view.bounds.width * window.backingScaleFactor {
             updateDrawableSize()
         }
-        // Nothing flushed yet: keep the overlay hidden so VZ's own display shows.
-        if gpu.seq.withLock({ $0 }) == 0 { return }
-        if gpu.seq.withLock({ $0 }) == lastPresentedSeq { return }
+        // A picture needs a mode and at least one commit; anything else is no signal.
+        let flushed = gpu.seq.withLock { $0 }
+        let hasPicture = flushed > 0 && surface.width > 0 && surface.height > 0
+        // No signal showsstatic, which animates, so it draws every frame; a picture
+        // is only redrawn when the guest has committed something new. With VZ's own
+        // display underneath (--input vz) we stay out of the way until it has.
+        let showNoSignal = !hasPicture && ownInput && !args.contains("--no-snow")
+        if !hasPicture && !showNoSignal { return }
+        if hasPicture && flushed == lastPresentedSeq { return }
         if view.isHidden {
             view.isHidden = false
             log("first frame from our display device: showing the Metal overlay")
@@ -750,27 +830,31 @@ final class Presenter: NSObject {
         guard let drawable = layer.nextDrawable() else { return }
         presentLock.lock()
         defer { presentLock.unlock() }
-        lastPresentedSeq = gpu.seq.withLock { $0 }
+        lastPresentedSeq = flushed
         let cb = queue.makeCommandBuffer()!
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = drawable.texture
         rp.colorAttachments[0].storeAction = .store
-        if surface.width > 0 && surface.height > 0 {
-            rp.colorAttachments[0].loadAction = .dontCare
-            let enc = cb.makeRenderCommandEncoder(descriptor: rp)!
+        rp.colorAttachments[0].loadAction = .dontCare
+        let enc = cb.makeRenderCommandEncoder(descriptor: rp)!
+        if hasPicture {
             var p = params(targetWidth: Double(layer.drawableSize.width),
                            targetHeight: Double(layer.drawableSize.height), surface: surface)
             enc.setRenderPipelineState(pipeline)
             enc.setFragmentBuffer(buffer, offset: 0, index: 0)
             enc.setFragmentBytes(&p, length: MemoryLayout<ShaderParams>.stride, index: 1)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            enc.endEncoding()
         } else {
-            // no scanout (s2: between SET_MODE and the first commit): black
-            rp.colorAttachments[0].loadAction = .clear
-            rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-            cb.makeRenderCommandEncoder(descriptor: rp)!.endEncoding()
+            noSignalFrame &+= 1
+            var p = SnowParams(width: Float(layer.drawableSize.width),
+                               height: Float(layer.drawableSize.height),
+                               time: Float(link.timestamp - startTime.timeIntervalSince1970),
+                               frame: noSignalFrame,
+                               scale: Float(window.backingScaleFactor))
+            enc.setRenderPipelineState(snowPipeline)
+            enc.setFragmentBytes(&p, length: MemoryLayout<SnowParams>.stride, index: 0)
         }
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        enc.endEncoding()
         cb.present(drawable)
         cb.commit()
         cb.waitUntilCompleted()     // the surface may be written again only after the GPU read it
