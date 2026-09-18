@@ -164,8 +164,9 @@ def entries(value):
 
 
 def entry_name(entry):
-	"""'lib:libfoo >= 1.2' -> 'lib:libfoo'"""
-	return re.split(r'\s|[<>=!]', entry.strip(), maxsplit=1)[0]
+	"""'lib:libFoo >= 1.2' -> 'lib:libfoo' (Haiku compares resolvable names
+	case-insensitively; the package tool stores them lowercased)"""
+	return re.split(r'\s|[<>=!]', entry.strip(), maxsplit=1)[0].lower()
 
 
 def natural_key(version):
@@ -1047,7 +1048,8 @@ class Builder:
 		env = dict(os.environ, GIT_COMMITTER_NAME='prosepkg',
 			GIT_COMMITTER_EMAIL='packages@prose.local', GIT_AUTHOR_NAME='prosepkg',
 			GIT_AUTHOR_EMAIL='packages@prose.local')
-		if not (sdir / '.git').exists():
+		implicit = not (sdir / '.git').exists()
+		if implicit:
 			run(['git', 'init', '-q'], cwd=sdir, log=log)
 			run(['git', 'add', '-A', '-f', '.'], cwd=sdir, log=log)
 			run(['git', 'commit', '-q', '--no-verify', '-m', 'import'], cwd=sdir, env=env, log=log)
@@ -1063,6 +1065,10 @@ class Builder:
 					cwd=sdir, log=log)
 				run(['git', 'commit', '-q', '--no-verify', '-m', 'patch ' + patch],
 					cwd=sdir, env=env, log=log)
+		if implicit:
+			# the repository only served to apply the patches; builds that find
+			# one version themselves from it (flac: "git-709e212 <date>")
+			rmtree(sdir / '.git')
 
 	def _run_phase(self, port, work, sources, phase, log):
 		if not port.keys.get('PHASE_' + phase):
@@ -1149,6 +1155,10 @@ class Builder:
 						str(entry)], capture_output=True)
 			out = REPO / port.hpkg_name(package, suffix)
 			out.unlink(missing_ok=True)
+			for older in REPO.glob(package + '-*.hpkg'):
+				if older.name.split('-')[0] == package:
+					log.write('replacing %s\n' % older.name)
+					older.unlink()
 			run([host_tool('package'), 'create', out], cwd=root, log=log)
 			hpkgs.append(out.name)
 		return hpkgs
@@ -1276,6 +1286,142 @@ def cmd_info(args):
 			print('  build requires %-40s %s' % (e, 'base' if p is None else p))
 
 
+def repo_packages():
+	"""{package name: (hpkg path, package info)} for the built packages."""
+	result = {}
+	for hpkg in sorted(REPO.glob('*.hpkg')):
+		info = package_info(hpkg)
+		result[info['name'][0]] = (hpkg, info)
+	return result
+
+
+def install_closure(specs, image_names):
+	"""Package files to install for the given package or port names: them,
+	plus everything they require that the image does not provide yet -- from
+	the built packages, or system packages the image lacks (e.g. grep)."""
+	packages = repo_packages()
+	provides = {}
+	for name, (hpkg, info) in packages.items():
+		for p in info.get('provides', []) + [name]:
+			provides.setdefault(entry_name(p), name)
+	system = {}
+	for hpkg in sorted((BASE / 'packages').glob('*.hpkg')):
+		info = package_info(hpkg)
+		system[info['name'][0]] = (hpkg, info)
+	in_image = set(image_names)
+	system_provides = {}
+	for name, (hpkg, info) in system.items():
+		for p in info.get('provides', []) + [name]:
+			if name in image_names:
+				in_image.add(entry_name(p))
+			system_provides.setdefault(entry_name(p), name)
+	results = load_json(RESULTS, {})
+	todo = []
+	for spec in specs:
+		if spec in packages:
+			todo.append(spec)
+		elif results.get(spec, {}).get('status') == 'built':
+			# a port: its main package
+			main = results[spec]['packages'][0]
+			todo.append(package_info(REPO / main)['name'][0])
+		else:
+			raise BuildError('%s is neither a built package nor a built port' % spec)
+	closure = []
+	while todo:
+		name = todo.pop(0)
+		if name in closure:
+			continue
+		closure.append(name)
+		info = packages[name][1] if name in packages else system[name][1]
+		for req in info.get('requires', []):
+			n = entry_name(req)
+			if n in in_image:
+				continue
+			if n in provides:
+				todo.append(provides[n])
+			elif n in system_provides:
+				todo.append(system_provides[n])
+			else:
+				raise BuildError('%s requires %s, which nothing built provides' % (name, n))
+	return [packages[n][0] if n in packages else system[n][0] for n in closure]
+
+
+def bfs_partition(image):
+	"""Byte range of the BFS partition (MBR type 0xEB) of a Haiku image."""
+	with open(image, 'rb') as f:
+		mbr = f.read(512)
+	for i in range(4):
+		entry = mbr[446 + 16 * i:462 + 16 * i]
+		if entry[4] == 0xEB:
+			lba = int.from_bytes(entry[8:12], 'little')
+			count = int.from_bytes(entry[12:16], 'little')
+			return lba * 512, (lba + count) * 512
+	raise BuildError('%s has no BFS partition' % image)
+
+
+def bfs_shell(image, commands, check=True):
+	start, end = bfs_partition(image)
+	proc = subprocess.run([host_tool('bfs_shell'), '--start-offset', str(start),
+		'--end-offset', str(end), str(image)], input='\n'.join(commands + ['quit']) + '\n',
+		capture_output=True, text=True)
+	if check and proc.returncode != 0:
+		raise BuildError('bfs_shell failed on %s: %s' % (image, proc.stdout[-400:] + proc.stderr[-400:]))
+	return proc.stdout
+
+
+def bfs_listing(image, directory):
+	"""{file name: size} of a directory in the image."""
+	out = bfs_shell(image, ['ls ' + directory])
+	files = {}
+	for line in out.splitlines():
+		parts = line.replace('fssh:/> ', '').split()
+		# -rw-r--r--  0  0    34433 2026-09-18 19:55:46 name
+		if len(parts) >= 7 and parts[0].startswith('-'):
+			files[' '.join(parts[6:])] = int(parts[3])
+	return files
+
+
+def cmd_install(args):
+	"""Copy packages (and their requirements) into a Haiku image's
+	system/packages; packagefs activates them at the next boot. Other
+	versions of the same packages are removed first."""
+	image = Path(args.image)
+	packages_dir = '/myfs/system/packages'
+	activation = packages_dir + '/administrative/activated-packages'
+	existing = bfs_listing(image, packages_dir)
+	hpkgs = install_closure(args.packages,
+		{f.split('-')[0] for f in existing if f.endswith('.hpkg')})
+	ours = {h.name.split('-')[0] for h in hpkgs}
+	stale = sorted(f for f in existing if f.endswith('.hpkg') and f.split('-')[0] in ours)
+	if stale:
+		# never cp over an existing file: fs_shell leaks a reference then
+		# and cannot unmount cleanly
+		bfs_shell(image, ['rm %s/%s' % (packages_dir, f) for f in stale] + ['sync'])
+	has_activation = 'activated-packages' in bfs_listing(image, packages_dir + '/administrative') \
+		if 'administrative' in bfs_shell(image, ['ls ' + packages_dir]) else False
+	commands = ['cp :%s %s/%s' % (h, packages_dir, h.name) for h in hpkgs]
+	if has_activation:
+		# only listed packages activate: replace stale names, append ours
+		current = bfs_shell(image, ['cat ' + activation])
+		names = [l.strip() for l in current.splitlines()
+			if l.strip().endswith('.hpkg') and l.strip() not in stale]
+		names += [h.name for h in hpkgs if h.name not in names]
+		tmp = CACHE / 'activated-packages'
+		write_file(tmp, '\n'.join(names) + '\n')
+		bfs_shell(image, ['rm ' + activation, 'sync'])
+		commands.append('cp :%s %s' % (tmp, activation))
+	bfs_shell(image, commands + ['sync'])
+	installed = bfs_listing(image, packages_dir)
+	wrong = [h.name for h in hpkgs if installed.get(h.name) != h.stat().st_size]
+	if wrong:
+		raise BuildError('not in the image intact after copying: %s' % ', '.join(wrong))
+	say('installed into %s (%s)%s:' % (image, 'verified', ', activation file updated'
+		if has_activation else ''))
+	for h in hpkgs:
+		print('  %s%s' % (h.name, '  (replaced an older version)' if h.name.split('-')[0] in
+			{s.split('-')[0] for s in stale} and h.name not in stale else ''))
+
+
 def cmd_index(args):
 	recipes, index = recipe_index(refresh=args.refresh)
 	print('%d ports, %d provided names' % (len(recipes), len(index)))
@@ -1312,6 +1458,10 @@ def main():
 	b.add_argument('--force-arch', action='store_true')
 	b.add_argument('--keep-work', action='store_true')
 	b.set_defaults(func=cmd_info)
+	b = sub.add_parser('install', help='install built packages (+ requirements) into a Haiku image')
+	b.add_argument('image')
+	b.add_argument('packages', nargs='+', help='package or port names')
+	b.set_defaults(func=cmd_install)
 	b = sub.add_parser('index', help='(re)evaluate all recipes')
 	b.add_argument('--refresh', action='store_true')
 	b.set_defaults(func=cmd_index)

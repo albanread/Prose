@@ -106,7 +106,10 @@ runConfigure()
 		buildSpec="--build=$proseBuildTriple --host=$effectiveTargetMachineTriple"
 	fi
 
-	$configure $dirArgs $buildSpec "$@"
+	# the compiler under its plain name, as in a native build: configure
+	# records it in installed scripts (libtool, *-config), which must work
+	# on Haiku (the plain names are the cross wrappers here)
+	CC="${CC:-gcc}" CXX="${CXX:-g++}" $configure $dirArgs $buildSpec "$@"
 }
 
 cmake()

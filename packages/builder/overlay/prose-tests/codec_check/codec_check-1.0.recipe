@@ -1,0 +1,84 @@
+SUMMARY="Checks that the Prose codec libraries load and work"
+DESCRIPTION="codec_check links every codec library of the Prose package set \
+(image: libpng, libjpeg-turbo, libwebp, libtiff, giflib, OpenJPEG, Little CMS; \
+audio/video: Ogg, Vorbis, FLAC, Opus, Speex, mpg123, LAME, Theora, libvpx, \
+dav1d, WavPack; libiconv). It prints each library's version and runs small \
+encode/decode round trips in memory. Exit status: number of failed checks."
+COPYRIGHT="2026 Prose"
+LICENSE="MIT"
+REVISION="2"
+ARCHITECTURES="arm64"
+
+PROVIDES="
+	codec_check = $portVersion
+	cmd:codec_check = $portVersion
+	"
+REQUIRES="
+	haiku
+	lib:libpng16
+	lib:libturbojpeg
+	lib:libwebp
+	lib:libtiff
+	lib:libgif
+	lib:libopenjp2
+	lib:liblcms2
+	lib:libogg
+	lib:libvorbis
+	lib:libvorbisenc
+	lib:libflac
+	lib:libopus
+	lib:libspeex
+	lib:libspeexdsp
+	lib:libmpg123
+	lib:libmp3lame
+	lib:libtheora
+	lib:libtheoraenc
+	lib:libvpx
+	lib:libdav1d
+	lib:libwavpack
+	lib:libiconv
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	devel:libpng16
+	devel:libturbojpeg
+	devel:libwebp
+	devel:libtiff
+	devel:libgif
+	devel:libopenjp2
+	devel:liblcms2
+	devel:libogg
+	devel:libvorbis
+	devel:libflac
+	devel:libopus
+	devel:libspeex
+	devel:libspeexdsp
+	devel:libmpg123
+	devel:libmp3lame
+	devel:libtheora
+	devel:libvpx
+	devel:libdav1d
+	devel:libwavpack
+	devel:libiconv
+	"
+BUILD_PREREQUIRES="
+	cmd:gcc
+	"
+
+BUILD()
+{
+	gcc -O2 -std=gnu11 -Wall -o codec_check \
+		$portDir/additional-files/codec_check.c \
+		-I$includeDir/libpng16 -I$includeDir/openjpeg-2.5 \
+		-lpng16 -lturbojpeg -lwebp -ltiff -lgif -lopenjp2 -llcms2 \
+		-logg -lvorbis -lvorbisenc -lFLAC -lopus -lspeex -lspeexdsp \
+		-lmpg123 -lmp3lame -ltheora -ltheoraenc -lvpx -ldav1d -lwavpack \
+		-liconv -lm
+}
+
+INSTALL()
+{
+	mkdir -p $binDir
+	cp codec_check $binDir/
+}
