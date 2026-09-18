@@ -1,0 +1,1192 @@
+From d4ad96fa9f8a36f62c5d105d1cc057f75461691f Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 15:03:27 +0100
+Subject: [PATCH] Prose Display (S2): accelerant, app_server commit hook,
+ desktop on S2
+
+Accelerant.h: new optional hook B_COMMIT_RECTANGLES (0x500) with
+commit_rectangles(const fill_rect_params*, uint32): app_server tells the
+accelerant which frame buffer rectangles it has finished drawing, for
+displays that present on demand.
+
+app_server: AccelerantHWInterface fetches the hook and calls it from
+_CopyBackToFront() (after the back-to-front copy) and _DrawCursor() (the
+software cursor bypasses the back buffer). No behaviour change for
+accelerants without the hook.
+
+prose_display.accelerant: the frame buffer app_server draws into is the
+device's surface pool itself, cloned from the driver (PRDS_CLONE_POOL keeps
+the write-back memory type), so drawing is zero copy. The hook collects
+rectangles (collapsing to a bounding box beyond 64) and a commit thread
+sends them once per vsync, waiting on the retrace semaphore with a 20 ms
+timeout so the desktop keeps updating when the host has no vsync (headless,
+display asleep). Mode list: the host's preferred size plus the standard
+modes up to the maximum surface; B_GET_PREFERRED_DISPLAY_MODE follows the
+host window.
+
+prose_display driver: ioctls for the accelerant (GET_SHARED_INFO,
+GET_DEVICE_NAME, CLONE_POOL, SET_MODE with a display_mode, COMMIT with
+up to 64 rects, ENABLE_EVENTS), B_GET_ACCELERANT_SIGNATURE, the boot
+test pattern stops at first open, VSYNC releases the retrace semaphore
+only for waiters (no runaway count), and the semaphore's owner becomes the
+opener's team (user space may not acquire kernel-owned semaphores; it is
+recreated when that team is gone).
+
+Verified on VZ: the Haiku desktop with cursor renders through the S2
+device; boot drawing coalesces to at most one commit per vsync, an idle
+desktop commits ~4 times/s.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ build/jam/packages/Haiku                      |   1 +
+ headers/os/add-ons/graphics/Accelerant.h      |   8 +
+ .../graphics/prose_display/prose_display.h    |  46 ++-
+ src/add-ons/accelerants/Jamfile               |   1 +
+ src/add-ons/accelerants/prose_display/Jamfile |  13 +
+ .../accelerants/prose_display/accelerant.cpp  | 331 ++++++++++++++++++
+ .../accelerants/prose_display/accelerant.h    |  43 +++
+ .../prose_display/accelerant_protos.h         |  44 +++
+ .../accelerants/prose_display/hooks.cpp       |  53 +++
+ .../accelerants/prose_display/mode.cpp        | 185 ++++++++++
+ .../graphics/prose_display/prose_display.cpp  | 111 +++++-
+ .../interface/local/AccelerantHWInterface.cpp |  57 ++-
+ .../interface/local/AccelerantHWInterface.h   |   3 +
+ 13 files changed, 858 insertions(+), 38 deletions(-)
+ create mode 100644 src/add-ons/accelerants/prose_display/Jamfile
+ create mode 100644 src/add-ons/accelerants/prose_display/accelerant.cpp
+ create mode 100644 src/add-ons/accelerants/prose_display/accelerant.h
+ create mode 100644 src/add-ons/accelerants/prose_display/accelerant_protos.h
+ create mode 100644 src/add-ons/accelerants/prose_display/hooks.cpp
+ create mode 100644 src/add-ons/accelerants/prose_display/mode.cpp
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 544030965f..0c91e5b55f 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -366,6 +366,7 @@ AddBootModuleSymlinksToPackage
+ # add-ons
+ AddFilesToPackage add-ons accelerants :
+ 	framebuffer.accelerant
++	prose_display.accelerant
+ 	virtio_gpu.accelerant
+ 	$(SYSTEM_ADD_ONS_ACCELERANTS) ;
+ AddFilesToPackage add-ons locale catalogs :
+diff --git a/headers/os/add-ons/graphics/Accelerant.h b/headers/os/add-ons/graphics/Accelerant.h
+index b386ef0a16..d1de12e3d2 100644
+--- a/headers/os/add-ons/graphics/Accelerant.h
++++ b/headers/os/add-ons/graphics/Accelerant.h
+@@ -78,6 +78,9 @@ enum {
+ 	B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT,	/* optional.
+ 		NOTE: source and dest may NOT overlap */
+ 
++	/* frame buffer presentation (PROSE fork) */
++	B_COMMIT_RECTANGLES = 0x500,		/* optional: these frame buffer rectangles changed */
++
+ 	/* 3D acceleration */
+ 	B_ACCELERANT_PRIVATE_START = (int)0x80000000
+ };
+@@ -339,6 +342,11 @@ typedef void (*screen_to_screen_transparent_blit)(engine_token* et,
+ typedef void (*screen_to_screen_scaled_filtered_blit)(engine_token* et,
+ 	scaled_blit_params* list, uint32 count);
+ 
++/* PROSE fork: app_server has finished drawing these rectangles of the frame
++   buffer; a display that presents on demand (a shared surface) sends them on. */
++typedef status_t (*commit_rectangles)(const fill_rect_params* list,
++	uint32 count);
++
+ typedef void (*fill_span)(engine_token* et, uint32 color, uint16* list,
+ 	uint32 count);
+ /*
+diff --git a/headers/private/graphics/prose_display/prose_display.h b/headers/private/graphics/prose_display/prose_display.h
+index 30bd14af57..8167628b4d 100644
+--- a/headers/private/graphics/prose_display/prose_display.h
++++ b/headers/private/graphics/prose_display/prose_display.h
+@@ -12,6 +12,7 @@
+ 
+ #include <SupportDefs.h>
+ #include <Drivers.h>
++#include <Accelerant.h>
+ 
+ 
+ #define PRDS_VIRTIO_DEVICE_ID		63
+@@ -127,28 +128,39 @@ struct prds_event {
+ } _PACKED;
+ 
+ 
+-/* Shared with the accelerant (cloned area). */
++/* Shared between the driver and the accelerant (the accelerant clones it
++   read/write; the driver's own area is kernel-only). */
+ struct prds_shared_info {
+-	area_id		pool_area;
+-	uint64		pool_size;
+-	uint32		max_width;
+-	uint32		max_height;
+-	uint32		pref_width;
+-	uint32		pref_height;
+-	uint32		refresh_mhz;
+-	uint32		stride_align;
+-	sem_id		retrace_sem;
+-	uint32		mode_width;
+-	uint32		mode_height;
+-	uint32		mode_stride;
+-	uint64		mode_offset;
++	area_id			pool_area;			/* the surface pool; PRDS_CLONE_POOL clones it */
++	uint64			pool_size;
++	uint32			max_width;
++	uint32			max_height;
++	uint32			pref_width;			/* host window size, updated by MODE_HINT */
++	uint32			pref_height;
++	uint32			refresh_mhz;
++	uint32			stride_align;
++	sem_id			retrace_sem;		/* released on VSYNC while someone waits on it */
++
++	display_mode	current_mode;		/* size and space from the driver, timing from the accelerant */
++	uint32			bytes_per_row;
++	uint64			mode_offset;		/* pool offset of the current surface */
++
++	area_id			mode_list_area;		/* owned by the primary accelerant */
++	uint32			mode_count;
+ };
+ 
+-/* ioctls (device_control), driver <-> accelerant */
++struct prds_commit_request {
++	uint32				rect_count;		/* 0: the whole surface */
++	struct prds_rect	rects[PRDS_MAX_COMMIT_RECTS];
++};
++
++/* ioctls (device_control), accelerant <-> driver */
+ enum {
+ 	PRDS_GET_SHARED_INFO = B_DEVICE_OP_CODES_END + 1,	/* area_id* */
+-	PRDS_SET_MODE,										/* prds_set_mode* (hdr ignored) */
+-	PRDS_COMMIT,										/* prds_commit* (hdr ignored) */
++	PRDS_GET_DEVICE_NAME,								/* char[B_PATH_NAME_LENGTH] */
++	PRDS_CLONE_POOL,									/* area_info*: the pool, cloned into the caller */
++	PRDS_SET_MODE,										/* display_mode* */
++	PRDS_COMMIT,										/* prds_commit_request* */
+ 	PRDS_ENABLE_EVENTS,									/* uint32* mask */
+ };
+ 
+diff --git a/src/add-ons/accelerants/Jamfile b/src/add-ons/accelerants/Jamfile
+index 9b6a99e650..45fffeb3e5 100644
+--- a/src/add-ons/accelerants/Jamfile
++++ b/src/add-ons/accelerants/Jamfile
+@@ -10,6 +10,7 @@ SubInclude HAIKU_TOP src add-ons accelerants intel_extreme ;
+ SubInclude HAIKU_TOP src add-ons accelerants matrox ;
+ SubInclude HAIKU_TOP src add-ons accelerants neomagic ;
+ SubInclude HAIKU_TOP src add-ons accelerants nvidia ;
++SubInclude HAIKU_TOP src add-ons accelerants prose_display ;
+ SubInclude HAIKU_TOP src add-ons accelerants radeon ;
+ SubInclude HAIKU_TOP src add-ons accelerants radeon_hd ;
+ SubInclude HAIKU_TOP src add-ons accelerants s3 ;
+diff --git a/src/add-ons/accelerants/prose_display/Jamfile b/src/add-ons/accelerants/prose_display/Jamfile
+new file mode 100644
+index 0000000000..e366af75bd
+--- /dev/null
++++ b/src/add-ons/accelerants/prose_display/Jamfile
+@@ -0,0 +1,13 @@
++SubDir HAIKU_TOP src add-ons accelerants prose_display ;
++
++UsePrivateHeaders graphics ;
++UsePrivateHeaders [ FDirName graphics prose_display ] ;
++UsePrivateHeaders [ FDirName graphics common ] ;
++UsePrivateHeaders shared ;
++
++Addon prose_display.accelerant :
++	accelerant.cpp
++	hooks.cpp
++	mode.cpp
++	: libaccelerantscommon.a
++;
+diff --git a/src/add-ons/accelerants/prose_display/accelerant.cpp b/src/add-ons/accelerants/prose_display/accelerant.cpp
+new file mode 100644
+index 0000000000..b7e5c82fde
+--- /dev/null
++++ b/src/add-ons/accelerants/prose_display/accelerant.cpp
+@@ -0,0 +1,331 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Prose Display accelerant. The frame buffer app_server draws into is the
++ * device's surface pool itself (cloned from the driver), so drawing is zero
++ * copy; the only work here is telling the host which rectangles changed.
++ * app_server reports them through B_COMMIT_RECTANGLES after every
++ * back-to-front copy; they are collected and sent once per vsync.
++ */
++
++
++#include "accelerant_protos.h"
++#include "accelerant.h"
++
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include <syslog.h>
++#include <unistd.h>
++
++#include <AutoDeleterOS.h>
++
++
++//#define TRACE_ACCELERANT
++#ifdef TRACE_ACCELERANT
++extern "C" void _sPrintf(const char* format, ...);
++#	define TRACE(x) _sPrintf x
++#else
++#	define TRACE(x) ;
++#endif
++
++// Without vsync events (host display asleep, headless) commit this often anyway.
++#define PRDS_COMMIT_TIMEOUT		20000
++
++
++accelerant_info* gInfo;
++
++
++//	#pragma mark - commits
++
++
++/*!	Everything collected so far becomes one bounding rectangle. */
++static void
++collapse_dirty(accelerant_info* info)
++{
++	uint32 left = UINT32_MAX, top = UINT32_MAX, right = 0, bottom = 0;
++	for (uint32 i = 0; i < info->dirty_count; i++) {
++		const prds_rect& r = info->dirty[i];
++		if (r.x < left)
++			left = r.x;
++		if (r.y < top)
++			top = r.y;
++		if (r.x + r.width > right)
++			right = r.x + r.width;
++		if (r.y + r.height > bottom)
++			bottom = r.y + r.height;
++	}
++	info->dirty[0].x = left;
++	info->dirty[0].y = top;
++	info->dirty[0].width = right - left;
++	info->dirty[0].height = bottom - top;
++	info->dirty_count = 1;
++}
++
++
++static status_t
++commit_thread(void* data)
++{
++	accelerant_info* info = (accelerant_info*)data;
++	prds_commit_request request;
++
++	bool useRetrace = true;
++	while (!info->quit) {
++		sem_id retrace = useRetrace ? info->shared_info->retrace_sem : -1;
++		status_t waited = B_ERROR;
++		if (retrace >= 0)
++			waited = acquire_sem_etc(retrace, 1, B_RELATIVE_TIMEOUT, PRDS_COMMIT_TIMEOUT);
++		if (waited != B_OK && waited != B_TIMED_OUT) {
++			// no usable vsync source (headless host, or a semaphore we may not
++			// acquire): pace commits ourselves
++			if (retrace >= 0) {
++				syslog(LOG_WARNING, "prose_display: retrace semaphore unusable (%s), "
++					"pacing commits by timer\n", strerror(waited));
++				useRetrace = false;
++			}
++			snooze(PRDS_COMMIT_TIMEOUT / 2);
++		}
++		if (info->quit)
++			break;
++
++		if (acquire_sem(info->dirty_lock) != B_OK)
++			break;
++		uint32 count = info->dirty_count;
++		if (count > 0) {
++			memcpy(request.rects, info->dirty, count * sizeof(prds_rect));
++			info->dirty_count = 0;
++		}
++		release_sem(info->dirty_lock);
++		if (count == 0)
++			continue;
++
++		request.rect_count = count;
++		if (ioctl(info->device, PRDS_COMMIT, &request, sizeof(request)) != 0)
++			info->commit_errors++;
++		else
++			info->commits++;
++	}
++	return B_OK;
++}
++
++
++status_t
++prose_display_commit_rectangles(const fill_rect_params* list, uint32 count)
++{
++	accelerant_info* info = gInfo;
++	if (info == NULL || info->dirty_lock < 0)
++		return B_NO_INIT;
++	if (acquire_sem(info->dirty_lock) != B_OK)
++		return B_ERROR;
++
++	for (uint32 i = 0; i < count; i++) {
++		const fill_rect_params& r = list[i];
++		if (r.right < r.left || r.bottom < r.top)
++			continue;
++		if (info->dirty_count == PRDS_MAX_COMMIT_RECTS)
++			collapse_dirty(info);
++		prds_rect& d = info->dirty[info->dirty_count++];
++		d.x = r.left;
++		d.y = r.top;
++		d.width = r.right - r.left + 1;
++		d.height = r.bottom - r.top + 1;
++	}
++
++	release_sem(info->dirty_lock);
++	return B_OK;
++}
++
++
++//	#pragma mark - init
++
++
++/*!	Common part of the primary accelerant's and every clone's initialization. */
++static status_t
++init_common(int device, bool isClone)
++{
++	gInfo = (accelerant_info*)calloc(1, sizeof(accelerant_info));
++	if (gInfo == NULL)
++		return B_NO_MEMORY;
++	MemoryDeleter infoDeleter(gInfo);
++
++	gInfo->is_clone = isClone;
++	gInfo->device = device;
++	gInfo->pool_area = -1;
++	gInfo->mode_list_area = -1;
++	gInfo->dirty_lock = -1;
++	gInfo->commit_thread = -1;
++
++	area_id sharedArea;
++	if (ioctl(device, PRDS_GET_SHARED_INFO, &sharedArea, sizeof(area_id)) != 0)
++		return B_ERROR;
++
++	AreaDeleter sharedDeleter(clone_area("prose display shared info",
++		(void**)&gInfo->shared_info, B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA,
++		sharedArea));
++	status_t status = gInfo->shared_info_area = sharedDeleter.Get();
++	if (status < B_OK)
++		return status;
++
++	infoDeleter.Detach();
++	sharedDeleter.Detach();
++	return B_OK;
++}
++
++
++static void
++uninit_common(void)
++{
++	if (gInfo->pool_area >= 0)
++		delete_area(gInfo->pool_area);
++	delete_area(gInfo->shared_info_area);
++	gInfo->shared_info_area = -1;
++	gInfo->shared_info = NULL;
++
++	// close the file handle ONLY if we're the clone
++	if (gInfo->is_clone)
++		close(gInfo->device);
++
++	free(gInfo);
++	gInfo = NULL;
++}
++
++
++//	#pragma mark - public accelerant functions
++
++
++status_t
++prose_display_init_accelerant(int device)
++{
++	TRACE(("prose_display_init_accelerant()\n"));
++
++	status_t status = init_common(device, false);
++	if (status != B_OK)
++		return status;
++
++	status = create_mode_list();
++	if (status != B_OK) {
++		uninit_common();
++		return status;
++	}
++
++	area_info poolInfo;
++	if (ioctl(device, PRDS_CLONE_POOL, &poolInfo, sizeof(poolInfo)) != 0) {
++		syslog(LOG_ERR, "prose_display: cloning the surface pool failed: %s\n",
++			strerror(errno));
++		delete_area(gInfo->mode_list_area);
++		uninit_common();
++		return B_ERROR;
++	}
++	gInfo->pool_area = poolInfo.area;
++	gInfo->pool = (uint8*)poolInfo.address;
++
++	gInfo->dirty_lock = create_sem(1, "prose display dirty rects");
++	gInfo->commit_thread = spawn_thread(commit_thread, "prose display commits",
++		B_URGENT_DISPLAY_PRIORITY, gInfo);
++	if (gInfo->dirty_lock < 0 || gInfo->commit_thread < 0) {
++		syslog(LOG_ERR, "prose_display: no commit thread\n");
++		prose_display_uninit_accelerant();
++		return B_ERROR;
++	}
++	resume_thread(gInfo->commit_thread);
++
++	const prds_shared_info& shared = *gInfo->shared_info;
++	syslog(LOG_INFO, "prose_display: accelerant up: %ux%u (stride %u), pool %u KiB "
++		"at %p, %u modes, retrace sem %d\n", shared.current_mode.virtual_width,
++		shared.current_mode.virtual_height, shared.bytes_per_row,
++		(unsigned)(shared.pool_size >> 10), gInfo->pool, shared.mode_count,
++		(int)shared.retrace_sem);
++	return B_OK;
++}
++
++
++ssize_t
++prose_display_accelerant_clone_info_size(void)
++{
++	// clone info is the device name, so return its maximum size
++	return B_PATH_NAME_LENGTH;
++}
++
++
++void
++prose_display_get_accelerant_clone_info(void* info)
++{
++	ioctl(gInfo->device, PRDS_GET_DEVICE_NAME, info, B_PATH_NAME_LENGTH);
++}
++
++
++status_t
++prose_display_clone_accelerant(void* info)
++{
++	TRACE(("prose_display_clone_accelerant()\n"));
++
++	char path[B_PATH_NAME_LENGTH];
++	strcpy(path, "/dev/");
++	strlcat(path, (const char*)info, sizeof(path));
++
++	int fd = open(path, B_READ_WRITE);
++	if (fd < 0)
++		return errno;
++
++	status_t status = init_common(fd, true);
++	if (status != B_OK) {
++		close(fd);
++		return status;
++	}
++
++	// read-only clone of the primary accelerant's mode list
++	status = gInfo->mode_list_area = clone_area("prose display cloned modes",
++		(void**)&gInfo->mode_list, B_ANY_ADDRESS, B_READ_AREA,
++		gInfo->shared_info->mode_list_area);
++	if (status < B_OK) {
++		uninit_common();
++		return status;
++	}
++
++	return B_OK;
++}
++
++
++/*!	Called for the primary accelerant and for every clone. */
++void
++prose_display_uninit_accelerant(void)
++{
++	TRACE(("prose_display_uninit_accelerant()\n"));
++
++	if (gInfo->commit_thread >= 0) {
++		gInfo->quit = true;
++		status_t result;
++		wait_for_thread(gInfo->commit_thread, &result);
++		gInfo->commit_thread = -1;
++	}
++	if (gInfo->dirty_lock >= 0) {
++		delete_sem(gInfo->dirty_lock);
++		gInfo->dirty_lock = -1;
++	}
++
++	delete_area(gInfo->mode_list_area);
++	gInfo->mode_list = NULL;
++
++	uninit_common();
++}
++
++
++status_t
++prose_display_get_accelerant_device_info(accelerant_device_info* info)
++{
++	info->version = B_ACCELERANT_VERSION;
++	strcpy(info->name, "Prose Display");
++	strcpy(info->chipset, "PRDS shared-surface display");
++	strcpy(info->serial_no, "None");
++	info->memory = gInfo->shared_info->pool_size;
++	info->dac_speed = 0;
++	return B_OK;
++}
++
++
++sem_id
++prose_display_accelerant_retrace_semaphore(void)
++{
++	return gInfo->shared_info->retrace_sem;
++}
+diff --git a/src/add-ons/accelerants/prose_display/accelerant.h b/src/add-ons/accelerants/prose_display/accelerant.h
+new file mode 100644
+index 0000000000..5749268761
+--- /dev/null
++++ b/src/add-ons/accelerants/prose_display/accelerant.h
+@@ -0,0 +1,43 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef PROSE_DISPLAY_ACCELERANT_H
++#define PROSE_DISPLAY_ACCELERANT_H
++
++
++#include <Accelerant.h>
++#include <OS.h>
++
++#include <prose_display.h>
++
++
++typedef struct accelerant_info {
++	int					device;
++	bool				is_clone;
++
++	area_id				shared_info_area;
++	prds_shared_info*	shared_info;
++
++	area_id				pool_area;			// primary accelerant only
++	uint8*				pool;
++
++	area_id				mode_list_area;		// cloned list of display modes
++	display_mode*		mode_list;
++
++	// Rectangles app_server has finished drawing, waiting for the next vsync.
++	sem_id				dirty_lock;
++	uint32				dirty_count;
++	struct prds_rect	dirty[PRDS_MAX_COMMIT_RECTS];
++	thread_id			commit_thread;
++	volatile bool		quit;
++	uint32				commits;
++	uint32				commit_errors;
++} accelerant_info;
++
++extern accelerant_info* gInfo;
++
++extern status_t create_mode_list(void);
++
++
++#endif	/* PROSE_DISPLAY_ACCELERANT_H */
+diff --git a/src/add-ons/accelerants/prose_display/accelerant_protos.h b/src/add-ons/accelerants/prose_display/accelerant_protos.h
+new file mode 100644
+index 0000000000..9ef2dcf1c2
+--- /dev/null
++++ b/src/add-ons/accelerants/prose_display/accelerant_protos.h
+@@ -0,0 +1,44 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef PROSE_DISPLAY_ACCELERANT_PROTOS_H
++#define PROSE_DISPLAY_ACCELERANT_PROTOS_H
++
++
++#include <Accelerant.h>
++
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// general
++status_t prose_display_init_accelerant(int fd);
++ssize_t prose_display_accelerant_clone_info_size(void);
++void prose_display_get_accelerant_clone_info(void* data);
++status_t prose_display_clone_accelerant(void* data);
++void prose_display_uninit_accelerant(void);
++status_t prose_display_get_accelerant_device_info(accelerant_device_info* info);
++sem_id prose_display_accelerant_retrace_semaphore(void);
++
++// modes & constraints
++uint32 prose_display_accelerant_mode_count(void);
++status_t prose_display_get_mode_list(display_mode* list);
++status_t prose_display_get_preferred_mode(display_mode* mode);
++status_t prose_display_set_display_mode(display_mode* mode);
++status_t prose_display_get_display_mode(display_mode* mode);
++status_t prose_display_get_frame_buffer_config(frame_buffer_config* config);
++status_t prose_display_get_pixel_clock_limits(display_mode* mode, uint32* low,
++	uint32* high);
++
++// presentation
++status_t prose_display_commit_rectangles(const fill_rect_params* list,
++	uint32 count);
++
++#ifdef __cplusplus
++}
++#endif
++
++
++#endif	/* PROSE_DISPLAY_ACCELERANT_PROTOS_H */
+diff --git a/src/add-ons/accelerants/prose_display/hooks.cpp b/src/add-ons/accelerants/prose_display/hooks.cpp
+new file mode 100644
+index 0000000000..1cba49eb79
+--- /dev/null
++++ b/src/add-ons/accelerants/prose_display/hooks.cpp
+@@ -0,0 +1,53 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "accelerant_protos.h"
++#include "accelerant.h"
++
++
++extern "C" void*
++get_accelerant_hook(uint32 feature, void* data)
++{
++	switch (feature) {
++		/* general */
++		case B_INIT_ACCELERANT:
++			return (void*)prose_display_init_accelerant;
++		case B_UNINIT_ACCELERANT:
++			return (void*)prose_display_uninit_accelerant;
++		case B_CLONE_ACCELERANT:
++			return (void*)prose_display_clone_accelerant;
++		case B_ACCELERANT_CLONE_INFO_SIZE:
++			return (void*)prose_display_accelerant_clone_info_size;
++		case B_GET_ACCELERANT_CLONE_INFO:
++			return (void*)prose_display_get_accelerant_clone_info;
++		case B_GET_ACCELERANT_DEVICE_INFO:
++			return (void*)prose_display_get_accelerant_device_info;
++		case B_ACCELERANT_RETRACE_SEMAPHORE:
++			return (void*)prose_display_accelerant_retrace_semaphore;
++
++		/* mode configuration */
++		case B_ACCELERANT_MODE_COUNT:
++			return (void*)prose_display_accelerant_mode_count;
++		case B_GET_MODE_LIST:
++			return (void*)prose_display_get_mode_list;
++		case B_GET_PREFERRED_DISPLAY_MODE:
++			return (void*)prose_display_get_preferred_mode;
++		case B_SET_DISPLAY_MODE:
++			return (void*)prose_display_set_display_mode;
++		case B_GET_DISPLAY_MODE:
++			return (void*)prose_display_get_display_mode;
++		case B_GET_FRAME_BUFFER_CONFIG:
++			return (void*)prose_display_get_frame_buffer_config;
++		case B_GET_PIXEL_CLOCK_LIMITS:
++			return (void*)prose_display_get_pixel_clock_limits;
++
++		/* presentation */
++		case B_COMMIT_RECTANGLES:
++			return (void*)prose_display_commit_rectangles;
++	}
++
++	return NULL;
++}
+diff --git a/src/add-ons/accelerants/prose_display/mode.cpp b/src/add-ons/accelerants/prose_display/mode.cpp
+new file mode 100644
+index 0000000000..65574ce742
+--- /dev/null
++++ b/src/add-ons/accelerants/prose_display/mode.cpp
+@@ -0,0 +1,185 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include <syslog.h>
++#include <unistd.h>
++
++#include <compute_display_timing.h>
++#include <create_display_modes.h>
++
++#include "accelerant_protos.h"
++#include "accelerant.h"
++
++
++//#define TRACE_MODE
++#ifdef TRACE_MODE
++extern "C" void _sPrintf(const char* format, ...);
++#	define TRACE(x) _sPrintf x
++#else
++#	define TRACE(x) ;
++#endif
++
++
++bool
++operator==(const display_mode& lhs, const display_mode& rhs)
++{
++	return lhs.space == rhs.space
++		&& lhs.virtual_width == rhs.virtual_width
++		&& lhs.virtual_height == rhs.virtual_height
++		&& lhs.h_display_start == rhs.h_display_start
++		&& lhs.v_display_start == rhs.v_display_start;
++}
++
++
++/*!	Any 32-bit mode that fits the host's maximum surface works: the host
++	checks stride and bounds, nothing else is fixed.
++*/
++static bool
++is_mode_supported(display_mode* mode)
++{
++	if (mode == NULL || mode->space != B_RGB32)
++		return false;
++	const prds_shared_info& shared = *gInfo->shared_info;
++	return mode->virtual_width >= 640 && mode->virtual_height >= 480
++		&& mode->virtual_width <= shared.max_width
++		&& mode->virtual_height <= shared.max_height;
++}
++
++
++static void
++make_mode(uint32 width, uint32 height, display_mode* mode)
++{
++	memset(mode, 0, sizeof(display_mode));
++	compute_display_timing(width, height, 60, false, &mode->timing);
++	fill_display_mode(width, height, mode);
++	mode->space = B_RGB32;
++}
++
++
++/*!	Creates the initial mode list of the primary accelerant: the mode the
++	driver set at boot (the host's preferred size) plus the standard modes
++	that fit.
++*/
++status_t
++create_mode_list(void)
++{
++	prds_shared_info& shared = *gInfo->shared_info;
++	const color_space spaces[] = { B_RGB32 };
++
++	display_mode initial;
++	make_mode(shared.current_mode.virtual_width, shared.current_mode.virtual_height,
++		&initial);
++	// the driver only knows the size; give app_server a complete mode
++	shared.current_mode = initial;
++
++	gInfo->mode_list_area = create_display_modes("prose display modes", NULL,
++		&initial, 1, spaces, 1, is_mode_supported, &gInfo->mode_list,
++		&shared.mode_count);
++	if (gInfo->mode_list_area < 0)
++		return gInfo->mode_list_area;
++
++	shared.mode_list_area = gInfo->mode_list_area;
++	return B_OK;
++}
++
++
++//	#pragma mark -
++
++
++uint32
++prose_display_accelerant_mode_count(void)
++{
++	TRACE(("prose_display_accelerant_mode_count() = %" B_PRIu32 "\n",
++		gInfo->shared_info->mode_count));
++	return gInfo->shared_info->mode_count;
++}
++
++
++status_t
++prose_display_get_mode_list(display_mode* list)
++{
++	TRACE(("prose_display_get_mode_list()\n"));
++	memcpy(list, gInfo->mode_list,
++		gInfo->shared_info->mode_count * sizeof(display_mode));
++	return B_OK;
++}
++
++
++/*!	The host window's current size (updated by MODE_HINT events). */
++status_t
++prose_display_get_preferred_mode(display_mode* mode)
++{
++	TRACE(("prose_display_get_preferred_mode()\n"));
++	const prds_shared_info& shared = *gInfo->shared_info;
++	make_mode(shared.pref_width, shared.pref_height, mode);
++	return B_OK;
++}
++
++
++status_t
++prose_display_set_display_mode(display_mode* mode)
++{
++	TRACE(("prose_display_set_display_mode()\n"));
++	if (mode == NULL)
++		return B_BAD_VALUE;
++	if (*mode == gInfo->shared_info->current_mode)
++		return B_OK;
++	if (!is_mode_supported(mode))
++		return B_UNSUPPORTED;
++
++	if (ioctl(gInfo->device, PRDS_SET_MODE, mode, sizeof(display_mode)) != 0) {
++		syslog(LOG_ERR, "prose_display: setting %ux%u failed: %s\n",
++			mode->virtual_width, mode->virtual_height, strerror(errno));
++		return B_ERROR;
++	}
++	// the driver updated size, stride and offset; keep the timing too
++	gInfo->shared_info->current_mode = *mode;
++	return B_OK;
++}
++
++
++status_t
++prose_display_get_display_mode(display_mode* mode)
++{
++	TRACE(("prose_display_get_display_mode()\n"));
++	*mode = gInfo->shared_info->current_mode;
++	return B_OK;
++}
++
++
++status_t
++prose_display_get_frame_buffer_config(frame_buffer_config* config)
++{
++	TRACE(("prose_display_get_frame_buffer_config()\n"));
++	if (gInfo->pool == NULL)
++		return B_NO_INIT;
++	config->frame_buffer = gInfo->pool + gInfo->shared_info->mode_offset;
++	config->frame_buffer_dma = NULL;
++	config->bytes_per_row = gInfo->shared_info->bytes_per_row;
++	return B_OK;
++}
++
++
++status_t
++prose_display_get_pixel_clock_limits(display_mode* mode, uint32* _low,
++	uint32* _high)
++{
++	TRACE(("prose_display_get_pixel_clock_limits()\n"));
++	// there is no pixel clock; accept anything from ~48 Hz up
++	uint32 totalPixel = (uint32)mode->timing.h_total
++		* (uint32)mode->timing.v_total;
++	uint32 clockLimit = 2000000;
++
++	*_low = totalPixel * 48L / 1000L;
++	if (*_low > clockLimit)
++		return B_ERROR;
++
++	*_high = clockLimit;
++	return B_OK;
++}
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index fa8f8c9e58..eec33f815e 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -14,8 +14,12 @@
+ 
+ #include <KernelExport.h>
+ #include <device_manager.h>
++#include <graphic_driver.h>
+ #include <lock.h>
++#include <team.h>
+ #include <util/AutoLock.h>
++#include <vm/vm.h>
++#include <stddef.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -27,6 +31,7 @@
+ #define PRDS_DRIVER_MODULE_NAME "drivers/graphics/prose_display/driver_v1"
+ #define PRDS_DEVICE_MODULE_NAME "drivers/graphics/prose_display/device_v1"
+ #define PRDS_DEVICE_ID_GENERATOR "prose_display/device_id"
++#define PRDS_ACCELERANT_NAME "prose_display.accelerant"
+ 
+ #define INFO(x...) dprintf("prose_display: " x)
+ #define ERROR(x...) dprintf("prose_display: " x)
+@@ -41,6 +46,7 @@
+ struct prds_info {
+ 	device_node*				node;
+ 	int32						id;
++	char						name[B_PATH_NAME_LENGTH];
+ 	virtio_device_interface*	virtio;
+ 	virtio_device				device;
+ 	uint64						features;
+@@ -144,9 +150,14 @@ prds_event_callback(void* driverCookie, void* cookie)
+ 		struct prds_event* event = (struct prds_event*)(info->events + index * PRDS_EVENT_SIZE);
+ 		switch (event->hdr.type) {
+ 			case PRDS_EVT_VSYNC:
++			{
+ 				info->vsync_count++;
+-				release_sem_etc(info->retrace_sem, 1, B_DO_NOT_RESCHEDULE);
++				// wake whoever waits for the retrace; never accumulate a count
++				int32 waiting;
++				if (get_sem_count(info->retrace_sem, &waiting) == B_OK && waiting < 0)
++					release_sem_etc(info->retrace_sem, -waiting, B_DO_NOT_RESCHEDULE);
+ 				break;
++			}
+ 			case PRDS_EVT_MODE_HINT:
+ 				info->hint_count++;
+ 				info->shared->pref_width = event->mode_hint.width;
+@@ -222,9 +233,10 @@ prds_set_mode(prds_info* info, uint32 width, uint32 height)
+ 	info->mode_height = height;
+ 	info->mode_stride = request.stride;
+ 	info->mode_offset = 0;
+-	info->shared->mode_width = width;
+-	info->shared->mode_height = height;
+-	info->shared->mode_stride = request.stride;
++	info->shared->current_mode.virtual_width = width;
++	info->shared->current_mode.virtual_height = height;
++	info->shared->current_mode.space = B_RGB32;
++	info->shared->bytes_per_row = request.stride;
+ 	info->shared->mode_offset = 0;
+ 	INFO("mode %" B_PRIu32 "x%" B_PRIu32 ", stride %" B_PRIu32 "\n", width, height, request.stride);
+ 	return B_OK;
+@@ -528,6 +540,7 @@ prds_init_driver(device_node* node, void** _cookie)
+ 		info->shared->refresh_mhz = info->config.refresh_mhz;
+ 		info->shared->stride_align = info->config.stride_align;
+ 		info->shared->retrace_sem = info->retrace_sem;
++		info->shared->mode_list_area = -1;
+ 	}
+ 
+ 	// This sets DRIVER_OK: from here on the device is live.
+@@ -588,9 +601,8 @@ prds_register_child_devices(void* cookie)
+ 	if (id < 0)
+ 		return id;
+ 	info->id = id;
+-	char name[64];
+-	snprintf(name, sizeof(name), "graphics/prose_display/%" B_PRId32, id);
+-	return sDeviceManager->publish_device(info->node, name, PRDS_DEVICE_MODULE_NAME);
++	snprintf(info->name, sizeof(info->name), "graphics/prose_display/%" B_PRId32, id);
++	return sDeviceManager->publish_device(info->node, info->name, PRDS_DEVICE_MODULE_NAME);
+ }
+ 
+ 
+@@ -614,7 +626,33 @@ prds_uninit_device(void* cookie)
+ static status_t
+ prds_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
+ {
+-	*_cookie = deviceCookie;
++	prds_info* info = (prds_info*)deviceCookie;
++
++	// User space may not acquire kernel-owned semaphores: the retrace semaphore
++	// belongs to whoever opens the device (app_server), like the vblank
++	// semaphores of the intel_extreme/nvidia drivers. It dies with that team,
++	// so recreate it for the next opener.
++	{
++		sem_info semInfo;
++		if (get_sem_info(info->retrace_sem, &semInfo) != B_OK) {
++			info->retrace_sem = create_sem(0, "prose display retrace");
++			info->shared->retrace_sem = info->retrace_sem;
++		}
++		thread_info threadInfo;
++		if (info->retrace_sem >= 0 && get_thread_info(find_thread(NULL), &threadInfo) == B_OK
++			&& threadInfo.team != team_get_kernel_team_id())
++			set_sem_owner(info->retrace_sem, threadInfo.team);
++	}
++#if PRDS_TEST_PATTERN
++	// the accelerant takes over the surface: stop the boot-time test pattern
++	if (info->test_thread >= 0) {
++		info->quit = true;
++		wait_for_thread(info->test_thread, NULL);
++		info->test_thread = -1;
++		info->quit = false;
++	}
++#endif
++	*_cookie = info;
+ 	return B_OK;
+ }
+ 
+@@ -654,28 +692,63 @@ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ {
+ 	prds_info* info = (prds_info*)cookie;
+ 	switch (op) {
++		case B_GET_ACCELERANT_SIGNATURE:
++			if (user_strlcpy((char*)buffer, PRDS_ACCELERANT_NAME, B_FILE_NAME_LENGTH) < B_OK)
++				return B_BAD_ADDRESS;
++			return B_OK;
++
+ 		case PRDS_GET_SHARED_INFO:
+ 			return user_memcpy(buffer, &info->shared_area, sizeof(area_id));
+-		case PRDS_ENABLE_EVENTS:
+-		{
+-			uint32 mask;
+-			if (user_memcpy(&mask, buffer, sizeof(mask)) != B_OK)
++
++		case PRDS_GET_DEVICE_NAME:
++			if (user_strlcpy((char*)buffer, info->name, B_PATH_NAME_LENGTH) < B_OK)
+ 				return B_BAD_ADDRESS;
+-			return prds_enable_events(info, mask);
++			return B_OK;
++
++		case PRDS_CLONE_POOL:
++		{
++			// the pool keeps its write-back memory type in the clone
++			void* address;
++			area_id area = vm_clone_area(B_CURRENT_TEAM, "prose display pool clone", &address,
++				B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA, 0, info->pool_area, true);
++			if (area < 0)
++				return area;
++			return _user_get_area_info(area, (area_info*)buffer);
+ 		}
++
+ 		case PRDS_SET_MODE:
+ 		{
+-			struct prds_set_mode mode;
+-			if (user_memcpy(&mode, buffer, sizeof(mode)) != B_OK)
++			display_mode mode;
++			if (length < sizeof(mode) || user_memcpy(&mode, buffer, sizeof(mode)) != B_OK)
+ 				return B_BAD_ADDRESS;
+-			return prds_set_mode(info, mode.width, mode.height);
++			if (mode.space != B_RGB32 || mode.virtual_width == 0 || mode.virtual_height == 0
++				|| mode.virtual_width > info->config.max_width
++				|| mode.virtual_height > info->config.max_height)
++				return B_BAD_VALUE;
++			return prds_set_mode(info, mode.virtual_width, mode.virtual_height);
+ 		}
++
+ 		case PRDS_COMMIT:
+ 		{
+-			struct prds_commit commit;
+-			if (user_memcpy(&commit, buffer, sizeof(commit)) != B_OK)
++			struct prds_commit_request request;
++			if (length < sizeof(uint32) || user_memcpy(&request.rect_count, buffer,
++					sizeof(uint32)) != B_OK)
++				return B_BAD_ADDRESS;
++			if (request.rect_count > PRDS_MAX_COMMIT_RECTS)
++				return B_BAD_VALUE;
++			if (request.rect_count > 0 && user_memcpy(request.rects,
++					(uint8*)buffer + offsetof(struct prds_commit_request, rects),
++					request.rect_count * sizeof(struct prds_rect)) != B_OK)
++				return B_BAD_ADDRESS;
++			return prds_commit(info, request.rects, request.rect_count);
++		}
++
++		case PRDS_ENABLE_EVENTS:
++		{
++			uint32 mask;
++			if (user_memcpy(&mask, buffer, sizeof(mask)) != B_OK)
+ 				return B_BAD_ADDRESS;
+-			return prds_commit(info, commit.rects, commit.rect_count);
++			return prds_enable_events(info, mask);
+ 		}
+ 	}
+ 	return B_DEV_INVALID_IOCTL;
+diff --git a/src/servers/app/drawing/interface/local/AccelerantHWInterface.cpp b/src/servers/app/drawing/interface/local/AccelerantHWInterface.cpp
+index 6b122d67ef..211d7c8e58 100644
+--- a/src/servers/app/drawing/interface/local/AccelerantHWInterface.cpp
++++ b/src/servers/app/drawing/interface/local/AccelerantHWInterface.cpp
+@@ -116,6 +116,7 @@ AccelerantHWInterface::AccelerantHWInterface()
+ 	// optional accelerant hooks
+ 	fAccGetTimingConstraints(NULL),
+ 	fAccProposeDisplayMode(NULL),
++	fAccCommitRectangles(NULL),
+ 	fAccSetCursorShape(NULL),
+ 	fAccSetCursorBitmap(NULL),
+ 	fAccMoveCursor(NULL),
+@@ -390,6 +391,9 @@ AccelerantHWInterface::_SetupDefaultHooks()
+ 	fAccGetMonitorInfo
+ 		= (get_monitor_info)fAccelerantHook(B_GET_MONITOR_INFO, NULL);
+ 	fAccGetEDIDInfo = (get_edid_info)fAccelerantHook(B_GET_EDID_INFO, NULL);
++	// PROSE fork: displays that present on demand want to know what changed
++	fAccCommitRectangles
++		= (commit_rectangles)fAccelerantHook(B_COMMIT_RECTANGLES, NULL);
+ 
+ 	// cursor
+ 	fAccSetCursorShape
+@@ -1375,7 +1379,52 @@ AccelerantHWInterface::IsDoubleBuffered() const
+ void
+ AccelerantHWInterface::_CopyBackToFront(/*const*/ BRegion& region)
+ {
+-	return HWInterface::_CopyBackToFront(region);
++	HWInterface::_CopyBackToFront(region);
++	_CommitRects(region);
++}
++
++
++/*!	PROSE fork: hands the rectangles that just reached the front buffer to
++	the accelerant (B_COMMIT_RECTANGLES), for displays that present on demand.
++*/
++void
++AccelerantHWInterface::_CommitRects(const BRegion& region) const
++{
++	if (fAccCommitRectangles == NULL)
++		return;
++
++	fill_rect_params rects[32];
++	uint32 count = 0;
++	int32 rectCount = region.CountRects();
++	for (int32 i = 0; i < rectCount; i++) {
++		clipping_rect r = region.RectAtInt(i);
++		if (r.left < 0)
++			r.left = 0;
++		if (r.top < 0)
++			r.top = 0;
++		if (r.right < r.left || r.bottom < r.top || r.right > 65535 || r.bottom > 65535)
++			continue;
++		rects[count].left = r.left;
++		rects[count].top = r.top;
++		rects[count].right = r.right;
++		rects[count].bottom = r.bottom;
++		if (++count == 32) {
++			fAccCommitRectangles(rects, count);
++			count = 0;
++		}
++	}
++	if (count > 0)
++		fAccCommitRectangles(rects, count);
++}
++
++
++void
++AccelerantHWInterface::_CommitRect(const IntRect& rect) const
++{
++	if (fAccCommitRectangles == NULL || !rect.IsValid())
++		return;
++	BRegion region((BRect)rect);
++	_CommitRects(region);
+ }
+ 
+ 
+@@ -1385,8 +1434,12 @@ AccelerantHWInterface::_CopyBackToFront(/*const*/ BRegion& region)
+ void
+ AccelerantHWInterface::_DrawCursor(IntRect area) const
+ {
+-	if (!fHardwareCursorEnabled)
++	if (!fHardwareCursorEnabled) {
+ 		HWInterface::_DrawCursor(area);
++		// the software cursor bypasses the back buffer: present it too
++		_CommitRect(area & IntRect(0, 0, fFrontBuffer->Width() - 1,
++			fFrontBuffer->Height() - 1));
++	}
+ }
+ 
+ 
+diff --git a/src/servers/app/drawing/interface/local/AccelerantHWInterface.h b/src/servers/app/drawing/interface/local/AccelerantHWInterface.h
+index 7717b03f8e..c6bee386c6 100644
+--- a/src/servers/app/drawing/interface/local/AccelerantHWInterface.h
++++ b/src/servers/app/drawing/interface/local/AccelerantHWInterface.h
+@@ -97,6 +97,8 @@ private:
+ 									int& count, char* _path);
+ 			status_t			_OpenAccelerant(int device);
+ 			status_t			_SetupDefaultHooks();
++			void				_CommitRects(const BRegion& region) const;
++			void				_CommitRect(const IntRect& rect) const;
+ 			void				_UpdateHooksAfterModeChange();
+ 			status_t			_UpdateModeList();
+ 			status_t			_UpdateFrameBufferConfig();
+@@ -132,6 +134,7 @@ private:
+ 			get_preferred_display_mode fAccGetPreferredDisplayMode;
+ 			get_monitor_info		fAccGetMonitorInfo;
+ 			get_edid_info			fAccGetEDIDInfo;
++			commit_rectangles		fAccCommitRectangles;
+ 			set_cursor_shape		fAccSetCursorShape;
+ 			set_cursor_bitmap		fAccSetCursorBitmap;
+ 			move_cursor				fAccMoveCursor;
+-- 
+2.54.0 (Apple Git-157)
+
