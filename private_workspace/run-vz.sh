@@ -7,20 +7,30 @@
 #        PW_PACKAGES=@codecs run-vz.sh codecs   # with prosepkg packages installed
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
-NAME=${1:?usage: run-vz.sh <name> [hvgpu options...]}
+NAME=${1:?usage: run-vz.sh <name> [--keep] [hvgpu options...]}
 shift
+# --keep: reuse this run's disk and EFI variables, so guest changes (settings,
+# files, the desktop background Tracker writes at first boot) survive the next
+# run. Without it every run starts from an identical first boot, which is what
+# the tests want but makes the VM useless as a machine you actually use.
+KEEP=0
+if [ "${1:-}" = "--keep" ]; then KEEP=1; shift; fi
 [ -f "$PW_IMAGE" ] || { echo "no image at $PW_IMAGE: run build.sh" >&2; exit 1; }
 [ -x "$HVGPU" ] || "$PW_ROOT/tools/build.sh"
 D="$PW_WORK/$NAME"
 mkdir -p "$D"
-cp "$PW_IMAGE" "$D/haiku.img"
-rm -f "$D/efivars"
+if [ "$KEEP" = 1 ] && [ -f "$D/haiku.img" ]; then
+	echo ">>> keeping $D/haiku.img (guest changes persist; delete it to start over)"
+else
+	cp "$PW_IMAGE" "$D/haiku.img"
+	rm -f "$D/efivars"
+fi
 # PW_PACKAGES="<ports|packages|@set>": install packages built by prosepkg into the copy
 if [ -n "${PW_PACKAGES:-}" ]; then
 	"$PW_ROOT/scripts/prosepkg" install "$D/haiku.img" $PW_PACKAGES
 fi
 # PW_INJECT_SCRIPT=<file>: install it as the guest's UserBootscript (runs at boot as root)
-if [ -n "${PW_INJECT_SCRIPT:-}" ]; then
+if [ -n "${PW_INJECT_SCRIPT:-}" ] && [ "$KEEP" != 1 ]; then
 	read -r START END < <(python3 - "$D/haiku.img" <<'PY'
 import struct, sys
 mbr = open(sys.argv[1], "rb").read(512)
