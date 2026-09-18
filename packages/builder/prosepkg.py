@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tarfile
 import time
-import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -216,6 +215,12 @@ def bootstrap_toolchain(refresh):
 	TOOLCHAIN.parent.mkdir(parents=True, exist_ok=True)
 	run(['ditto', src, TOOLCHAIN])
 	rmtree(TOOLCHAIN / 'sysroot')
+	# libtool archives of the toolchain's own target libs point into the
+	# source tree and at libstdc++.a, which build_cross_tools_gcc4 renamed so
+	# that nothing links it by accident; libtool would do exactly that. On
+	# Haiku, C++ libraries link libstdc++.so from gcc_syslibs.
+	for la in list(TOOLCHAIN.glob('*/lib/*.la')) + list(TOOLCHAIN.glob('lib/*.la')):
+		la.unlink()
 	# read-only: nothing may ever write into the compiler again
 	run(['chmod', '-R', 'a-w', TOOLCHAIN])
 
@@ -474,6 +479,52 @@ while [ $# -gt 0 ]; do
 	[ "$1" = -f ] && { : > "$2"; exit 0; }
 	shift
 done
+''')
+	wrapper(bindir / 'uname', r'''
+# uname as Haiku arm64 answers it (what a build in a Haiku chroot sees);
+# makefiles branch on it (e.g. giflib builds a .dylib for "Darwin")
+out=()
+add() { out+=("$1"); }
+[ $# -eq 0 ] && set -- -s
+for a in "$@"; do
+	case "$a" in
+	-a|--all) set -- -snrvmo; add Haiku; add prose; add R1~beta6+development
+		add "hrev60122"; add arm64; add Haiku; break ;;
+	--kernel-name) add Haiku ;;
+	--nodename) add prose ;;
+	--kernel-release) add R1~beta6+development ;;
+	--kernel-version) add hrev60122 ;;
+	--machine) add arm64 ;;
+	--processor|--hardware-platform) add unknown ;;
+	--operating-system) add Haiku ;;
+	-*) flags=${a#-}
+		while [ -n "$flags" ]; do
+			case "${flags:0:1}" in
+			s) add Haiku ;; n) add prose ;; r) add R1~beta6+development ;;
+			v) add hrev60122 ;; m) add arm64 ;; p|i) add unknown ;; o) add Haiku ;;
+			*) echo "uname: invalid option -- '${flags:0:1}'" >&2; exit 1 ;;
+			esac
+			flags=${flags:1}
+		done ;;
+	*) echo "uname: extra operand '$a'" >&2; exit 1 ;;
+	esac
+done
+echo "${out[*]}"
+''')
+	# Homebrew installs GNU libtoolize as glibtoolize (Apple owns "libtool")
+	wrapper(bindir / 'libtoolize', 'exec /opt/homebrew/bin/glibtoolize "$@"\n')
+	wrapper(bindir / 'make', r'''
+# In INSTALL, DESTDIR is exported so a plain `make install` stages the
+# files. A command line that already passes staged paths (make install
+# PREFIX=$prefix) would get them twice: drop DESTDIR for such a call.
+if [ -n "${PROSE_STAGING_ROOT:-}" ] && [ -n "${DESTDIR:-}" ]; then
+	for a in "$@"; do
+		case "$a" in
+		*=$PROSE_STAGING_ROOT*) unset DESTDIR; break ;;
+		esac
+	done
+fi
+exec /usr/bin/make "$@"
 ''')
 	wrapper(bindir / 'getarch', 'echo %s\n' % ARCH)
 	wrapper(bindir / 'setarch', r'''
@@ -740,9 +791,10 @@ def recipe_index(refresh=False):
 	return recipes, index
 
 
-def choose_provider(candidates, recipes):
-	"""Prefer ports that are not cross/bootstrap variants, then the newest
-	version; ties go to the alphabetically first port."""
+def choose_provider(candidates, keys_of, built):
+	"""Pick the port to build for a requirement: one already built, else one
+	whose ARCHITECTURES supports arm64 over an untested one, then the newest
+	version. Cross/bootstrap variants never qualify."""
 	best = {}
 	for name, version, suffix in candidates:
 		if '_cross_' in name or name.endswith('_bootstrap'):
@@ -752,7 +804,12 @@ def choose_provider(candidates, recipes):
 			best[name] = (version, suffix)
 	if not best:
 		return None
-	name = sorted(best)[0]
+	order = {'ok': 0, 'any': 0, 'untested': 1, 'broken': 2}
+
+	def rank(name):
+		version, suffix = best[name]
+		return (name not in built, order[arch_status(keys_of(name, version))], name)
+	name = min(best, key=rank)
 	return name, best[name][0], best[name][1]
 
 
@@ -766,6 +823,7 @@ class Builder:
 		self.base_provides = load_json(BASE / 'provides.json', {})
 		self.results = load_json(RESULTS, {})
 		self.building = []
+		self.failed = {}  # port -> error, within this run
 
 	# -- lookup
 
@@ -799,7 +857,14 @@ class Builder:
 		candidates = self.index.get(name)
 		if not candidates:
 			raise BuildError('nothing provides %s' % name)
-		return choose_provider(candidates, self.recipes) or candidates[0]
+		built = {n for n, r in self.results.items() if r.get('status') == 'built'}
+		return choose_provider(candidates, self._keys_of, built) or candidates[0]
+
+	def _keys_of(self, name, version):
+		for v, path, _ in self.recipes.get(name, []):
+			if v == version:
+				return self._cached_keys(path)
+		return {}
 
 	# -- the build
 
@@ -809,11 +874,16 @@ class Builder:
 		built = all((REPO / port.hpkg_name(pkg, sfx)).exists() for sfx, pkg in port.packages())
 		if built and status.get('version') == port.full_version and not force:
 			return port
+		if port.name in self.failed:
+			raise BuildError('%s failed earlier in this run' % port.name)
 		if port.name in self.building:
 			raise BuildError('dependency cycle: %s' % ' -> '.join(self.building + [port.name]))
 		self.building.append(port.name)
 		try:
 			self._build(port)
+		except BuildError as e:
+			self.failed[port.name] = str(e)
+			raise
 		finally:
 			self.building.pop()
 		return port
@@ -933,18 +1003,21 @@ class Builder:
 		name = filename or urls[0].rstrip('/').rsplit('/', 1)[-1]
 		cached = DOWNLOADS / name
 		if not cached.exists() or (checksum and sha256(cached) != checksum):
+			# curl, not urllib: urllib's macOS proxy lookup loads Network.framework
+			# into this process, whose atfork handler then crashes forked
+			# children (SIGSEGV before exec) on macOS 27
+			tmp = cached.with_name(cached.name + '.part')
 			for url in urls:
-				try:
-					log.write('downloading %s\n' % url)
-					tmp = cached.with_suffix(cached.suffix + '.part')
-					req = urllib.request.Request(url, headers={'User-Agent': 'prosepkg'})
-					with urllib.request.urlopen(req, timeout=120) as r, open(tmp, 'wb') as f:
-						shutil.copyfileobj(r, f)
+				log.write('downloading %s\n' % url)
+				log.flush()
+				proc = subprocess.run(['curl', '-fsSL', '--retry', '3', '--connect-timeout', '30',
+					'-A', 'prosepkg', '-o', str(tmp), url], stdout=log, stderr=log)
+				if proc.returncode == 0:
 					os.replace(tmp, cached)
 					break
-				except Exception as e:  # try the next mirror
-					log.write('  failed: %s\n' % e)
+				log.write('  failed (curl exit %d)\n' % proc.returncode)
 			else:
+				tmp.unlink(missing_ok=True)
 				raise BuildError('cannot download %s' % name)
 		if checksum and sha256(cached) != checksum:
 			raise BuildError('checksum mismatch for %s' % name)
@@ -1028,6 +1101,7 @@ class Builder:
 		env = build_env(work / 'sysroot', work)
 		if install:
 			env['DESTDIR'] = str(destdir)
+			env['PROSE_STAGING_ROOT'] = str(destdir)
 		log.write('\n==== %s ====\n' % phase)
 		log.flush()
 		proc = subprocess.run([BASH, path], cwd=sources.get('1', work), env=env,
