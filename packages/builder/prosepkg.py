@@ -28,13 +28,24 @@ from pathlib import Path
 # -- configuration --------------------------------------------------------------
 
 ROOT = Path(os.environ.get('PROSEPKG_ROOT', '/Volumes/HaikuSrc/prose-packages'))
+# toolchain and host tools come from the main Haiku tree ...
 HAIKU_TREE = Path(os.environ.get('PROSEPKG_HAIKU_TREE', '/Volumes/HaikuSrc/haiku'))
+# ... the system packages from the Prose OS build whose image we target
+SYSTEM_TREE = Path(os.environ.get('PROSEPKG_SYSTEM_TREE',
+	'/Volumes/HaikuSrc/private_workspace/haiku'))
 BUILDER_DIR = Path(__file__).resolve().parent
 OVERLAY_DIR = BUILDER_DIR / 'overlay'
 RUNTIME_SH = BUILDER_DIR / 'recipe-runtime.sh'
 
 ARCH = 'arm64'
 TRIPLE = 'aarch64-unknown-haiku'
+# Target CPU: Apple M1 and later (Prose runs in VMs on Apple silicon). gcc 13
+# has no apple-m* names; this is the M1 feature floor: ARMv8.4-A (LSE, RDM,
+# RCPC, JSCVT, FCMA, DotProd, FlagM) + FP16/FHM + AES/SHA1/SHA2/SHA3/SHA512.
+# Not "+crypto": for v8.4 that adds SM3/SM4, which Apple lacks. BF16/I8MM
+# (M2+) and SVE/SME stay off. Wrappers put these first, so a package's own
+# -march still wins for the files it compiles specially.
+TARGET_CPU_FLAGS = '-march=armv8.4-a+fp16+fp16fml+aes+sha2+sha3 -mtune=cortex-x1'
 BUILD_TRIPLE = 'aarch64-apple-darwin'
 PACKAGER = 'Prose Package Builder <packages@prose.local>'
 VENDOR = 'Prose'
@@ -69,7 +80,7 @@ HOST_TOOL_NAMES = [
 ]
 
 # the system packages of the target image: what a Prose system provides
-BASE_PACKAGES_BUILT = ['haiku.hpkg', 'haiku_devel.hpkg', 'makefile_engine.hpkg']
+BASE_PACKAGES_BUILT = ['haiku.hpkg', 'haiku_devel.hpkg']
 
 BINUTILS = ['addr2line', 'ar', 'as', 'c++filt', 'elfedit', 'ld', 'nm', 'objcopy',
 	'objdump', 'ranlib', 'readelf', 'size', 'strings', 'strip']
@@ -194,9 +205,11 @@ def host_tool(name):
 def bootstrap(args):
 	for d in (ROOT, DOWNLOADS, WORK, REPO, CACHE, LOGS):
 		d.mkdir(parents=True, exist_ok=True)
-	bootstrap_toolchain(args.refresh)
-	bootstrap_hosttools(args.refresh)
-	bootstrap_base(args.refresh)
+	refresh = set((args.refresh or '').split(',')) if args.refresh else set()
+	redo = lambda step: step in refresh or 'all' in refresh
+	bootstrap_toolchain(redo('toolchain'))
+	bootstrap_hosttools(redo('hosttools'))
+	bootstrap_base(redo('base'))
 	bootstrap_env()
 	check_toolchain()
 	say('bootstrap complete:', ROOT)
@@ -275,12 +288,25 @@ def bootstrap_hosttools(refresh):
 
 
 def base_package_sources():
-	built = HAIKU_TREE / 'generated' / 'objects' / 'haiku' / ARCH / 'packaging' / 'packages'
-	download = HAIKU_TREE / 'generated' / 'download'
-	sources = [built / name for name in BASE_PACKAGES_BUILT]
-	sources += sorted(p for p in download.glob('*.hpkg')
-		if p.name.endswith('-%s.hpkg' % ARCH) or p.name.endswith('-any.hpkg'))
-	return [p for p in sources if '_source-' not in p.name]
+	"""haiku + haiku_devel of the Prose build, makefile_engine, and the
+	bootstrap system packages its image is made of. Only *_bootstrap-*
+	packages: the OS build's download dir may also hold packages we built."""
+	sources = []
+	for tree in (SYSTEM_TREE, HAIKU_TREE):
+		built = tree / 'generated' / 'objects' / 'haiku' / ARCH / 'packaging' / 'packages'
+		if (built / 'haiku.hpkg').exists():
+			sources = [built / name for name in BASE_PACKAGES_BUILT]
+			break
+	for tree in (SYSTEM_TREE, HAIKU_TREE):
+		engine = tree / 'generated' / 'objects' / 'haiku' / ARCH / 'packaging' / 'packages' \
+			/ 'makefile_engine.hpkg'
+		if engine.exists():
+			sources.append(engine)
+			break
+	download = SYSTEM_TREE / 'generated' / 'download'
+	sources += sorted(p for p in download.glob('*_bootstrap-*.hpkg')
+		if p.name.endswith(('-%s.hpkg' % ARCH, '-any.hpkg')))
+	return sources
 
 
 def package_info(hpkg):
@@ -314,48 +340,190 @@ def bootstrap_base(refresh):
 			provides.setdefault(entry_name(p), []).append(name)
 		run([host_tool('package'), 'extract', '-C', system, dst], capture=True)
 		(system / '.PackageInfo').unlink(missing_ok=True)
+	link_package_prefixes(BASE_SYSROOT)
 	# the system MIME database (attributes live in user.haiku.* xattrs)
-	mimedb = HAIKU_TREE / 'generated' / 'objects' / 'common' / 'data' / 'mime_db' / 'mime_db'
+	for tree in (SYSTEM_TREE, HAIKU_TREE):
+		mimedb = tree / 'generated' / 'objects' / 'common' / 'data' / 'mime_db' / 'mime_db'
+		if mimedb.is_dir():
+			break
 	run(['ditto', mimedb, BASE / 'mime_db'])
 	save_json(BASE / 'manifest.json', manifest)
 	save_json(BASE / 'provides.json', provides)
 
 
+_env_written = set()
+
+
+def link_package_prefixes(sysroot):
+	"""Packages built by haikuporter (the bootstrap system packages) record
+	their prefix as /packages/<package>/.self -- packagefs's package links,
+	e.g. in .pc files. Recreate the links they use: .self -> /boot/system,
+	.settings -> /boot/system/settings (relative, inside the sysroot)."""
+	pattern = re.compile(rb'/packages/([^/\s"\']+)/\.(self|settings)\b')
+	found = set()
+	for path in (sysroot / 'boot' / 'system').rglob('*'):
+		if path.is_file() and not path.is_symlink() and path.stat().st_size < 4 << 20:
+			data = path.read_bytes()
+			if b'/packages/' in data and b'\0' not in data[:8192]:
+				found.update(pattern.findall(data))
+	for name, kind in sorted(found):
+		link = sysroot / 'packages' / name.decode() / ('.' + kind.decode())
+		link.parent.mkdir(parents=True, exist_ok=True)
+		if not link.is_symlink():
+			os.symlink('../../boot/system' + ('/settings' if kind == b'settings' else ''), link)
+	return found
+
+
 def wrapper(path, body):
 	write_file(path, '#!/bin/bash\n# generated by prosepkg bootstrap; do not edit\n' + body, 0o755)
+	_env_written.add(Path(path))
 
 
 COMPILER_WRAPPER = r'''
 # Cross compiler for the current build's sysroot. Haiku-absolute paths in
-# arguments (/boot/..., /system/...) are mapped into the sysroot, like a
-# chroot would see them.
+# arguments (/boot/..., /system/..., /packages/...) are mapped into the
+# sysroot, like a chroot would see them.
 : "${PROSE_SYSROOT:?PROSE_SYSROOT is not set (run builds through prosepkg)}"
 args=()
 for a in "$@"; do
 	case "$a" in
-	/boot/*) a="$PROSE_SYSROOT$a" ;;
+	/boot/*|/packages/*) a="$PROSE_SYSROOT$a" ;;
 	/system/*) a="$PROSE_SYSROOT/boot$a" ;;
-	-I/boot/*|-L/boot/*) a="${a:0:2}$PROSE_SYSROOT${a:2}" ;;
-	-I/system/*|-L/system/*) a="${a:0:2}$PROSE_SYSROOT/boot${a:2}" ;;
-	-isystem/boot/*) a="-isystem$PROSE_SYSROOT${a:8}" ;;
+	-I/*|-L/*|-B/*|-isystem/*|-iquote/*|-idirafter/*|-include/*|-imacros/*)
+		# joined forms, as the makefile-engine writes them (-isystem/system/...)
+		opt=${a%%%%/*}; path=/${a#*/}
+		case "$path" in
+		/boot/*|/packages/*) a="$opt$PROSE_SYSROOT$path" ;;
+		/system/*) a="$opt$PROSE_SYSROOT/boot$path" ;;
+		esac ;;
 	esac
 	args+=("$a")
 done
-exec %(real)s --sysroot="$PROSE_SYSROOT" "${args[@]}"
+# The cross gcc was configured --disable-shared: its driver links only the
+# static libgcc, without the unwinder. A native Haiku gcc links libgcc_s, so
+# C++ code linked through the C driver (the makefile-engine links with $(CC))
+# finds _Unwind_Resume there. As-needed: C programs don't get the dependency.
+link=1
+for a in "$@"; do
+	case "$a" in
+	-c|-S|-E|-M|-MM|-r|-nostdlib|-nodefaultlibs|-static|-v|--version|-print-*|-dump*|-\#\#\#)
+		link=0 ;;
+	esac
+done
+[ $# -gt 0 ] && [ $link = 1 ] && args+=(-Wl,--as-needed -lgcc_s -Wl,--no-as-needed)
+exec %(real)s --sysroot="$PROSE_SYSROOT" %(cpu)s "${args[@]}"
 '''
+
+
+MAKE_WRAPPER = r"""#!/opt/homebrew/bin/python3
+# generated by prosepkg bootstrap; do not edit
+# make for cross builds:
+#  - INSTALL exports DESTDIR so a plain `make install` stages; a command line
+#    that already passes staged paths (make install PREFIX=$prefix) must not
+#    get it twice, so DESTDIR is dropped for such a call
+#  - `include /boot/system/...` (and /system/...) name paths inside the
+#    chroot a Haiku build runs in; a makefile that has them runs as a copy
+#    whose includes point into the build sysroot
+#  - argv[0] is "make", so $(MAKE) in recipes finds this wrapper again
+import os, re, sys
+
+REAL = '@REAL_MAKE@'  # the real GNU make, not the /usr/bin/make shim (which
+                      # re-execs it by full path, so $(MAKE) would bypass us)
+args = sys.argv[1:]
+env = dict(os.environ)
+root = env.get('PROSE_STAGING_ROOT')
+if root and env.get('DESTDIR'):
+	assignments = [a for a in args if not a.startswith('-') and '=' in a]
+	if any(a.split('=', 1)[1].startswith(root) for a in assignments):
+		del env['DESTDIR']
+	elif not any(a.startswith('DESTDIR=') for a in assignments):
+		# on the command line too: many Makefiles assign "DESTDIR =" (readline),
+		# which beats the environment but not the command line
+		args = args + ['DESTDIR=' + env['DESTDIR']]
+
+sysroot = env.get('PROSE_SYSROOT')
+# BUILDHOME is the makefile-engine's develop directory: a build-time path,
+# so a Haiku-absolute value (make BUILDHOME=/system/develop) means the sysroot
+for i, a in enumerate(args):
+	if sysroot and a.startswith('BUILDHOME=/'):
+		value = a.split('=', 1)[1]
+		if value.startswith('/boot/'):
+			args[i] = 'BUILDHOME=' + sysroot + value
+		elif value.startswith('/system/'):
+			args[i] = 'BUILDHOME=' + sysroot + '/boot' + value
+
+INCLUDE = re.compile(r'^(\s*-?include\s+)/(boot/|system/)', re.M)
+
+def translated(directory, name):
+	path = os.path.join(directory, name)
+	try:
+		with open(path) as f:
+			text = f.read()
+	except (OSError, UnicodeDecodeError):
+		return None
+	if not sysroot or not INCLUDE.search(text):
+		return None
+	text = INCLUDE.sub(lambda m: m.group(1) + sysroot + '/boot/'
+		+ ('system/' if m.group(2) == 'system/' else ''), text)
+	copy = os.path.join(os.path.dirname(name), '.prose.' + os.path.basename(name))
+	with open(os.path.join(directory, copy), 'w') as f:
+		f.write(text)
+	return copy
+
+directory = '.'
+files = []
+i = 0
+while i < len(args):
+	a = args[i]
+	if a in ('-C', '--directory') and i + 1 < len(args):
+		directory = os.path.join(directory, args[i + 1]); i += 2; continue
+	if a.startswith('--directory='):
+		directory = os.path.join(directory, a.split('=', 1)[1])
+	elif a.startswith('-C') and len(a) > 2:
+		directory = os.path.join(directory, a[2:])
+	elif a in ('-f', '--file', '--makefile') and i + 1 < len(args):
+		files.append((i + 1, args[i + 1])); i += 2; continue
+	elif a.startswith(('--file=', '--makefile=')):
+		files.append((i, a))
+	elif a.startswith('-f') and len(a) > 2:
+		files.append((i, a))
+	i += 1
+
+if files:
+	for index, value in files:
+		name = value.split('=', 1)[1] if value.startswith('--') else \
+			(value[2:] if value.startswith('-f') and index < len(args) and args[index] == value
+				and not os.path.exists(os.path.join(directory, value)) else value)
+		copy = translated(directory, name)
+		if copy:
+			args[index] = copy if args[index] == name else '-f' + copy
+else:
+	for name in ('GNUmakefile', 'makefile', 'Makefile'):
+		if os.path.exists(os.path.join(directory, name)):
+			copy = translated(directory, name)
+			if copy:
+				args = ['-f', copy] + args
+			break
+
+os.execve(REAL, ['make'] + args, env)
+"""
 
 
 def bootstrap_env():
 	say('generating the build environment in', ENV_DIR)
-	rmtree(ENV_DIR)
+	# no rmtree: builds may be running; every file is replaced by rename and
+	# leftovers are removed at the end
 	bindir = ENV_DIR / 'bin'
-	bindir.mkdir(parents=True)
+	bindir.mkdir(parents=True, exist_ok=True)
+	before = {p for p in ENV_DIR.rglob('*') if p.is_file() or p.is_symlink()}
+	global _env_written
+	_env_written = set()
 	real = TOOLCHAIN / 'bin'
 	for tool in ('gcc', 'g++', 'c++', 'cpp'):
-		body = COMPILER_WRAPPER % {'real': real / (TRIPLE + '-' + tool)}
+		body = COMPILER_WRAPPER % {'real': real / (TRIPLE + '-' + tool), 'cpu': TARGET_CPU_FLAGS}
 		wrapper(bindir / (TRIPLE + '-' + tool), body)
 		wrapper(bindir / tool, body)
-	cc = COMPILER_WRAPPER % {'real': real / (TRIPLE + '-gcc')}
+	cc = COMPILER_WRAPPER % {'real': real / (TRIPLE + '-gcc'), 'cpu': TARGET_CPU_FLAGS}
 	wrapper(bindir / (TRIPLE + '-cc'), cc)
 	wrapper(bindir / 'cc', cc)
 	for tool in BINUTILS:
@@ -418,11 +586,13 @@ B_USER_*) d="${1#B_USER_}"; d="${d%_DIRECTORY}"
 esac
 ''')
 	wrapper(bindir / 'findpaths', r'''
-# findpaths for the build sysroot: only the system installation location
+# findpaths for the build sysroot: the system installation location only.
+# findpaths [-e] [-a arch] [-r dependency] [-c separator] <kind> [<subpath>]
 : "${PROSE_SYSROOT:?}"
 S="$PROSE_SYSROOT/boot/system"
+existing=0
 while [ $# -gt 0 ]; do
-	case "$1" in -a|-r) shift 2 ;; -e|-p) shift ;; *) break ;; esac
+	case "$1" in -a|-r|-c) shift 2 ;; -e) existing=1; shift ;; -p|-l) shift ;; *) break ;; esac
 done
 d="${1#B_FIND_PATH_}"; d="${d%_DIRECTORY}"
 case "$d" in
@@ -436,7 +606,9 @@ SETTINGS) d=settings ;; SOUNDS) d=data/sounds ;; SPOOL) d=var/spool ;;
 TRANSLATORS) d=add-ons/Translators ;; VAR) d=var ;; IMAGE_PATH) d="" ;;
 *) echo "findpaths: unsupported constant $1" >&2; exit 1 ;;
 esac
-echo "$S${d:+/$d}"
+path="$S${d:+/$d}${2:+/$2}"
+[ $existing = 1 ] && [ ! -e "$path" ] && exit 0
+echo "$path"
 ''')
 	wrapper(bindir / 'linkcatkeys', r'''
 # The host build of linkcatkeys cannot write into a binary (-tr goes through
@@ -514,19 +686,19 @@ echo "${out[*]}"
 ''')
 	# Homebrew installs GNU libtoolize as glibtoolize (Apple owns "libtool")
 	wrapper(bindir / 'libtoolize', 'exec /opt/homebrew/bin/glibtoolize "$@"\n')
-	wrapper(bindir / 'make', r'''
-# In INSTALL, DESTDIR is exported so a plain `make install` stages the
-# files. A command line that already passes staged paths (make install
-# PREFIX=$prefix) would get them twice: drop DESTDIR for such a call.
-if [ -n "${PROSE_STAGING_ROOT:-}" ] && [ -n "${DESTDIR:-}" ]; then
-	for a in "$@"; do
-		case "$a" in
-		*=$PROSE_STAGING_ROOT*) unset DESTDIR; break ;;
-		esac
-	done
-fi
-exec /usr/bin/make "$@"
-''')
+	real_make = run(['xcrun', '-f', 'make'], capture=True, check=False).stdout.strip() \
+		or '/usr/bin/make'
+	write_file(bindir / 'make', MAKE_WRAPPER.replace('@REAL_MAKE@', real_make), 0o755)
+	_env_written.add(bindir / 'make')
+	wrapper(bindir / 'jam', r'''
+# jam as a Haiku chroot runs it: its built-in OS variable names the build
+# host, and Jamrules branch on it (Pe links BeOS R5's -lnet -lstdc++.r4
+# when OS isn't HAIKU)
+for a in "$@"; do
+	case "$a" in -sOS=*) exec %s "$@" ;; esac
+done
+exec %s -sOS=HAIKU "$@"
+''' % (host_tool('jam'), host_tool('jam')))
 	wrapper(bindir / 'getarch', 'echo %s\n' % ARCH)
 	wrapper(bindir / 'setarch', r'''
 # single-architecture target: setarch <arch> [command...] just runs it
@@ -551,11 +723,15 @@ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 ''' % {'bin': bindir, 't': TRIPLE})
+	_env_written.add(tc)
+	_env_written.add(ENV_DIR / 'config.site')
 	write_file(ENV_DIR / 'config.site', '''# generated by prosepkg bootstrap
 # Haiku answers for configure tests that cannot run target code here.
 ac_cv_func_malloc_0_nonnull=${ac_cv_func_malloc_0_nonnull=yes}
 ac_cv_func_realloc_0_nonnull=${ac_cv_func_realloc_0_nonnull=yes}
 ''')
+	for stale in before - _env_written:
+		stale.unlink()
 
 
 def check_toolchain():
@@ -701,6 +877,9 @@ def arch_status(keys, suffix=''):
 		return 'untested'
 	if '!all' in archs:
 		return 'broken'
+	listed = [a.lstrip('?') for a in archs if not a.startswith('!')]
+	if listed and all(a == 'x86_gcc2' for a in listed):
+		return 'broken'  # gcc2-only (BeOS-era) code
 	return 'untested'
 
 
@@ -825,6 +1004,7 @@ class Builder:
 		self.results = load_json(RESULTS, {})
 		self.building = []
 		self.failed = {}  # port -> error, within this run
+		self.done = set()  # ports built in this run
 
 	# -- lookup
 
@@ -873,7 +1053,10 @@ class Builder:
 		port = self.find_port(spec)
 		status = self.results.get(port.name, {})
 		built = all((REPO / port.hpkg_name(pkg, sfx)).exists() for sfx, pkg in port.packages())
-		if built and status.get('version') == port.full_version and not force:
+		if getattr(self.args, 'force_all', False) and port.name not in self.done:
+			force = True
+		if (built and status.get('version') == port.full_version and not force) \
+				or port.name in self.done:
 			return port
 		if port.name in self.failed:
 			raise BuildError('%s failed earlier in this run' % port.name)
@@ -882,6 +1065,7 @@ class Builder:
 		self.building.append(port.name)
 		try:
 			self._build(port)
+			self.done.add(port.name)
 		except BuildError as e:
 			self.failed[port.name] = str(e)
 			raise
@@ -1116,6 +1300,8 @@ class Builder:
 			raise BuildError('%s phase failed (exit %d)' % (phase, proc.returncode))
 		if install:
 			self._normalize_destdir(destdir, log)
+			roots = [destdir] + sorted((work / 'sub').glob('*'))
+			self._scrub_host_paths(roots, log)
 
 	def _normalize_destdir(self, destdir, log):
 		"""`make install PREFIX=$prefix` with DESTDIR also exported lands in
@@ -1125,6 +1311,56 @@ class Builder:
 			log.write('note: folding doubled DESTDIR prefix back\n')
 			run(['/bin/cp', '-R', str(doubled) + '/.', destdir], log=log)
 			rmtree(destdir / str(destdir).lstrip('/').split('/')[0])
+
+	# host paths that mean a Haiku path in installed text files
+	HOST_TOOL_PATHS = [
+		('/opt/homebrew/opt/coreutils/libexec/gnubin/', '/bin/'),
+		('/opt/homebrew/opt/gnu-sed/libexec/gnubin/', '/bin/'),
+		('/opt/homebrew/bin/', '/bin/'),
+	]
+
+	def _scrub_host_paths(self, roots, log):
+		"""Recipes that write files in INSTALL (.pc files from a heredoc over
+		$prefix, ...) see the staging paths: map every staging root back to
+		/boot/system, and host tool paths to Haiku's. Text files and symlink
+		targets only; binaries that embed a staging path are reported."""
+		# every staging root in every tree: packageEntries moves files that
+		# INSTALL wrote into destdir (with destdir paths) to sub/<suffix>
+		roots = [r for r in roots if r.is_dir()]
+		pairs = []
+		for root in roots:
+			pairs += [((str(root) + '/boot/system').encode(), b'/boot/system'),
+				(str(root).encode() + b'/', b'/')]
+		pairs += [(a.encode(), b.encode()) for a, b in self.HOST_TOOL_PATHS]
+		prefixes = tuple(str(root) + '/' for root in roots)
+		for root in roots:
+			for path in sorted(root.rglob('*')):
+				if path.is_symlink():
+					target = os.readlink(path)
+					if target.startswith(prefixes):
+						for prefix in prefixes:
+							if target.startswith(prefix):
+								fixed = target[len(prefix) - 1:]
+								break
+						path.unlink()
+						os.symlink(fixed, path)
+						log.write('scrubbed symlink %s -> %s\n' % (path, fixed))
+					continue
+				if not path.is_file():
+					continue
+				data = path.read_bytes()
+				if b'\0' in data[:8192]:
+					if any(p.encode() in data for p in prefixes):
+						log.write('warning: binary embeds a staging path: %s\n' % path)
+					continue
+				fixed = data
+				for a, b in pairs:
+					fixed = fixed.replace(a, b)
+				if fixed != data:
+					mode = path.stat().st_mode
+					path.write_bytes(fixed)
+					os.chmod(path, mode)
+					log.write('scrubbed host paths in %s\n' % path)
 
 	def _package(self, port, work, log):
 		hpkgs = []
@@ -1216,7 +1452,8 @@ def build_env(sysroot, work):
 	mimedb = Path(work) / 'mime_db'
 	mimedb.mkdir(parents=True, exist_ok=True)
 	env = {
-		'PATH': ':'.join([str(ENV_DIR / 'bin'), str(HOSTTOOLS / 'bin')] + HOST_PATH),
+		# "." last: Haiku's default PATH has it, and recipes run "configure"
+		'PATH': ':'.join([str(ENV_DIR / 'bin'), str(HOSTTOOLS / 'bin')] + HOST_PATH + ['.']),
 		'HOME': os.environ.get('HOME', '/tmp'),
 		'USER': os.environ.get('USER', 'prose'),
 		'TMPDIR': str(tmp),
@@ -1429,6 +1666,44 @@ def cmd_install(args):
 			{s.split('-')[0] for s in stale} and h.name not in stale else ''))
 
 
+def cmd_audit(args):
+	"""Look inside built packages for things that cannot work on Haiku:
+	build-host paths in text files or symlinks, cross tool names in
+	installed scripts. Binaries are skipped (debug info names source files)."""
+	import tempfile
+	bad = 0
+	hpkgs = [REPO / h for h in args.packages] if args.packages else sorted(REPO.glob('*.hpkg'))
+	needles = [b'/Volumes/', b'/opt/homebrew', b'/private/tmp', (TRIPLE + '-').encode()]
+	for hpkg in hpkgs:
+		with tempfile.TemporaryDirectory(dir=CACHE) as tmp:
+			run([host_tool('package'), 'extract', '-C', tmp, hpkg], capture=True)
+			problems = []
+			for path in sorted(Path(tmp).rglob('*')):
+				rel = path.relative_to(tmp)
+				if path.is_symlink():
+					if os.readlink(path).startswith(('/Volumes/', '/private/', '/opt/')):
+						problems.append('%s -> %s' % (rel, os.readlink(path)))
+				elif path.is_file() and str(rel) != '.PackageInfo':
+					data = path.read_bytes()
+					if b'\0' in data[:8192]:
+						continue
+					for needle in needles:
+						if needle in data:
+							i = data.index(needle)
+							line = data[max(0, i - 40):i + 60]
+							problems.append('%s: ...%s...' % (rel,
+								line.decode(errors='replace').replace('\n', ' ').strip()))
+							break
+			if problems:
+				bad += 1
+				print(hpkg.name)
+				for p in problems:
+					print('   ' + p)
+	say('%d of %d packages have problems' % (bad, len(hpkgs)))
+	if bad:
+		sys.exit(1)
+
+
 def cmd_index(args):
 	recipes, index = recipe_index(refresh=args.refresh)
 	print('%d ports, %d provided names' % (len(recipes), len(index)))
@@ -1451,11 +1726,14 @@ def main():
 	p = argparse.ArgumentParser(prog='prosepkg', description=__doc__.split('\n')[0])
 	sub = p.add_subparsers(dest='command', required=True)
 	b = sub.add_parser('bootstrap', help='copy toolchain, host tools and base packages; generate the environment')
-	b.add_argument('--refresh', action='store_true', help='redo every step')
+	b.add_argument('--refresh', nargs='?', const='all', metavar='STEPS',
+		help='redo steps: all (default) or a comma list of toolchain,hosttools,base')
 	b.set_defaults(func=bootstrap)
 	b = sub.add_parser('build', help='build ports (and their build requirements)')
 	b.add_argument('ports', nargs='+')
-	b.add_argument('--force', action='store_true', help='rebuild even if packaged')
+	b.add_argument('--force', action='store_true', help='rebuild the named ports even if packaged')
+	b.add_argument('--force-all', action='store_true',
+		help='rebuild every port the run touches (dependencies too), each once')
 	b.add_argument('--force-arch', action='store_true', help='ignore ARCHITECTURES')
 	b.add_argument('--keep-going', '-k', action='store_true')
 	b.add_argument('--keep-work', action='store_true', help='keep the work dir of successful builds')
@@ -1469,6 +1747,9 @@ def main():
 	b.add_argument('image')
 	b.add_argument('packages', nargs='+', help='package or port names, @set (packages/sets/<set>)')
 	b.set_defaults(func=cmd_install)
+	b = sub.add_parser('audit', help='check built packages for build-host paths and cross tool names')
+	b.add_argument('packages', nargs='*', help='hpkg file names (default: the whole repo)')
+	b.set_defaults(func=cmd_audit)
 	b = sub.add_parser('index', help='(re)evaluate all recipes')
 	b.add_argument('--refresh', action='store_true')
 	b.set_defaults(func=cmd_index)

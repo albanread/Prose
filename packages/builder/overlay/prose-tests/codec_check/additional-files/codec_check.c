@@ -40,6 +40,9 @@
 #include <dav1d/dav1d.h>
 #include <wavpack/wavpack.h>
 #include <iconv.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define W 64
 #define H 48
@@ -72,6 +75,119 @@ make_tone(int16_t* pcm, int count, int rate, double hz)
 {
 	for (int i = 0; i < count; i++)
 		pcm[i] = (int16_t)(12000 * sin(2 * M_PI * hz * i / rate));
+}
+
+/* -- CPU features ----------------------------------------------------- */
+
+/* One instruction per feature, run in a child: an unsupported one raises
+ * SIGILL there. The packages are built for the Apple M1 floor
+ * (-march=armv8.4-a+fp16+fp16fml+aes+sha2+sha3); this proves the VM's CPU
+ * really offers it. */
+
+static unsigned int sWord;
+
+static void f_neon(void) { __asm__ volatile("add v0.4s, v0.4s, v0.4s" ::: "v0"); }
+static void f_fp16(void) { __asm__ volatile("fadd h0, h0, h0" ::: "v0"); }
+static void f_fhm(void) { __asm__ volatile("fmlal v0.4s, v1.4h, v2.4h" ::: "v0"); }
+static void f_dotprod(void) { __asm__ volatile("sdot v0.4s, v1.16b, v2.16b" ::: "v0"); }
+static void f_rdm(void) { __asm__ volatile("sqrdmlah v0.4s, v1.4s, v2.4s" ::: "v0"); }
+static void f_crc(void) { __asm__ volatile("crc32w w0, w0, w1" ::: "x0"); }
+static void f_lse(void)
+{
+	__asm__ volatile("mov w1, #1\n\tldadd w1, w2, [%0]" :: "r"(&sWord) : "x1", "x2", "memory");
+}
+static void f_rcpc(void)
+{
+	__asm__ volatile("ldapr w1, [%0]" :: "r"(&sWord) : "x1", "memory");
+}
+static void f_jscvt(void) { __asm__ volatile("fjcvtzs w0, d0" ::: "x0", "cc"); }
+static void f_fcma(void) { __asm__ volatile("fcadd v0.4s, v1.4s, v2.4s, #90" ::: "v0"); }
+static void f_flagm(void) { __asm__ volatile("cfinv" ::: "cc"); }
+static void f_aes(void) { __asm__ volatile("aese v0.16b, v1.16b" ::: "v0"); }
+static void f_sha2(void) { __asm__ volatile("sha256h q0, q1, v2.4s" ::: "v0"); }
+static void f_sha3(void) { __asm__ volatile("eor3 v0.16b, v1.16b, v2.16b, v3.16b" ::: "v0"); }
+static void f_sha512(void) { __asm__ volatile("sha512h q0, q1, v2.2d" ::: "v0"); }
+/* beyond the floor (M2 and later): reported, not required */
+static void f_i8mm(void)
+{
+	__asm__ volatile(".arch_extension i8mm\n\tsmmla v0.4s, v1.16b, v2.16b" ::: "v0");
+}
+static void f_bf16(void)
+{
+	__asm__ volatile(".arch_extension bf16\n\tbfdot v0.4s, v1.8h, v2.8h" ::: "v0");
+}
+
+static void
+probe_trapped(int signal)
+{
+	_exit(2);
+}
+
+static int
+cpu_has(void (*instruction)(void))
+{
+	fflush(stdout);
+	pid_t child = fork();
+	if (child == 0) {
+		signal(SIGILL, probe_trapped);
+		signal(SIGBUS, probe_trapped);
+		signal(SIGSEGV, probe_trapped);
+		instruction();
+		_exit(0);
+	}
+	if (child < 0)
+		return -1;
+	/* Haiku arm64 does not turn an undefined instruction into SIGILL
+	 * (do_sync_handler has no EXCP_UNKNOWN case): the child can end up
+	 * waiting in the debugger instead. Don't wait for it forever. */
+	int status = 0;
+	for (int i = 0; i < 300; i++) {
+		pid_t done = waitpid(child, &status, WNOHANG);
+		if (done == child)
+			return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+		usleep(10000);
+	}
+	kill(child, SIGKILL);
+	waitpid(child, &status, 0);
+	return 0;
+}
+
+static void
+check_cpu(void)
+{
+	static const struct {
+		const char* name;
+		void (*instruction)(void);
+	} floor[] = {
+		{ "neon", f_neon }, { "fp16", f_fp16 }, { "fhm", f_fhm },
+		{ "dotprod", f_dotprod }, { "rdm", f_rdm }, { "crc", f_crc },
+		{ "lse", f_lse }, { "rcpc", f_rcpc }, { "jscvt", f_jscvt },
+		{ "fcma", f_fcma }, { "flagm", f_flagm }, { "aes", f_aes },
+		{ "sha2", f_sha2 }, { "sha3", f_sha3 }, { "sha512", f_sha512 },
+	}, beyond[] = {
+		{ "i8mm", f_i8mm }, { "bf16", f_bf16 },
+	};
+	char missing[256] = "", extra[128] = "";
+	int count = 0;
+	for (size_t i = 0; i < sizeof(floor) / sizeof(floor[0]); i++) {
+		if (cpu_has(floor[i].instruction) == 1)
+			count++;
+		else {
+			strcat(missing, " ");
+			strcat(missing, floor[i].name);
+		}
+	}
+	for (size_t i = 0; i < sizeof(beyond) / sizeof(beyond[0]); i++) {
+		strcat(extra, " ");
+		strcat(extra, beyond[i].name);
+		strcat(extra, cpu_has(beyond[i].instruction) == 1 ? "+" : "-");
+	}
+	char what[512];
+	if (missing[0] == '\0')
+		snprintf(what, sizeof(what), "all %d floor features execute; beyond:%s", count, extra);
+	else
+		snprintf(what, sizeof(what), "missing:%s", missing);
+	report("cpu", "armv8.4-a+M1 floor", missing[0] == '\0', what);
 }
 
 /* -- images ------------------------------------------------------------ */
@@ -589,6 +705,7 @@ int
 main(void)
 {
 	printf("codec_check: codec libraries on this system\n\n");
+	check_cpu();
 	check_png();
 	check_jpeg();
 	check_webp();

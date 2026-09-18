@@ -3,10 +3,12 @@ DESCRIPTION="codec_check links every codec library of the Prose package set \
 (image: libpng, libjpeg-turbo, libwebp, libtiff, giflib, OpenJPEG, Little CMS; \
 audio/video: Ogg, Vorbis, FLAC, Opus, Speex, mpg123, LAME, Theora, libvpx, \
 dav1d, WavPack; libiconv). It prints each library's version and runs small \
-encode/decode round trips in memory. Exit status: number of failed checks."
+encode/decode round trips in memory, and checks that the CPU offers the \
+instruction set the packages are built for. Exit status: number of \
+failed checks."
 COPYRIGHT="2026 Prose"
 LICENSE="MIT"
-REVISION="2"
+REVISION="4"
 ARCHITECTURES="arm64"
 
 PROVIDES="

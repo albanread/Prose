@@ -24,8 +24,6 @@ cat > "$WORK/UserBootscript" <<'EOF'
 out=/boot/home/codec_check.txt
 {
 	echo "== $(uname -a)"
-	echo "== codec packages installed:"
-	ls /boot/system/packages
 	echo
 	codec_check
 	echo "codec_check exit status: $?"
