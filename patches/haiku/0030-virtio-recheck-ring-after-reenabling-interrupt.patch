@@ -1,0 +1,202 @@
+From e2ce6e206185cde9d1cd92e7002a1e09c9e4f4a3 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 22:56:58 +0100
+Subject: [PATCH] virtio: look at the ring again after turning a queue's
+ interrupt back on
+
+VirtioQueue::Interrupt() turned the queue's interrupt off
+(VRING_AVAIL_F_NO_INTERRUPT), ran the driver's callback and turned it back
+on. A device posts completions without an interrupt while it is off, so a
+completion landing after the callback had drained the ring but before the
+interrupt was on again waited for the device's next interrupt: a moment
+under load, a frame for the display, forever on a quiet queue. The virtio
+spec wants the driver to check the ring after re-enabling (Linux's
+virtqueue_enable_cb() returns exactly that).
+
+Now: interrupt on, full barrier, and another round if the device's used
+index moved since the callback started -- compared with what the callback
+saw, not with what is unconsumed, because some drivers (virtio_net,
+virtio_gpu, the balloon) leave the draining to a thread. At most 64
+rounds. Every device interrupt already calls every queue's callback, so
+drivers take extra calls in their stride.
+
+A rate-limited dprintf counts the rounds that caught a completion; the
+device keeps its virtio type for it. Under 8 parallel HostFS readers and
+writers it fired 64+ times on virtio-fs's request queue in one run; the
+HostFS driver's own fallback now also says when polling found a
+completion (it never has with this fix).
+
+Tested on VZ: virtio-blk boot, networking (DHCP, internet, DNS), our input
+devices (--input-test), Prose MIDI, the S2 display (10000 commits, avg
+49-58 us, no steady-state outliers), HostFS (hostfs-test, hostfs-hard,
+parallel stress); and virtio-snd, blk and net on QEMU (clean 440 Hz tone).
+---
+ .../bus_managers/virtio/VirtioDevice.cpp      |  2 +
+ .../bus_managers/virtio/VirtioPrivate.h       |  4 ++
+ .../bus_managers/virtio/VirtioQueue.cpp       | 51 +++++++++++++++++--
+ .../disk/virtual/virtio_fs/virtio_fs.cpp      | 10 +++-
+ 4 files changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp b/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
+index a87cec3386..0e7fcb505b 100644
+--- a/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
++++ b/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
+@@ -62,6 +62,7 @@ VirtioDevice::VirtioDevice(device_node *node)
+ 	fQueues(NULL),
+ 	fFeatures(0),
+ 	fAlignment(0),
++	fType(0),
+ 	fVirtio1(false),
+ 	fConfigHandler(NULL),
+ 	fDriverCookie(NULL)
+@@ -84,6 +85,7 @@ VirtioDevice::VirtioDevice(device_node *node)
+ 	uint8 version = 0;
+ 	if (gDeviceManager->get_attr_uint8(fNode, VIRTIO_VERSION_ITEM, &version, true) == B_OK)
+ 		fVirtio1 = version == 1;
++	gDeviceManager->get_attr_uint16(fNode, VIRTIO_DEVICE_TYPE_ITEM, &fType, true);
+ 
+ 	fController->set_sim(fCookie, this);
+ 
+diff --git a/src/add-ons/kernel/bus_managers/virtio/VirtioPrivate.h b/src/add-ons/kernel/bus_managers/virtio/VirtioPrivate.h
+index eec91af44d..b4ccdcb7a9 100644
+--- a/src/add-ons/kernel/bus_managers/virtio/VirtioPrivate.h
++++ b/src/add-ons/kernel/bus_managers/virtio/VirtioPrivate.h
+@@ -68,6 +68,7 @@ public:
+ 
+ 			uint16				Alignment() const { return fAlignment; }
+ 			uint64				Features() const { return fFeatures; }
++			uint16				Type() const { return fType; }
+ 
+ 			void*				DriverCookie() { return fDriverCookie; }
+ 
+@@ -96,6 +97,7 @@ private:
+ 			size_t				fQueueCount;
+ 			uint64				fFeatures;
+ 			uint16				fAlignment;
++			uint16				fType;
+ 			bool				fVirtio1;
+ 
+ 			virtio_intr_func	fConfigHandler;
+@@ -142,6 +144,7 @@ public:
+ 									uint32* _usedLength = NULL);
+ 
+ private:
++			uint16				_UsedIndex() const;
+ 			void				UpdateAvailable(uint16 index);
+ 			uint16				QueueVector(uint16 insertIndex,
+ 									struct vring_desc *desc,
+@@ -167,6 +170,7 @@ private:
+ 
+ 			virtio_callback_func fCallback;
+ 			void*				fCookie;
++			int32				fLateCompletions;
+ 
+ 			spinlock			fLock;
+ };
+diff --git a/src/add-ons/kernel/bus_managers/virtio/VirtioQueue.cpp b/src/add-ons/kernel/bus_managers/virtio/VirtioQueue.cpp
+index 8761d580f7..206571c820 100644
+--- a/src/add-ons/kernel/bus_managers/virtio/VirtioQueue.cpp
++++ b/src/add-ons/kernel/bus_managers/virtio/VirtioQueue.cpp
+@@ -147,6 +147,7 @@ VirtioQueue::VirtioQueue(VirtioDevice* device, uint16 queueNumber,
+ 	fIndirectMaxSize(0),
+ 	fCallback(NULL),
+ 	fCookie(NULL),
++	fLateCompletions(0),
+ 	fLock(B_SPINLOCK_INITIALIZER)
+ {
+ 	fDescriptors = new(std::nothrow) TransferDescriptor*[fRingSize];
+@@ -238,17 +239,57 @@ VirtioQueue::NotifyHost()
+ }
+ 
+ 
++/*!	The device's index into the used ring: how many completions it has
++	posted so far.
++*/
++uint16
++VirtioQueue::_UsedIndex() const
++{
++	uint16 index = *(volatile uint16*)&fRing.used->idx;
++	memory_read_barrier();
++	return index;
++}
++
++
+ status_t
+ VirtioQueue::Interrupt()
+ {
+ 	CALLED();
+ 
+-	DisableInterrupt();
+-
+-	if (fCallback != NULL)
+-		fCallback(Device()->DriverCookie(), fCookie);
++	// HaikuArmQemu fork: while the callback runs, the queue's interrupt is
++	// off (VRING_AVAIL_F_NO_INTERRUPT), and a device posts completions then
++	// without raising one. A completion that lands after the callback has
++	// drained the ring but before the interrupt is on again used to wait for
++	// the device's next interrupt -- a frame on the display, forever on a
++	// quiet queue. So once it is on again, look at the ring once more and go
++	// round again if the device added anything since the callback started.
++	// (Not "anything unconsumed": some drivers leave the draining to a thread
++	// and would keep us here.) The barrier orders turning the interrupt on
++	// before reading the index; the device does the reverse -- index, then
++	// flag -- so one of the two always sees the other.
++	static const int32 kMaxRounds = 64;
++	for (int32 round = 0; ; round++) {
++		DisableInterrupt();
++		const uint16 seen = _UsedIndex();
++		const uint16 consumed = fRingUsedIndex;
++
++		if (fCallback != NULL)
++			fCallback(Device()->DriverCookie(), fCookie);
++
++		if (round > 0 && fRingUsedIndex != consumed) {
++			int32 late = atomic_add(&fLateCompletions, 1) + 1;
++			if ((late & (late - 1)) == 0) {
++				dprintf("virtio: device type %u queue %u: %" B_PRId32 " time(s) a "
++					"completion came while its interrupt was off\n", fDevice->Type(),
++					fQueueNumber, late);
++			}
++		}
+ 
+-	EnableInterrupt();
++		EnableInterrupt();
++		memory_full_barrier();
++		if (_UsedIndex() == seen || round >= kMaxRounds)
++			break;
++	}
+ 	return B_OK;
+ }
+ 
+diff --git a/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp b/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp
+index ff3162e3b0..b866173cab 100644
+--- a/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp
++++ b/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp
+@@ -106,6 +106,7 @@ struct virtio_fs_info {
+ 
+ 	int32						requests;
+ 	int32						errors;
++	int32						lateCompletions;	// found by polling
+ };
+ 
+ 
+@@ -275,8 +276,15 @@ virtio_fs_do_request(void* cookie, virtio_fs_request* request)
+ 		&& atomic_get(&slot->completed) == 0) {
+ 		slot->completion.Add(&entry);
+ 		virtio_fs_queue_callback(info, queue);
+-		if (atomic_get(&slot->completed) != 0)
++		if (atomic_get(&slot->completed) != 0) {
++			// the device completed it without an interrupt reaching us
++			int32 late = atomic_add(&info->lateCompletions, 1) + 1;
++			if ((late & (late - 1)) == 0) {
++				ERROR("%" B_PRId32 " completion(s) found only by polling, the latest "
++					"after %" B_PRId64 " ms\n", late, (system_time() - start) / 1000);
++			}
+ 			break;
++		}
+ 		if (system_time() >= nextReport) {
+ 			ERROR("opcode %" B_PRIu32 " unique %" B_PRIu64 " still waiting after %" B_PRId64
+ 				" s\n", opcode, unique, (system_time() - start) / 1000000);
+-- 
+2.54.0 (Apple Git-157)
+
