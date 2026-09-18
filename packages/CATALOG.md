@@ -43,7 +43,7 @@ Batch 1 = curated first wave to clone, cross-build (arm64) and install into the 
 | [Yab](https://github.com/haikuarchives/Yab) | Yab is a complete BASIC programming language for Haiku | |
 | [hey-shoot](https://github.com/haikuarchives/hey-shoot) | Scripts for updating Haiku userguide screenshots | |
 
-## Graphics And Media (63)
+## Graphics And Media (61)
 
 | repo | description | batch 1 |
 |---|---|---|
@@ -58,7 +58,6 @@ Batch 1 = curated first wave to clone, cross-build (arm64) and install into the 
 | [BeInYourStereo](https://github.com/haikuarchives/BeInYourStereo) | Be in your Stereo is a plugin to SoundPlay that scans your BFS volumes for digital music files. It builds a cross-referenced index of your collection based on Artist, Genre, Year, and Album BFS attributes, then serves up views of your track list and collection via HTTP. | |
 | [BePhotoMagic](https://github.com/haikuarchives/BePhotoMagic) | BePhotoMagic is a resurrection of the abandoned Photon project and is intended to be a Photoshop-quality paint and image processing for BeOS. | |
 | [Becasso](https://github.com/haikuarchives/Becasso) | Paint and imaging software for Haiku, originally written for BeOS by Sum Software. | |
-| [BurnItNow](https://github.com/haikuarchives/BurnItNow) | BurnItNow is an application to burn CDs and DVDs. | **yes** |
 | [CDPlayer](https://github.com/haikuarchives/CDPlayer) | Use your computer hardware to play CDs without the soundcard. | |
 | [Colors](https://github.com/haikuarchives/Colors) | Colors! is a color picker like that in Adobe Photoshop. | |
 | [Cortex](https://github.com/haikuarchives/Cortex) | Backup of the Cortex CVS repo. NOTE: Only here for "git blame" usage, if you want Cortex's source you can find it in Haiku's repository. | |
@@ -71,7 +70,6 @@ Batch 1 = curated first wave to clone, cross-build (arm64) and install into the 
 | [HaikuMIDILogger](https://github.com/haikuarchives/HaikuMIDILogger) |  | |
 | [HaikuOnAStick](https://github.com/haikuarchives/HaikuOnAStick) | Windows application for easy getting a raw image to one or more removable device such as USB. | |
 | [Hare](https://github.com/haikuarchives/Hare) | Haiku Audio Ripper/Encoder. | |
-| [Helios](https://github.com/haikuarchives/Helios) | CD Burning App for Haiku | |
 | [Hustler](https://github.com/haikuarchives/Hustler) | Audio player that runs in the Deskbar. | |
 | [HyperStudio](https://github.com/haikuarchives/HyperStudio) | HyperStudio is a multitrack audio recording and editing suite with an easy to master graphical user interface. | |
 | [ImageMounter](https://github.com/haikuarchives/ImageMounter) | Mounts filesystem-images by right-clicking. | |
@@ -196,14 +194,13 @@ Batch 1 = curated first wave to clone, cross-build (arm64) and install into the 
 | [XPMTranslator](https://github.com/haikuarchives/XPMTranslator) |  | |
 | [haikuarchives.github.io](https://github.com/haikuarchives/haikuarchives.github.io) | Information on HaikuArchives and the software we archive | |
 
-## Internet And Network (24)
+## Internet And Network (23)
 
 | repo | description | batch 1 |
 |---|---|---|
 | [BeAIM](https://github.com/haikuarchives/BeAIM) | AIM chat client for BeOS. | |
 | [BeDC](https://github.com/haikuarchives/BeDC) | BeDC is a peer to peer file sharing client for BeOS for the Direct Connect protocol. | |
 | [BeMailDaemon](https://github.com/haikuarchives/BeMailDaemon) | BeMailDaemon, a.k.a. Mail Daemon Replacement a.k.a. MDR, is a complete replacement for BeOS R5's mail_daemon. (This has been merged into Haiku and is only here for historical purposes.) | |
-| [BeNapster](https://github.com/haikuarchives/BeNapster) | An open source Napster client for the BeOS. | |
 | [BePPP](https://github.com/haikuarchives/BePPP) | PPPoE and PPtP client for BeOS under old-fashionded networking | |
 | [BeServed](https://github.com/haikuarchives/BeServed) | Cross-platform network file sharing, designed around BeOS. | |
 | [Beam](https://github.com/haikuarchives/Beam) | BEware, Another Mailer - an e-mail client for BeOS/Haiku | |

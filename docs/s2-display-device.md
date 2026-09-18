@@ -68,8 +68,8 @@ struct prds_config {
 	uint8_t  shm_region_id;  // 0
 	uint8_t  reserved0[3];
 	uint64_t shm_size;       // bytes, informational (the capability is authoritative)
-	uint8_t  reserved1[16];  // must read as zero
-};
+	uint8_t  reserved1[12];  // must read as zero
+};                           // 64 bytes
 ```
 
 Rules: unknown `magic` or `version` → the driver refuses the device. `reserved*` must be zero. `pref_*` change when the host window is resized (with `PRDS_F_RESIZE`); everything else is constant for the life of the VM.
@@ -224,7 +224,7 @@ A `prose-display` device in our QEMU fork: `virtio_pci_add_shm_cap()` exposes a 
 ### 10.3 Guest: Haiku (`vz-fork`)
 
 - `busses/virtio/virtio_pci`: parse capability type 8 (`virtio_pci_cap64`: `id`, `bar`, 64-bit `offset`/`length`); bus-manager API `get_shared_memory(device, id, &physical, &size)`.
-- Kernel driver `drivers/graphics/prose_display`: binds to virtio device 63; maps the pool with `B_WRITE_BACK_MEMORY` into a kernel area the accelerant can clone; owns both queues; ioctls for mode set, commit (dirty rects), event mask; releases the retrace semaphore on `VSYNC`; publishes `/dev/graphics/prose_display/0`.
+- Kernel driver `drivers/graphics/prose_display`: binds to virtio device 63; maps the pool with `map_physical_memory(..., B_ANY_KERNEL_ADDRESS | B_WRITE_BACK_MEMORY, ...)` (the memory type travels in the address-spec argument) into a kernel area the accelerant can clone; owns both queues; ioctls for mode set, commit (dirty rects), event mask; releases the retrace semaphore on `VSYNC`; publishes `/dev/graphics/prose_display/0`.
 - Accelerant `prose_display.accelerant`: mode list from `pref_*`/`max_*` plus standard modes that fit; `B_GET_FRAME_BUFFER_CONFIG` returns the cloned pool mapping with the mode's stride; real `B_ACCELERANT_RETRACE_SEMAPHORE`; a new private hook `PRDS_COMMIT(rects)` reached from app_server.
 - app_server (fork): after `_CopyBackToFront(region)`, call the accelerant's commit hook with the region's rectangles (≤ 64 per call; coalesce beyond that). Optional pacing: bounded wait on the retrace semaphore before copying (Sprint 3).
 

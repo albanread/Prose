@@ -1,0 +1,1181 @@
+From b0509d39d81d00e61048e4698460ddd4955cab00 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 14:43:57 +0100
+Subject: [PATCH] Prose Display (S2): virtio shared memory + prose_display
+ driver
+
+virtio bus manager / virtio_pci: parse VIRTIO_PCI_CAP_SHARED_MEMORY_CFG
+(cap type 8, 64-bit offset/length, BAR relative) and expose the regions
+through a new get_shared_memory() entry at the end of both the controller
+and the device interfaces (positional tables: appended, nothing shifts).
+
+prose_display: kernel driver for the Prose Display device (virtio ID 63,
+docs/s2-display-device.md in HaikuArmQemu). Negotiates VSYNC|RESIZE,
+reads the 64-byte config, maps shared memory region 0 (the surface pool)
+write-back, allocates controlq/eventq, posts 8 event buffers, enables
+events, sets the preferred mode and publishes graphics/prose_display/0
+(ioctls for the coming accelerant: GET_SHARED_INFO, SET_MODE, COMMIT,
+ENABLE_EVENTS). Milestone A: it draws a colour-bar test pattern and
+animates a box with two-rect commits from a kernel thread (PRDS_TEST_PATTERN),
+so the whole pipe is verified with no accelerant yet.
+
+Verified on Virtualization.framework (hvgpu --display s2): region 0
+appears as BAR 4 at 0x180000000, mode 1280x800 stride 5120, ~10
+commits/s, host snapshot shows the pattern.
+
+arm64 note: an area cannot be kernel-RW/user-RO (arch_vm_supports_protection),
+so the shared info area is kernel-only + B_CLONEABLE_AREA.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ build/jam/packages/Haiku                      |   1 +
+ .../graphics/prose_display/prose_display.h    | 156 ++++
+ headers/private/virtio/virtio.h               |   7 +
+ .../bus_managers/virtio/VirtioDevice.cpp      |   9 +
+ .../bus_managers/virtio/VirtioModule.cpp      |  13 +-
+ .../bus_managers/virtio/VirtioPrivate.h       |   2 +
+ .../busses/virtio/virtio_pci/virtio_pci.cpp   |  51 +-
+ .../busses/virtio/virtio_pci/virtio_pci.h     |   2 +
+ src/add-ons/kernel/drivers/graphics/Jamfile   |   1 +
+ .../drivers/graphics/prose_display/Jamfile    |   9 +
+ .../graphics/prose_display/prose_display.cpp  | 736 ++++++++++++++++++
+ 11 files changed, 985 insertions(+), 2 deletions(-)
+ create mode 100644 headers/private/graphics/prose_display/prose_display.h
+ create mode 100644 src/add-ons/kernel/drivers/graphics/prose_display/Jamfile
+ create mode 100644 src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 661c49cdf1..544030965f 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -134,6 +134,7 @@ AddNewDriversToPackage disk virtual :
+ 	virtio_block@arm,arm64,riscv64
+ 	;
+ AddNewDriversToPackage graphics :
++	prose_display@arm64
+ 	virtio_gpu
+ 	;
+ AddNewDriversToPackage power
+diff --git a/headers/private/graphics/prose_display/prose_display.h b/headers/private/graphics/prose_display/prose_display.h
+new file mode 100644
+index 0000000000..30bd14af57
+--- /dev/null
++++ b/headers/private/graphics/prose_display/prose_display.h
+@@ -0,0 +1,156 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Prose Display (PRDS): the shared-surface display device. The wire protocol
++ * is specified in HaikuArmQemu/docs/s2-display-device.md; this header is the
++ * C view of it, shared by the kernel driver and the accelerant.
++ */
++#ifndef _PROSE_DISPLAY_H
++#define _PROSE_DISPLAY_H
++
++
++#include <SupportDefs.h>
++#include <Drivers.h>
++
++
++#define PRDS_VIRTIO_DEVICE_ID		63
++#define PRDS_MAGIC					0x53445250	/* "PRDS", little-endian */
++#define PRDS_VERSION				1
++
++#define PRDS_F_VSYNC				(1ULL << 0)
++#define PRDS_F_RESIZE				(1ULL << 1)
++#define PRDS_F_BLIT					(1ULL << 2)
++
++#define PRDS_FORMAT_B8G8R8X8		1
++#define PRDS_SHM_ALIGNMENT			16384
++#define PRDS_MAX_COMMIT_RECTS		64
++#define PRDS_EVENT_SIZE				32
++
++enum {
++	PRDS_CMD_SET_MODE			= 0x0100,
++	PRDS_CMD_COMMIT				= 0x0101,
++	PRDS_CMD_ENABLE_EVENTS		= 0x0102,
++	PRDS_CMD_GET_INFO			= 0x0103,
++
++	PRDS_RESP_OK				= 0x1000,
++	PRDS_RESP_ERR_INVALID		= 0x1100,
++	PRDS_RESP_ERR_UNSUPPORTED	= 0x1101,
++	PRDS_RESP_ERR_STATE			= 0x1102,
++	PRDS_RESP_ERR_BOUNDS		= 0x1103,
++
++	PRDS_EVT_VSYNC				= 0x2000,
++	PRDS_EVT_MODE_HINT			= 0x2001,
++	PRDS_EVT_REDRAW				= 0x2002,
++};
++
++enum {
++	PRDS_EVENT_MASK_VSYNC		= 1,
++	PRDS_EVENT_MASK_MODE_HINT	= 2,
++	PRDS_EVENT_MASK_REDRAW		= 4,
++};
++
++
++struct prds_config {
++	uint32	magic;
++	uint16	version;
++	uint16	flags;
++	uint32	max_width;
++	uint32	max_height;
++	uint32	pref_width;
++	uint32	pref_height;
++	uint32	refresh_mhz;
++	uint32	stride_align;
++	uint32	formats;
++	uint32	max_surfaces;
++	uint8	shm_region_id;
++	uint8	reserved0[3];
++	uint64	shm_size;
++	uint8	reserved1[12];
++} _PACKED;
++
++struct prds_hdr {
++	uint32	type;
++	uint32	flags;
++	uint64	seq;
++} _PACKED;
++
++struct prds_rect {
++	uint32	x;
++	uint32	y;
++	uint32	width;
++	uint32	height;
++} _PACKED;
++
++struct prds_set_mode {
++	struct prds_hdr	hdr;
++	uint32	surface_id;
++	uint32	width;
++	uint32	height;
++	uint32	stride;
++	uint32	format;
++	uint32	padding;
++	uint64	offset;
++} _PACKED;
++
++struct prds_commit {
++	struct prds_hdr	hdr;
++	uint32	surface_id;
++	uint32	rect_count;
++	struct prds_rect	rects[PRDS_MAX_COMMIT_RECTS];
++} _PACKED;
++
++struct prds_enable_events {
++	struct prds_hdr	hdr;
++	uint32	mask;
++	uint32	reserved;
++} _PACKED;
++
++struct prds_resp {
++	struct prds_hdr	hdr;
++} _PACKED;
++
++struct prds_event {
++	struct prds_hdr	hdr;
++	union {
++		struct {
++			uint64	timestamp_ns;
++			uint64	reserved;
++		} vsync;
++		struct {
++			uint32	width;
++			uint32	height;
++			uint64	reserved;
++		} mode_hint;
++		uint64	raw[2];
++	};
++} _PACKED;
++
++
++/* Shared with the accelerant (cloned area). */
++struct prds_shared_info {
++	area_id		pool_area;
++	uint64		pool_size;
++	uint32		max_width;
++	uint32		max_height;
++	uint32		pref_width;
++	uint32		pref_height;
++	uint32		refresh_mhz;
++	uint32		stride_align;
++	sem_id		retrace_sem;
++	uint32		mode_width;
++	uint32		mode_height;
++	uint32		mode_stride;
++	uint64		mode_offset;
++};
++
++/* ioctls (device_control), driver <-> accelerant */
++enum {
++	PRDS_GET_SHARED_INFO = B_DEVICE_OP_CODES_END + 1,	/* area_id* */
++	PRDS_SET_MODE,										/* prds_set_mode* (hdr ignored) */
++	PRDS_COMMIT,										/* prds_commit* (hdr ignored) */
++	PRDS_ENABLE_EVENTS,									/* uint32* mask */
++};
++
++
++#endif	/* _PROSE_DISPLAY_H */
+diff --git a/headers/private/virtio/virtio.h b/headers/private/virtio/virtio.h
+index 29a13a0af5..8a185d2abd 100644
+--- a/headers/private/virtio/virtio.h
++++ b/headers/private/virtio/virtio.h
+@@ -99,6 +99,10 @@ typedef struct {
+ 	status_t (*setup_interrupt)(void* cookie, uint16 queueCount);
+ 	status_t (*free_interrupt)(void* cookie);
+ 	void	(*notify_queue)(void* cookie, uint16 queue);
++	// HaikuArmQemu fork: virtio shared memory regions (virtio 1.2; PCI
++	// capability type 8). Returns B_ENTRY_NOT_FOUND if the device has none.
++	status_t (*get_shared_memory)(void* cookie, uint8 id, phys_addr_t* _base,
++		uint64* _size);
+ } virtio_sim_interface;
+ 
+ 
+@@ -147,6 +151,9 @@ typedef struct {
+ 	bool (*queue_dequeue)(virtio_queue queue, void** _cookie,
+ 		uint32* _usedLength);
+ 
++	// HaikuArmQemu fork: shared memory region <id> of the device, if any.
++	status_t (*get_shared_memory)(virtio_device cookie, uint8 id,
++		phys_addr_t* _base, uint64* _size);
+ } virtio_device_interface;
+ 
+ 
+diff --git a/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp b/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
+index 7cc9a2cd23..975614859c 100644
+--- a/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
++++ b/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
+@@ -338,3 +338,12 @@ VirtioDevice::_DumpFeatures(const char* title, uint64 features,
+ 	// HaikuArmQemu fork: always log, with the raw bits.
+ 	dprintf("virtio: %s: %#" B_PRIx64 " %s\n", title, features, features_string);
+ }
++
++
++status_t
++VirtioDevice::GetSharedMemory(uint8 id, phys_addr_t* _base, uint64* _size)
++{
++	if (fController->get_shared_memory == NULL)
++		return B_NOT_SUPPORTED;
++	return fController->get_shared_memory(fCookie, id, _base, _size);
++}
+diff --git a/src/add-ons/kernel/bus_managers/virtio/VirtioModule.cpp b/src/add-ons/kernel/bus_managers/virtio/VirtioModule.cpp
+index 310e85ea71..d88e97b03f 100644
+--- a/src/add-ons/kernel/bus_managers/virtio/VirtioModule.cpp
++++ b/src/add-ons/kernel/bus_managers/virtio/VirtioModule.cpp
+@@ -74,6 +74,16 @@ virtio_clear_feature(void* _device, uint64 feature)
+ }
+ 
+ 
++status_t
++virtio_get_shared_memory(void* _device, uint8 id, phys_addr_t* _base, uint64* _size)
++{
++	CALLED();
++	VirtioDevice *device = (VirtioDevice *)_device;
++
++	return device->GetSharedMemory(id, _base, _size);
++}
++
++
+ status_t
+ virtio_read_device_config(void* _device, uint8 offset, void* buffer,
+ 		size_t bufferSize)
+@@ -300,7 +310,8 @@ virtio_device_interface virtio_device_module = {
+ 	virtio_queue_is_full,
+ 	virtio_queue_is_empty,
+ 	virtio_queue_size,
+-	virtio_queue_dequeue
++	virtio_queue_dequeue,
++	virtio_get_shared_memory
+ };
+ 
+ virtio_for_controller_interface virtio_for_controller_module = {
+diff --git a/src/add-ons/kernel/bus_managers/virtio/VirtioPrivate.h b/src/add-ons/kernel/bus_managers/virtio/VirtioPrivate.h
+index 7c4fa11280..eec91af44d 100644
+--- a/src/add-ons/kernel/bus_managers/virtio/VirtioPrivate.h
++++ b/src/add-ons/kernel/bus_managers/virtio/VirtioPrivate.h
+@@ -56,6 +56,8 @@ public:
+ 			status_t			WriteDeviceConfig(uint8 offset,
+ 									const void* buffer, size_t bufferSize);
+ 
++			status_t			GetSharedMemory(uint8 id, phys_addr_t* _base,
++									uint64* _size);
+ 			status_t			AllocateQueues(size_t count,
+ 									virtio_queue *queues,
+ 									uint16 *requestedSizes);
+diff --git a/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.cpp b/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.cpp
+index 39d41e7429..111396858c 100644
+--- a/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.cpp
++++ b/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.cpp
+@@ -30,6 +30,7 @@
+ #define CALLED(x...)		TRACE("CALLED %s\n", __PRETTY_FUNCTION__)
+ 
+ 
++#define VIRTIO_PCI_MAX_SHM 8
+ #define VIRTIO_PCI_DEVICE_MODULE_NAME "busses/virtio/virtio_pci/driver_v1"
+ #define VIRTIO_PCI_SIM_MODULE_NAME "busses/virtio/virtio_pci/device/v1"
+ 
+@@ -68,6 +69,9 @@ typedef struct {
+ 	virtio_sim sim;
+ 	uint16 queue_count;
+ 	addr_t* notifyOffsets;
++	// HaikuArmQemu fork: shared memory regions by id; size 0 = none
++	phys_addr_t shmBase[VIRTIO_PCI_MAX_SHM];
++	uint64 shmSize[VIRTIO_PCI_MAX_SHM];
+ 
+ 	device_node* node;
+ 	pci_info info;
+@@ -655,6 +659,18 @@ notify_queue(void* cookie, uint16 queue)
+ }
+ 
+ 
++static status_t
++get_shared_memory(void* cookie, uint8 id, phys_addr_t* _base, uint64* _size)
++{
++	virtio_pci_sim_info* bus = (virtio_pci_sim_info*)cookie;
++	if (id >= VIRTIO_PCI_MAX_SHM || bus->shmSize[id] == 0)
++		return B_ENTRY_NOT_FOUND;
++	*_base = bus->shmBase[id];
++	*_size = bus->shmSize[id];
++	return B_OK;
++}
++
++
+ //	#pragma mark -
+ 
+ 
+@@ -764,6 +780,38 @@ init_bus(device_node* node, void** bus_cookie)
+ 		if (deviceCfgFound)
+ 			bus->base_addr = registers[deviceCap.bar] + deviceCap.offset;
+ 
++		// HaikuArmQemu fork: shared memory regions (capability type 8, 64-bit
++		// offset and length; the region id sits where legacy caps had padding).
++		uint8 capOffset;
++		if (pci->find_pci_capability(device, PCI_cap_id_vendspec, &capOffset) == B_OK) {
++			for (int guard = 0; capOffset != 0 && guard < 48; guard++) {
++				uint32 head = pci->read_pci_config(device, capOffset, 4);
++				uint8 next = (head >> 8) & 0xff;
++				if ((head & 0xff) == PCI_cap_id_vendspec
++					&& ((head >> 24) & 0xff) == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG) {
++					uint32 word1 = pci->read_pci_config(device, capOffset + 4, 4);
++					uint8 bar = word1 & 0xff;
++					uint8 id = (word1 >> 8) & 0xff;
++					uint64 offset = pci->read_pci_config(device, capOffset + 8, 4)
++						| ((uint64)pci->read_pci_config(device, capOffset + 16, 4) << 32);
++					uint64 length = pci->read_pci_config(device, capOffset + 12, 4)
++						| ((uint64)pci->read_pci_config(device, capOffset + 20, 4) << 32);
++					if (bar < 6 && id < VIRTIO_PCI_MAX_SHM && length != 0) {
++						phys_addr_t barAddr = pciInfo->u.h0.base_registers[bar];
++						if ((pciInfo->u.h0.base_register_flags[bar] & PCI_address_type)
++								== PCI_address_type_64 && bar < 5) {
++							barAddr |= (uint64)pciInfo->u.h0.base_registers[bar + 1] << 32;
++						}
++						bus->shmBase[id] = barAddr + offset;
++						bus->shmSize[id] = length;
++						TRACE_ALWAYS("shared memory region %u: %#" B_PRIxPHYSADDR ", %" B_PRIu64
++							" bytes (bar %u)\n", id, bus->shmBase[id], length, bar);
++					}
++				}
++				capOffset = next;
++			}
++		}
++
+ 		// enable bus master and memory
+ 		uint16 pcicmd = pci->read_pci_config(device, PCI_command, 2);
+ 		pcicmd &= ~(PCI_command_int_disable | PCI_command_io);
+@@ -1033,7 +1081,8 @@ static virtio_sim_interface gVirtioPCIDeviceModule = {
+ 	setup_queue,
+ 	setup_interrupt,
+ 	free_interrupt,
+-	notify_queue
++	notify_queue,
++	get_shared_memory
+ };
+ 
+ 
+diff --git a/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.h b/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.h
+index 9c1151bc08..f7e3c2f60b 100644
+--- a/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.h
++++ b/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.h
+@@ -109,6 +109,8 @@ struct virtio_pci_cap {
+ #define VIRTIO_PCI_CAP_DEVICE_CFG	4
+ /* PCI configuration access */
+ #define VIRTIO_PCI_CAP_PCI_CFG		5
++/* Shared memory region (virtio 1.2); uses virtio_pci_cap64 */
++#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG	8
+ 
+ struct virtio_pci_notify_cap {
+ 	struct virtio_pci_cap cap;
+diff --git a/src/add-ons/kernel/drivers/graphics/Jamfile b/src/add-ons/kernel/drivers/graphics/Jamfile
+index cfaa4e4878..a64df8a9bd 100644
+--- a/src/add-ons/kernel/drivers/graphics/Jamfile
++++ b/src/add-ons/kernel/drivers/graphics/Jamfile
+@@ -10,6 +10,7 @@ SubInclude HAIKU_TOP src add-ons kernel drivers graphics intel_extreme ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers graphics matrox ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers graphics neomagic ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers graphics nvidia ;
++SubInclude HAIKU_TOP src add-ons kernel drivers graphics prose_display ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers graphics radeon ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers graphics radeon_hd ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers graphics s3 ;
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/Jamfile b/src/add-ons/kernel/drivers/graphics/prose_display/Jamfile
+new file mode 100644
+index 0000000000..04c0e7a6db
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/Jamfile
+@@ -0,0 +1,9 @@
++SubDir HAIKU_TOP src add-ons kernel drivers graphics prose_display ;
++
++UsePrivateKernelHeaders ;
++UsePrivateHeaders drivers graphics virtio ;
++UsePrivateHeaders [ FDirName graphics prose_display ] ;
++
++KernelAddon prose_display :
++	prose_display.cpp
++	;
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+new file mode 100644
+index 0000000000..fa8f8c9e58
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -0,0 +1,736 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Prose Display (PRDS): kernel driver for the shared-surface display device
++ * (HaikuArmQemu/docs/s2-display-device.md). The host maps a surface pool into
++ * the guest as virtio shared memory region 0; we set a mode inside it, draw
++ * into it directly, and tell the host which rectangles to present.
++ *
++ * Milestone A: the driver alone brings the display up and draws a test
++ * pattern, so the whole pipe can be verified before an accelerant exists.
++ */
++
++
++#include <KernelExport.h>
++#include <device_manager.h>
++#include <lock.h>
++#include <util/AutoLock.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <virtio.h>
++#include <prose_display.h>
++
++
++#define PRDS_DRIVER_MODULE_NAME "drivers/graphics/prose_display/driver_v1"
++#define PRDS_DEVICE_MODULE_NAME "drivers/graphics/prose_display/device_v1"
++#define PRDS_DEVICE_ID_GENERATOR "prose_display/device_id"
++
++#define INFO(x...) dprintf("prose_display: " x)
++#define ERROR(x...) dprintf("prose_display: " x)
++
++#define PRDS_EVENT_BUFFERS		8
++#define PRDS_RESPONSE_OFFSET	2048	// in the command page
++#define PRDS_TEST_PATTERN		1		// milestone A: draw and animate ourselves
++
++#define ALIGN_UP(x, a) ((((x) + (a) - 1) / (a)) * (a))
++
++
++struct prds_info {
++	device_node*				node;
++	int32						id;
++	virtio_device_interface*	virtio;
++	virtio_device				device;
++	uint64						features;
++	struct prds_config			config;
++
++	phys_addr_t					pool_phys;
++	uint64						pool_size;
++	area_id						pool_area;
++	uint8*						pool;
++
++	virtio_queue				control_queue;
++	virtio_queue				event_queue;
++
++	area_id						command_area;
++	uint8*						command;
++	phys_addr_t					command_phys;
++	mutex						command_lock;
++	sem_id						command_done;
++	uint64						seq;
++
++	area_id						event_area;
++	uint8*						events;
++	phys_addr_t					events_phys;
++
++	area_id						shared_area;
++	struct prds_shared_info*	shared;
++	sem_id						retrace_sem;
++
++	uint32						mode_width;
++	uint32						mode_height;
++	uint32						mode_stride;
++	uint64						mode_offset;
++
++	int64						vsync_count;
++	int64						hint_count;
++	int64						redraw_count;
++	int32						need_redraw;
++
++	thread_id					test_thread;
++	bool						quit;
++};
++
++
++static device_manager_info* sDeviceManager;
++
++
++static const char*
++prds_feature_name(uint64 feature)
++{
++	switch (feature) {
++		case PRDS_F_VSYNC:
++			return "vsync";
++		case PRDS_F_RESIZE:
++			return "resize";
++		case PRDS_F_BLIT:
++			return "blit";
++	}
++	return NULL;
++}
++
++
++//	#pragma mark - queues
++
++
++static void
++prds_config_callback(void* cookie)
++{
++	prds_info* info = (prds_info*)cookie;
++	INFO("configuration changed\n");
++	atomic_set(&info->need_redraw, 1);
++}
++
++
++static void
++prds_control_callback(void* driverCookie, void* cookie)
++{
++	prds_info* info = (prds_info*)cookie;
++	release_sem_etc(info->command_done, 1, B_DO_NOT_RESCHEDULE);
++}
++
++
++static status_t
++prds_post_event_buffer(prds_info* info, uint32 index)
++{
++	physical_entry entry = { info->events_phys + index * PRDS_EVENT_SIZE, PRDS_EVENT_SIZE };
++	return info->virtio->queue_request_v(info->event_queue, &entry, 0, 1,
++		(void*)(addr_t)(index + 1));
++}
++
++
++static void
++prds_event_callback(void* driverCookie, void* cookie)
++{
++	prds_info* info = (prds_info*)cookie;
++	void* tag;
++	uint32 length;
++	while (info->virtio->queue_dequeue(info->event_queue, &tag, &length)) {
++		uint32 index = (uint32)(addr_t)tag - 1;
++		if (index >= PRDS_EVENT_BUFFERS)
++			continue;
++		struct prds_event* event = (struct prds_event*)(info->events + index * PRDS_EVENT_SIZE);
++		switch (event->hdr.type) {
++			case PRDS_EVT_VSYNC:
++				info->vsync_count++;
++				release_sem_etc(info->retrace_sem, 1, B_DO_NOT_RESCHEDULE);
++				break;
++			case PRDS_EVT_MODE_HINT:
++				info->hint_count++;
++				info->shared->pref_width = event->mode_hint.width;
++				info->shared->pref_height = event->mode_hint.height;
++				break;
++			case PRDS_EVT_REDRAW:
++				info->redraw_count++;
++				atomic_set(&info->need_redraw, 1);
++				break;
++		}
++		prds_post_event_buffer(info, index);
++	}
++}
++
++
++/*! Sends one request and waits for its response (synchronous, serialized). */
++static status_t
++prds_command(prds_info* info, void* request, size_t requestSize, void* response,
++	size_t responseSize)
++{
++	MutexLocker locker(info->command_lock);
++
++	struct prds_hdr* hdr = (struct prds_hdr*)request;
++	hdr->seq = ++info->seq;
++	memcpy(info->command, request, requestSize);
++	memset(info->command + PRDS_RESPONSE_OFFSET, 0, responseSize);
++
++	physical_entry entries[2] = {
++		{ info->command_phys, requestSize },
++		{ info->command_phys + PRDS_RESPONSE_OFFSET, responseSize },
++	};
++	status_t status = info->virtio->queue_request_v(info->control_queue, entries, 1, 1, NULL);
++	if (status != B_OK) {
++		ERROR("queueing command %#" B_PRIx32 " failed: %s\n", hdr->type, strerror(status));
++		return status;
++	}
++
++	status = acquire_sem_etc(info->command_done, 1, B_RELATIVE_TIMEOUT, 5000000);
++	if (status != B_OK) {
++		ERROR("command %#" B_PRIx32 " timed out\n", hdr->type);
++		return status;
++	}
++	while (!info->virtio->queue_dequeue(info->control_queue, NULL, NULL))
++		spin(10);
++
++	memcpy(response, info->command + PRDS_RESPONSE_OFFSET, responseSize);
++	struct prds_hdr* respHdr = (struct prds_hdr*)response;
++	if (respHdr->seq != hdr->seq)
++		ERROR("response sequence %" B_PRIu64 " != %" B_PRIu64 "\n", respHdr->seq, hdr->seq);
++	if (respHdr->type != PRDS_RESP_OK) {
++		ERROR("command %#" B_PRIx32 " failed: %#" B_PRIx32 "\n", hdr->type, respHdr->type);
++		return B_ERROR;
++	}
++	return B_OK;
++}
++
++
++static status_t
++prds_set_mode(prds_info* info, uint32 width, uint32 height)
++{
++	struct prds_set_mode request = {};
++	struct prds_resp response = {};
++	request.hdr.type = PRDS_CMD_SET_MODE;
++	request.width = width;
++	request.height = height;
++	request.stride = ALIGN_UP(width * 4, info->config.stride_align);
++	request.format = PRDS_FORMAT_B8G8R8X8;
++	request.offset = 0;
++	status_t status = prds_command(info, &request, sizeof(request), &response, sizeof(response));
++	if (status != B_OK)
++		return status;
++	info->mode_width = width;
++	info->mode_height = height;
++	info->mode_stride = request.stride;
++	info->mode_offset = 0;
++	info->shared->mode_width = width;
++	info->shared->mode_height = height;
++	info->shared->mode_stride = request.stride;
++	info->shared->mode_offset = 0;
++	INFO("mode %" B_PRIu32 "x%" B_PRIu32 ", stride %" B_PRIu32 "\n", width, height, request.stride);
++	return B_OK;
++}
++
++
++static status_t
++prds_commit(prds_info* info, const struct prds_rect* rects, uint32 count)
++{
++	struct prds_commit request = {};
++	struct prds_resp response = {};
++	if (count > PRDS_MAX_COMMIT_RECTS)
++		count = 0;		// everything
++	request.hdr.type = PRDS_CMD_COMMIT;
++	request.rect_count = count;
++	if (count > 0)
++		memcpy(request.rects, rects, count * sizeof(struct prds_rect));
++	return prds_command(info, &request, sizeof(request.hdr) + 8 + count * sizeof(struct prds_rect),
++		&response, sizeof(response));
++}
++
++
++static status_t
++prds_enable_events(prds_info* info, uint32 mask)
++{
++	struct prds_enable_events request = {};
++	struct prds_resp response = {};
++	request.hdr.type = PRDS_CMD_ENABLE_EVENTS;
++	request.mask = mask;
++	return prds_command(info, &request, sizeof(request), &response, sizeof(response));
++}
++
++
++//	#pragma mark - milestone A test pattern
++
++
++#if PRDS_TEST_PATTERN
++
++static void
++prds_fill(prds_info* info, uint32 x, uint32 y, uint32 width, uint32 height, uint32 color)
++{
++	if (x >= info->mode_width || y >= info->mode_height)
++		return;
++	if (x + width > info->mode_width)
++		width = info->mode_width - x;
++	if (y + height > info->mode_height)
++		height = info->mode_height - y;
++	for (uint32 row = y; row < y + height; row++) {
++		uint32* line = (uint32*)(info->pool + info->mode_offset + row * info->mode_stride) + x;
++		for (uint32 i = 0; i < width; i++)
++			line[i] = color;
++	}
++}
++
++
++static void
++prds_draw_pattern(prds_info* info)
++{
++	static const uint32 kBars[8] = { 0xffffff, 0xffff00, 0x00ffff, 0x00ff00, 0xff00ff,
++		0xff0000, 0x0000ff, 0x202020 };
++	uint32 barWidth = info->mode_width / 8;
++	for (uint32 i = 0; i < 8; i++)
++		prds_fill(info, i * barWidth, 0, barWidth, info->mode_height, kBars[i]);
++	// a diagonal, to make stride mistakes visible
++	for (uint32 i = 0; i < info->mode_height && i < info->mode_width; i++)
++		prds_fill(info, i, i, 2, 2, 0x000000);
++}
++
++
++static status_t
++prds_test_thread(void* data)
++{
++	prds_info* info = (prds_info*)data;
++	const uint32 box = 64;
++	uint32 x = 0, y = info->mode_height / 2, step = 12;
++	int32 iteration = 0;
++	while (!info->quit) {
++		snooze(100000);
++		if (info->quit)
++			break;
++		if (atomic_and(&info->need_redraw, 0) != 0) {
++			prds_draw_pattern(info);
++			prds_commit(info, NULL, 0);
++			continue;
++		}
++		struct prds_rect rects[2] = { { x, y, box, box }, { 0, 0, 0, 0 } };
++		// restore what the box covered, then draw it further along
++		uint32 barWidth = info->mode_width / 8;
++		for (uint32 col = x; col < x + box; col++) {
++			static const uint32 kBars[8] = { 0xffffff, 0xffff00, 0x00ffff, 0x00ff00, 0xff00ff,
++				0xff0000, 0x0000ff, 0x202020 };
++			uint32 bar = barWidth > 0 ? col / barWidth : 0;
++			prds_fill(info, col, y, 1, box, kBars[bar > 7 ? 7 : bar]);
++		}
++		x = (x + step + box > info->mode_width) ? 0 : x + step;
++		prds_fill(info, x, y, box, box, 0x00ff8000);
++		rects[1].x = x;
++		rects[1].y = y;
++		rects[1].width = box;
++		rects[1].height = box;
++		prds_commit(info, rects, 2);
++		if (++iteration % 100 == 0) {
++			INFO("stats: %" B_PRId32 " commits, %" B_PRId64 " vsyncs, %" B_PRId64 " mode hints, %"
++				B_PRId64 " redraws\n", iteration + 1, info->vsync_count, info->hint_count,
++				info->redraw_count);
++		}
++	}
++	return B_OK;
++}
++
++#endif	// PRDS_TEST_PATTERN
++
++
++//	#pragma mark - driver module
++
++
++static float
++prds_supports_device(device_node* parent)
++{
++	const char* bus;
++	uint16 deviceType;
++	if (sDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false) != B_OK
++		|| strcmp(bus, "virtio") != 0)
++		return 0.0;
++	if (sDeviceManager->get_attr_uint16(parent, VIRTIO_DEVICE_TYPE_ITEM, &deviceType, true)
++			!= B_OK || deviceType != PRDS_VIRTIO_DEVICE_ID)
++		return 0.0;
++	return 0.8;
++}
++
++
++static status_t
++prds_register_device(device_node* node)
++{
++	device_attr attrs[] = {
++		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, { .string = "Prose Display" }},
++		{ NULL }
++	};
++	return sDeviceManager->register_node(node, PRDS_DRIVER_MODULE_NAME, attrs, NULL, NULL);
++}
++
++
++static area_id
++prds_alloc_page(const char* name, uint8** _virtual, phys_addr_t* _physical)
++{
++	void* address;
++	area_id area = create_area(name, &address, B_ANY_KERNEL_ADDRESS, B_PAGE_SIZE,
++		B_CONTIGUOUS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
++	if (area < 0) {
++		ERROR("creating %s failed: %s\n", name, strerror(area));
++		return area;
++	}
++	physical_entry entry;
++	status_t status = get_memory_map(address, B_PAGE_SIZE, &entry, 1);
++	if (status != B_OK) {
++		ERROR("get_memory_map(%s) failed: %s\n", name, strerror(status));
++		delete_area(area);
++		return status;
++	}
++	memset(address, 0, B_PAGE_SIZE);
++	*_virtual = (uint8*)address;
++	*_physical = entry.address;
++	return area;
++}
++
++
++static void
++prds_teardown(prds_info* info)
++{
++	if (info->test_thread >= 0) {
++		info->quit = true;
++		wait_for_thread(info->test_thread, NULL);
++	}
++	if (info->virtio != NULL && info->control_queue != NULL)
++		info->virtio->free_interrupts(info->device);
++	if (info->retrace_sem >= 0)
++		delete_sem(info->retrace_sem);
++	if (info->command_done >= 0)
++		delete_sem(info->command_done);
++	if (info->shared_area >= 0)
++		delete_area(info->shared_area);
++	if (info->event_area >= 0)
++		delete_area(info->event_area);
++	if (info->command_area >= 0)
++		delete_area(info->command_area);
++	if (info->pool_area >= 0)
++		delete_area(info->pool_area);
++	mutex_destroy(&info->command_lock);
++	free(info);
++}
++
++
++static status_t
++prds_init_driver(device_node* node, void** _cookie)
++{
++	prds_info* info = (prds_info*)calloc(1, sizeof(prds_info));
++	if (info == NULL)
++		return B_NO_MEMORY;
++	info->node = node;
++	info->pool_area = info->command_area = info->event_area = info->shared_area = -1;
++	info->command_done = info->retrace_sem = -1;
++	info->test_thread = -1;
++	mutex_init(&info->command_lock, "prose display commands");
++
++	device_node* parent = sDeviceManager->get_parent_node(node);
++	sDeviceManager->get_driver(parent, (driver_module_info**)&info->virtio,
++		(void**)&info->device);
++	sDeviceManager->put_node(parent);
++
++	status_t status = info->virtio->negotiate_features(info->device,
++		PRDS_F_VSYNC | PRDS_F_RESIZE, &info->features, &prds_feature_name);
++	if (status != B_OK) {
++		ERROR("feature negotiation failed: %s\n", strerror(status));
++		goto error;
++	}
++
++	status = info->virtio->read_device_config(info->device, 0, &info->config,
++		sizeof(info->config));
++	if (status != B_OK)
++		goto error;
++	if (info->config.magic != PRDS_MAGIC || info->config.version != PRDS_VERSION) {
++		ERROR("unexpected device: magic %#" B_PRIx32 ", version %u\n", info->config.magic,
++			info->config.version);
++		status = B_DEVICE_NOT_FOUND;
++		goto error;
++	}
++	INFO("max %" B_PRIu32 "x%" B_PRIu32 ", preferred %" B_PRIu32 "x%" B_PRIu32 ", %" B_PRIu32
++		" mHz, stride align %" B_PRIu32 ", pool %" B_PRIu64 " KiB\n", info->config.max_width,
++		info->config.max_height, info->config.pref_width, info->config.pref_height,
++		info->config.refresh_mhz, info->config.stride_align, info->config.shm_size >> 10);
++
++	if (info->virtio->get_shared_memory == NULL) {
++		ERROR("this virtio bus manager has no shared memory support\n");
++		status = B_NOT_SUPPORTED;
++		goto error;
++	}
++	status = info->virtio->get_shared_memory(info->device, info->config.shm_region_id,
++		&info->pool_phys, &info->pool_size);
++	if (status != B_OK) {
++		ERROR("no shared memory region %u: %s\n", info->config.shm_region_id, strerror(status));
++		goto error;
++	}
++	info->pool_area = map_physical_memory("prose display pool", info->pool_phys,
++		info->pool_size, B_ANY_KERNEL_ADDRESS | B_WRITE_BACK_MEMORY,
++		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA | B_READ_AREA | B_WRITE_AREA,
++		(void**)&info->pool);
++	if (info->pool_area < 0) {
++		ERROR("mapping the pool at %#" B_PRIxPHYSADDR " (%" B_PRIu64 " bytes) failed: %s\n",
++			info->pool_phys, info->pool_size, strerror(info->pool_area));
++		status = info->pool_area;
++		goto error;
++	}
++	INFO("pool at %#" B_PRIxPHYSADDR ", %" B_PRIu64 " KiB, mapped write-back at %p\n",
++		info->pool_phys, info->pool_size >> 10, info->pool);
++
++	{
++		virtio_queue queues[2];
++		status = info->virtio->alloc_queues(info->device, 2, queues, NULL);
++		if (status != B_OK) {
++			ERROR("queue allocation failed: %s\n", strerror(status));
++			goto error;
++		}
++		info->control_queue = queues[0];
++		info->event_queue = queues[1];
++	}
++
++	info->command_area = prds_alloc_page("prose display commands", &info->command,
++		&info->command_phys);
++	info->event_area = prds_alloc_page("prose display events", &info->events, &info->events_phys);
++	if (info->command_area < 0 || info->event_area < 0) {
++		status = info->command_area < 0 ? info->command_area : info->event_area;
++		goto error;
++	}
++	info->command_done = create_sem(0, "prose display command");
++	info->retrace_sem = create_sem(0, "prose display retrace");
++	if (info->command_done < 0 || info->retrace_sem < 0) {
++		status = info->command_done < 0 ? info->command_done : info->retrace_sem;
++		ERROR("creating semaphores failed: %s\n", strerror(status));
++		goto error;
++	}
++
++	{
++		size_t size = (sizeof(struct prds_shared_info) + B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1);
++		// Kernel-only here; the accelerant clones it read-only. (arm64 cannot express
++		// kernel-RW/user-RO in one mapping, so no user bits on the original.)
++		info->shared_area = create_area("prose display shared info", (void**)&info->shared,
++			B_ANY_KERNEL_ADDRESS, size, B_FULL_LOCK,
++			B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA | B_CLONEABLE_AREA);
++		if (info->shared_area < 0) {
++			status = info->shared_area;
++			ERROR("creating the shared info area failed: %s\n", strerror(status));
++			goto error;
++		}
++		memset(info->shared, 0, sizeof(*info->shared));
++		info->shared->pool_area = info->pool_area;
++		info->shared->pool_size = info->pool_size;
++		info->shared->max_width = info->config.max_width;
++		info->shared->max_height = info->config.max_height;
++		info->shared->pref_width = info->config.pref_width;
++		info->shared->pref_height = info->config.pref_height;
++		info->shared->refresh_mhz = info->config.refresh_mhz;
++		info->shared->stride_align = info->config.stride_align;
++		info->shared->retrace_sem = info->retrace_sem;
++	}
++
++	// This sets DRIVER_OK: from here on the device is live.
++	status = info->virtio->setup_interrupt(info->device, prds_config_callback, info);
++	if (status == B_OK)
++		status = info->virtio->queue_setup_interrupt(info->control_queue, prds_control_callback, info);
++	if (status == B_OK)
++		status = info->virtio->queue_setup_interrupt(info->event_queue, prds_event_callback, info);
++	if (status != B_OK) {
++		ERROR("interrupt setup failed: %s\n", strerror(status));
++		goto error;
++	}
++	for (uint32 i = 0; i < PRDS_EVENT_BUFFERS; i++)
++		prds_post_event_buffer(info, i);
++
++	status = prds_enable_events(info, PRDS_EVENT_MASK_VSYNC | PRDS_EVENT_MASK_MODE_HINT
++		| PRDS_EVENT_MASK_REDRAW);
++	if (status == B_OK)
++		status = prds_set_mode(info, info->config.pref_width, info->config.pref_height);
++	if (status != B_OK) {
++		ERROR("initial commands failed: %s\n", strerror(status));
++		goto error;
++	}
++
++#if PRDS_TEST_PATTERN
++	prds_draw_pattern(info);
++	status = prds_commit(info, NULL, 0);
++	if (status != B_OK)
++		goto error;
++	INFO("test pattern committed\n");
++	info->test_thread = spawn_kernel_thread(prds_test_thread, "prose display test",
++		B_NORMAL_PRIORITY, info);
++	if (info->test_thread >= 0)
++		resume_thread(info->test_thread);
++#endif
++
++	*_cookie = info;
++	return B_OK;
++
++error:
++	prds_teardown(info);
++	return status;
++}
++
++
++static void
++prds_uninit_driver(void* cookie)
++{
++	prds_teardown((prds_info*)cookie);
++}
++
++
++static status_t
++prds_register_child_devices(void* cookie)
++{
++	prds_info* info = (prds_info*)cookie;
++	int32 id = sDeviceManager->create_id(PRDS_DEVICE_ID_GENERATOR);
++	if (id < 0)
++		return id;
++	info->id = id;
++	char name[64];
++	snprintf(name, sizeof(name), "graphics/prose_display/%" B_PRId32, id);
++	return sDeviceManager->publish_device(info->node, name, PRDS_DEVICE_MODULE_NAME);
++}
++
++
++//	#pragma mark - device module
++
++
++static status_t
++prds_init_device(void* driverCookie, void** _cookie)
++{
++	*_cookie = driverCookie;
++	return B_OK;
++}
++
++
++static void
++prds_uninit_device(void* cookie)
++{
++}
++
++
++static status_t
++prds_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
++{
++	*_cookie = deviceCookie;
++	return B_OK;
++}
++
++
++static status_t
++prds_close(void* cookie)
++{
++	return B_OK;
++}
++
++
++static status_t
++prds_free(void* cookie)
++{
++	return B_OK;
++}
++
++
++static status_t
++prds_read(void* cookie, off_t position, void* buffer, size_t* _length)
++{
++	*_length = 0;
++	return B_NOT_ALLOWED;
++}
++
++
++static status_t
++prds_write(void* cookie, off_t position, const void* buffer, size_t* _length)
++{
++	*_length = 0;
++	return B_NOT_ALLOWED;
++}
++
++
++static status_t
++prds_control(void* cookie, uint32 op, void* buffer, size_t length)
++{
++	prds_info* info = (prds_info*)cookie;
++	switch (op) {
++		case PRDS_GET_SHARED_INFO:
++			return user_memcpy(buffer, &info->shared_area, sizeof(area_id));
++		case PRDS_ENABLE_EVENTS:
++		{
++			uint32 mask;
++			if (user_memcpy(&mask, buffer, sizeof(mask)) != B_OK)
++				return B_BAD_ADDRESS;
++			return prds_enable_events(info, mask);
++		}
++		case PRDS_SET_MODE:
++		{
++			struct prds_set_mode mode;
++			if (user_memcpy(&mode, buffer, sizeof(mode)) != B_OK)
++				return B_BAD_ADDRESS;
++			return prds_set_mode(info, mode.width, mode.height);
++		}
++		case PRDS_COMMIT:
++		{
++			struct prds_commit commit;
++			if (user_memcpy(&commit, buffer, sizeof(commit)) != B_OK)
++				return B_BAD_ADDRESS;
++			return prds_commit(info, commit.rects, commit.rect_count);
++		}
++	}
++	return B_DEV_INVALID_IOCTL;
++}
++
++
++module_dependency module_dependencies[] = {
++	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info**)&sDeviceManager },
++	{}
++};
++
++
++struct device_module_info sPrdsDevice = {
++	{
++		PRDS_DEVICE_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	prds_init_device,
++	prds_uninit_device,
++	NULL,	// remove
++
++	prds_open,
++	prds_close,
++	prds_free,
++	prds_read,
++	prds_write,
++	NULL,	// io
++	prds_control,
++
++	NULL,	// select
++	NULL,	// deselect
++};
++
++
++struct driver_module_info sPrdsDriver = {
++	{
++		PRDS_DRIVER_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	prds_supports_device,
++	prds_register_device,
++	prds_init_driver,
++	prds_uninit_driver,
++	prds_register_child_devices,
++	NULL,	// rescan
++	NULL,	// removed
++};
++
++
++module_info* modules[] = {
++	(module_info*)&sPrdsDriver,
++	(module_info*)&sPrdsDevice,
++	NULL
++};
+-- 
+2.54.0 (Apple Git-157)
+

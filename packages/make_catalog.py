@@ -20,10 +20,14 @@ FIRST_BATCH = {
     "HexVexed", "BeSpider", "WakeUp", "LibWalter", "Peek", "FontBoy", "Calc",
     "Archiver", "Bong", "Conway", "RpnCalc", "Minesweeper", "Toner",
     "PhantomLimb", "BeLife", "DateReplicant", "Album", "BeSol", "BabyBe",
-    "SlaveMind", "Dynamate", "BShisen", "Cygnus", "Peek", "BurnItNow",
+    "SlaveMind", "Dynamate", "BShisen", "Cygnus", "Peek",
     "FtpPositive", "CapitalBe", "Weather", "Lingua", "MeV", "Sequitur",
     "PecoBeat", "BeVexed", "PonpokoDiff", "ResourceEdit", "FontBoy",
 }
+
+# Dead software and categories we do not want: CD/DVD burners (no burner
+# hardware in a VM), Napster (network long gone).
+EXCLUDED = {"BurnItNow", "Helios", "BeNapster"}
 
 RULES = [
     ("games", ["game", "solitaire", "tetris", "puzzle", "chess", "mine",
@@ -73,6 +77,8 @@ def main() -> None:
 
     cats: dict[str, list] = {}
     for name, desc in sorted(repos.items()):
+        if name in EXCLUDED:
+            continue
         cat = classify(name, desc)
         cats.setdefault(cat, []).append((name, desc))
 

@@ -14,6 +14,9 @@
 //   --ramconsole-log PATH   where the guest-RAM log goes (default ./ramconsole.log)
 //   --no-ramconsole         don't scan guest RAM for Haiku's logs
 //   --disk nvme|usb|virtio  boot disk interface (default nvme; virtio works with fork patch 0003)
+//   --display s1|s2         our display device: s1 impersonates virtio-gpu (default),
+//                           s2 is the shared-surface Prose Display (docs/s2-display-device.md)
+//   --pool-mib N            s2 surface pool size (default 64)
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
 import AppKit
@@ -45,6 +48,7 @@ let (width, height) = (dims.count == 2 ? dims[0] : 1280, dims.count == 2 ? dims[
 let runSeconds = option("--seconds").flatMap(Double.init)
 let grace = Double(option("--grace") ?? "8") ?? 8
 let headless = args.contains("--headless")
+let displayMode = option("--display") ?? "s1"
 
 let startTime = Date()
 func log(_ event: String) {
@@ -150,7 +154,9 @@ struct ShaderParams {
 /// The host-side frame surface: page-aligned, Metal-wrapped, written by the
 /// device on TRANSFER, sampled by the shader on present.
 final class FrameSurface {
-    let width: Int, height: Int, stride: Int
+    var width: Int          // the current mode (s2 changes it; the buffer holds the maximum)
+    var height: Int
+    let stride: Int
     let length: Int
     let base: UnsafeMutableRawPointer
 
@@ -565,8 +571,8 @@ final class Presenter: NSObject {
     var vmView: VZVirtualMachineView!
     var lastPresentedSeq = -1
 
-    func makeWindow(vm: VZVirtualMachine, gpu: CustomVirtioGPU) {
-        guard let surface = gpu.surface else { return }
+    func makeWindow(vm: VZVirtualMachine, source: PresentSource) {
+        guard let surface = source.surface else { return }
         queue = device.makeCommandQueue()
         buffer = device.makeBuffer(bytesNoCopy: surface.base, length: surface.length,
                                     options: .storageModeShared, deallocator: nil)
@@ -612,6 +618,7 @@ final class Presenter: NSObject {
         window.center()
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(vmView)
+        log("window \(width)x\(height) shown")
         NSApp.activate(ignoringOtherApps: true)
         updateDrawableSize()
 
@@ -640,10 +647,16 @@ final class Presenter: NSObject {
                             scale: scale, bias: (SIMD2<Float>(1, 1) - scale) / 2)
     }
 
+    private var ticks = 0
+
     @objc func tick(_ link: CADisplayLink) {
+        ticks += 1
+        if ticks == 1 { log("display link running (source attached: \(presenterGPU != nil))") }
+        presenterGPU?.displayTick(timestamp: link.timestamp)
         // --no-overlay: never cover VZ's own display (for testing VZ's virtio-gpu).
         guard !args.contains("--no-overlay") else { return }
-        guard let gpu = presenterGPU, let surface = gpu.surface else { return }
+        guard let gpu = presenterGPU, let surface = gpu.surface,
+              surface.width > 0, surface.height > 0 else { return }
         if layer.drawableSize.width != view.bounds.width * window.backingScaleFactor {
             updateDrawableSize()
         }
@@ -675,8 +688,8 @@ final class Presenter: NSObject {
 }
 
 // The presenter needs the gpu without owning it.
-private weak var presenterGPURef: CustomVirtioGPU?
-var presenterGPU: CustomVirtioGPU? {
+private weak var presenterGPURef: PresentSource?
+var presenterGPU: PresentSource? {
     get { presenterGPURef }
     set { presenterGPURef = newValue }
 }
@@ -721,6 +734,8 @@ final class CustomVirtioRNG: NSObject, VZCustomVirtioDeviceConfigurationDelegate
 final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVirtualMachineDelegate {
     var vm: VZVirtualMachine!
     let gpu = CustomVirtioGPU()
+    let prds = PRDSDevice(width: width, height: height, poolMiB: Int(option("--pool-mib") ?? "64") ?? 64)
+    var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
     let presenter = Presenter()
     var stateObservation: NSKeyValueObservation?
@@ -741,15 +756,16 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         }
 
         if !headless {
-            presenter.makeWindow(vm: vm, gpu: gpu)
+            presenter.makeWindow(vm: vm, source: displaySource)
         }
-        presenterGPU = gpu
+        presenterGPU = displaySource
 
         log("starting \(diskURL.path) cpus=\(cpus) memory=\(memoryGiB)GiB scanout=\(width)x\(height)")
         vm.start { result in
             switch result {
             case .success:
                 log("started")
+                self.displaySource.vmDidStart()
             case .failure(let error):
                 log("start failed: \(error.localizedDescription)")
                 exit(1)
@@ -802,7 +818,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         if args.contains("--rng-probe") {
             config.customVirtioDevices = [rngProbe.configuration]
         } else if !args.contains("--no-custom-gpu") {   // --no-custom-gpu: VZ's GPU only
-            config.customVirtioDevices = [gpu.configuration]
+            config.customVirtioDevices = [displaySource.configuration]
         }
         // VZ's own virtio-gpu stays by default: VZVirtualMachineView maps the absolute pointer
         // onto it, so without it the mouse doesn't move. Stock Haiku opens it first
@@ -851,6 +867,11 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
                 exit(0)
             }
         }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        let size = presenter.view.bounds.size
+        presenterGPU?.windowResized(width: Int(size.width), height: Int(size.height))
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
