@@ -28,7 +28,7 @@ scripts/prosepkg install <image> libwebp flac     # + their requirements
 scripts/prosepkg install <image> @codecs          # a set: packages/sets/codecs
 PW_PACKAGES=@codecs private_workspace/run-vz.sh try   # boot with them (VZ)
 PW_PACKAGES=@codecs private_workspace/run-qemu.sh     # (QEMU, boots a copy)
-packages/test-codecs.sh                           # boot test, see below
+packages/boot-test.sh packages/tests/codecs.sh codec_check   # boot test, see below
 ```
 
 `install` copies the packages into the image's `system/packages`, and
@@ -41,12 +41,16 @@ run scripts install into their fresh copy, never into the build output.
 **Codecs (verified on arm64):** libpng16, libjpeg_turbo, libwebp, tiff,
 giflib, openjpeg, lcms, libogg, libvorbis, flac, opus, speex, speexdsp,
 mpg123, lame, wavpack, libtheora, libvpx, dav1d (+ libiconv, libltdl).
-`test-codecs.sh` installs `codec_check`, our own recipe in
-`builder/overlay/prose-tests`. It links all of them, prints each version and
-round-trips data through each codec (PNG/WebP/TIFF/GIF/FLAC lossless,
-JPEG, Opus, LAME→mpg123, VP8). It boots a clone of the image headless under
-QEMU and prints what the guest wrote. Boot to power-off takes about 7 s.
-Current result: 19/19 ok.
+`codec_check` is our own recipe in `builder/overlay/prose-tests`. It links
+all of them, prints each version and round-trips data through each codec
+(PNG/WebP/TIFF/GIF/FLAC lossless, JPEG, Opus, LAME→mpg123, VP8). Current
+result: 19/19 ok.
+
+**Boot tests:** `boot-test.sh <probe> <packages...>` installs the packages
+into a clone of the image and runs the probe (`packages/tests/*.sh`) from a
+UserBootscript. It boots headless under QEMU, prints what the guest wrote,
+and exits 0 if the last line is `PASS`. Boot to power-off takes about 7 s.
+The probes are `tests/codecs.sh` (codec_check) and `tests/openssl.sh`.
 
 ## Rules (the incident, turned into design)
 
@@ -67,9 +71,10 @@ Current result: 19/19 ok.
 ```
 packages/builder/prosepkg.py        the builder
 packages/builder/recipe-runtime.sh  shell environment recipes run in
-packages/builder/overlay/           our recipes / per-recipe *.prose.sh snippets
+packages/builder/overlay/           our recipes, per-recipe <recipe>.prose.sh snippets
+                                    and <recipe>*.patch source patches
 packages/sets/                      named package sets for `install @<set>`
-packages/test-codecs.sh             boot test of the codec packages
+packages/boot-test.sh, tests/       boot tests on the target (probes)
 
 /Volumes/HaikuSrc/prose-packages/   (case-sensitive volume)
   toolchain/cross-tools-arm64/  gcc 13.3 + binutils, copied, read-only
@@ -119,8 +124,32 @@ the M2+ extras (I8MM, BF16).
 Known Haiku arm64 kernel bug (our fork): `do_sync_handler` has no case for
 undefined instructions (`EXCP_UNKNOWN`). The thread gets a garbage
 exception type and signal ("Alignment exception") instead of SIGILL.
-Programs that probe CPU features by catching SIGILL (OpenSSL on unknown
-OSes) will crash or hang until that is fixed.
+Programs that probe CPU features by catching SIGILL will crash or hang until
+that is fixed.
+
+**OpenSSL** (3.5.8) is one such program: on OSes without getauxval/sysctl it
+executes 11 probe instructions when libcrypto loads, and 5 of them do not
+exist on Apple silicon. The recipe also builds it `no-asm` everywhere but
+x86_64, and OpenSSL knows no `haiku-aarch64` target. Our overlay patch
+(`overlay/dev-libs/openssl/`) does three things:
+- adds that target;
+- takes the CPU capabilities from the compile-time `__ARM_FEATURE_*`, the
+  way OpenSSL's own Apple branch presets them, so there is no probing at
+  all (`OPENSSL_armcap` still overrides);
+- builds with assembly.
+
+`tests/openssl.sh` checks known-answer digests (SHA-256/512, SHA3-256) and
+an AES round trip, then compares throughput in the guest on an M4 against
+`OPENSSL_armcap=0` (plain C):
+
+| | ARMv8 crypto | plain C |
+|---|---|---|
+| AES-128-GCM | 10.8 GB/s | 0.26 GB/s |
+| SHA-256 | 3.3 GB/s | 0.61 GB/s |
+| SHA-512 | 1.8 GB/s | 0.96 GB/s |
+
+(`openssl speed` needs `-elapsed` on Prose: CPU-time accounting via
+`times()` reports far too little, which gave TB/s figures.)
 
 ## Emulating the chroot
 
@@ -136,7 +165,9 @@ chroot would:
 - **`make`:** a Makefile that does `include /boot/system/...` runs as a
   translated copy. `$(MAKE)` comes back through the wrapper. In INSTALL,
   `DESTDIR` is also passed on the command line, which beats Makefiles that
-  assign `DESTDIR =`.
+  assign `DESTDIR =`. A staged path on the command line (`make install
+  PREFIX=$prefix`, `MANDIR=$manDir`) turns back into the runtime path when
+  the Makefile uses `DESTDIR`; if it doesn't, `DESTDIR` is dropped.
 - **PATH** ends in `.`, as Haiku's does
 
 What cannot be emulated goes into an overlay: scripts with `#!/bin/sh`

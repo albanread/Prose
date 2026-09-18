@@ -1,5 +1,5 @@
 # Codec libraries for Prose (runtime packages; prosepkg install adds their
-# requirements). Verified on arm64 by packages/test-codecs.sh.
+# requirements). Verified on arm64 by packages/tests/codecs.sh (boot-test.sh).
 # images
 libpng16
 libjpeg_turbo

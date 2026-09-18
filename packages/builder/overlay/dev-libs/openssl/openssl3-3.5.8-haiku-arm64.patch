@@ -1,0 +1,124 @@
+OpenSSL 3.5.8 on Haiku arm64 (Prose)
+
+- crypto/armcap.c: Haiku has no getauxval/sysctl for CPU capabilities, and
+  SIGILL-based probing must not be relied on there; take the capabilities
+  the library was compiled for (__ARM_FEATURE_*), like the __APPLE__ branch
+  presets them. OPENSSL_armcap still overrides.
+- os-dep/haiku.h: haiku-common force-includes it into every compile, and
+  AArch64's perlasm output is .S (preprocessed): guard it for assembly.
+- Configurations: a haiku-aarch64 target (OpenSSL defines haiku-x86 and
+  haiku-x86_64 only): linux-aarch64's asm setup on haiku-common.
+
+--- a/crypto/armcap.c
++++ b/crypto/armcap.c
+@@ -187,7 +187,7 @@
+ }
+ #endif
+ 
+-#if !defined(__APPLE__) && !defined(OSSL_IMPLEMENT_GETAUXVAL)
++#if !defined(__APPLE__) && !defined(__HAIKU__) && !defined(OSSL_IMPLEMENT_GETAUXVAL)
+ static sigset_t all_masked;
+ 
+ static sigjmp_buf ill_jmp;
+@@ -215,7 +215,7 @@
+ void _armv8_sve2_probe(void);
+ void _armv8_rng_probe(void);
+ #endif
+-#endif /* !__APPLE__ && !OSSL_IMPLEMENT_GETAUXVAL */
++#endif /* !__APPLE__ && !__HAIKU__ && !OSSL_IMPLEMENT_GETAUXVAL */
+ 
+ /* We only call _armv8_cpuid_probe() if (OPENSSL_armcap_P & ARMV8_CPUID) != 0 */
+ unsigned int _armv8_cpuid_probe(void);
+@@ -231,7 +231,7 @@
+ 
+     return (sysctlbyname(name, &sys_value, &len, NULL, 0) == 0 && sys_value == 1) ? value : 0;
+ }
+-#elif !defined(OSSL_IMPLEMENT_GETAUXVAL)
++#elif !defined(__HAIKU__) && !defined(OSSL_IMPLEMENT_GETAUXVAL)
+ /*
+  * Calls a provided probe function, which may SIGILL. If it doesn't, return `value`, otherwise return 0.
+  */
+@@ -250,7 +250,7 @@
+ void OPENSSL_cpuid_setup(void)
+ {
+     const char *e;
+-#if !defined(__APPLE__) && !defined(OSSL_IMPLEMENT_GETAUXVAL)
++#if !defined(__APPLE__) && !defined(__HAIKU__) && !defined(OSSL_IMPLEMENT_GETAUXVAL)
+     struct sigaction ill_oact, ill_act;
+     sigset_t oset;
+ #endif
+@@ -304,6 +304,50 @@
+     }
+ #endif /* __aarch64__ */
+ 
++#elif defined(__HAIKU__)
++    /*
++     * Haiku publishes no CPU capabilities to user space (no getauxval, no
++     * sysctl), and probing by catching SIGILL must be avoided there: take
++     * what this library was compiled for. Prose builds for the Apple M1
++     * feature floor, which covers everything below except SM3/SM4, SVE and
++     * RNG (those stay off unless the compiler was told otherwise).
++     * OPENSSL_armcap above still overrides.
++     */
++# ifdef __ARM_NEON
++    OPENSSL_armcap_P |= ARMV7_NEON;
++# endif
++# ifdef __ARM_FEATURE_AES
++    OPENSSL_armcap_P |= ARMV8_AES | ARMV8_PMULL;
++# endif
++# ifdef __ARM_FEATURE_SHA2
++    OPENSSL_armcap_P |= ARMV8_SHA1 | ARMV8_SHA256;
++# endif
++# ifdef __aarch64__
++#  ifdef __ARM_FEATURE_SHA512
++    OPENSSL_armcap_P |= ARMV8_SHA512;
++#  endif
++#  ifdef __ARM_FEATURE_SHA3
++    /* and, as the __APPLE__ branch does for the M-series, the SHA3 paths */
++    OPENSSL_armcap_P |= ARMV8_SHA3 | ARMV8_UNROLL8_EOR3
++        | ARMV8_HAVE_SHA3_AND_WORTH_USING;
++#  endif
++#  ifdef __ARM_FEATURE_SM3
++    OPENSSL_armcap_P |= ARMV8_SM3;
++#  endif
++#  ifdef __ARM_FEATURE_SM4
++    OPENSSL_armcap_P |= ARMV8_SM4;
++#  endif
++#  ifdef __ARM_FEATURE_SVE
++    OPENSSL_armcap_P |= ARMV8_SVE;
++#  endif
++#  ifdef __ARM_FEATURE_SVE2
++    OPENSSL_armcap_P |= ARMV8_SVE2;
++#  endif
++#  ifdef __ARM_FEATURE_RNG
++    OPENSSL_armcap_P |= ARMV8_RNG;
++#  endif
++# endif /* __aarch64__ */
++
+ #elif defined(OSSL_IMPLEMENT_GETAUXVAL)
+ 
+     if (getauxval(OSSL_HWCAP) & OSSL_HWCAP_NEON) {
+--- a/os-dep/haiku.h
++++ b/os-dep/haiku.h
+@@ -7,5 +7,8 @@
+  * https://www.openssl.org/source/license.html
+  */
+ 
++#ifndef __ASSEMBLER__
++/* haiku-common force-includes this; AArch64's .S files are preprocessed */
+ #include <sys/select.h>
+ #include <sys/time.h>
++#endif
+--- /dev/null
++++ b/Configurations/51-prose-haiku-aarch64.conf
+@@ -0,0 +1,10 @@
++## Prose: Haiku on AArch64. OpenSSL defines haiku-x86 and haiku-x86_64
++## only; this is linux-aarch64's asm setup on top of haiku-common.
++my %targets = (
++    "haiku-aarch64" => {
++        inherit_from     => [ "haiku-common" ],
++        bn_ops           => "SIXTY_FOUR_BIT_LONG",
++        asm_arch         => 'aarch64',
++        perlasm_scheme   => "linux64",
++    },
++);
