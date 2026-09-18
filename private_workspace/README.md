@@ -34,3 +34,35 @@ private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke
 - Edit Haiku only in the worktree; commit there on `vz-fork`. Refresh `patches/haiku/` from the commits (`git format-patch` or `git diff` per file) when a patch changes.
 - Never run `scripts/build-image.sh` (main tree) from here.
 - Cross-tools live in the main tree's `generated/cross-tools-arm64`; a `git clean` or reconfigure there would break this workspace's build, so the main tree should keep them.
+
+## Local packages (no remote resolution)
+
+The Haiku build normally downloads third-party packages from
+`eu.hpkg.haiku-os.org`; the list in `build/jam/repositories/HaikuPorts/arm64` is
+checksummed and that checksum picks a server-side snapshot, so you cannot add a
+locally built package to it (the build then fetches a snapshot that does not
+exist and fails with a 404).
+
+Our worktree builds from local packages instead:
+
+1. `generated/build/BuildConfig` has `HAIKU_NO_DOWNLOADS ?= "1" ;` (not tracked -
+   re-running `configure` resets it, so check it after). The build then
+   synthesises the repository from the `.hpkg` files in `generated/download/`
+   and only offers packages whose files are actually there.
+2. Put the package in `generated/download/` and list it in
+   `build/jam/repositories/HaikuPorts/arm64`.
+3. Packages must carry the vendor the repository expects (`Haiku Project`) -
+   `package_repo` rejects anything else. prose-packages builds say `Prose`, so
+   rewrite it first:
+
+```bash
+P=/Volumes/HaikuSrc/private_workspace/haiku/generated/objects/darwin/arm64/release/tools/package/package
+export DYLD_LIBRARY_PATH=/Volumes/HaikuSrc/private_workspace/haiku/generated/objects/darwin/lib
+mkdir -p /tmp/fix && cd /tmp/fix && $P extract <pkg>.hpkg
+sed -i '' 's/^vendor.*$/vendor\t\t"Haiku Project"/' .PackageInfo
+$P create -q /Volumes/HaikuSrc/private_workspace/haiku/generated/download/<pkg>.hpkg
+```
+
+4. To install a package into the image (not just make it available to the
+   build), add it to `build/jam/UserBuildConfig` with
+   `AddHaikuImageSystemPackages <name> ;`.
