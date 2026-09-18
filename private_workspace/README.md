@@ -1,0 +1,28 @@
+# private_workspace: Claude's isolated build and test area
+
+The main Haiku tree (`/Volumes/HaikuSrc/haiku`) and its image (`haiku-mmc.image`) belong to the package work. Nothing in this folder touches them.
+
+| What | Where |
+|---|---|
+| Haiku source | `/Volumes/HaikuSrc/private_workspace/haiku`: a git **worktree** of the main repo, branch `vz-fork` (hrev60122 + `patches/haiku/0001`–`0008` as one commit each) |
+| Build output | its own `generated/` (cross-tools are reused from the main tree, read-only) |
+| Image | `/Volumes/HaikuSrc/private_workspace/haiku/haiku-mmc.image` |
+| Run scratch (copies of the image, logs) | `private_workspace/work/` (gitignored) |
+
+## Commands
+
+```sh
+source private_workspace/env.sh
+private_workspace/build.sh               # jam @minimum-mmc in the worktree
+private_workspace/run-vz.sh smoke        # hvgpu, windowed, 8 vCPUs, NVMe, fresh copy in work/smoke
+private_workspace/run-vz.sh t1 --headless --seconds 100 --disk virtio
+private_workspace/run-qemu.sh            # QEMU + HVF, modern virtio-pci, ramfb, -snapshot
+private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke/haiku.img
+```
+
+`run-vz.sh` always boots a **fresh copy** of the image, so every run starts from first boot and `first login` is a reliable marker.
+
+## Rules
+- Edit Haiku only in the worktree; commit there on `vz-fork`. Refresh `patches/haiku/` from the commits (`git format-patch` or `git diff` per file) when a patch changes.
+- Never run `scripts/build-image.sh` (main tree) from here.
+- Cross-tools live in the main tree's `generated/cross-tools-arm64`; a `git clean` or reconfigure there would break this workspace's build, so the main tree should keep them.
