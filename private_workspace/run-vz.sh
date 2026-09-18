@@ -50,13 +50,14 @@ PY
 	echo ">>> injected $PW_INJECT_SCRIPT as UserBootscript"
 fi
 # HostFS: a Mac folder as a disk in the guest, mounted at /HostFS. PW_SHARE picks
-# it (default ~/HostFS, created if missing); PW_SHARE= (empty) boots without one.
+# it (default ~/Documents/HostFS, created if missing -- a folder of its own in
+# Documents, not the home folder); PW_SHARE= (empty) boots without one.
 # --share/--share-ro on the command line replace the default.
 SHARE=()
 case " $* " in
 	*" --share "*|*" --share-ro "*) ;;
 	*)
-		SHARE_DIR=${PW_SHARE-$HOME/HostFS}
+		SHARE_DIR=${PW_SHARE-$HOME/Documents/HostFS}
 		if [ -n "$SHARE_DIR" ]; then
 			mkdir -p "$SHARE_DIR"
 			SHARE=(--share "$SHARE_DIR")
