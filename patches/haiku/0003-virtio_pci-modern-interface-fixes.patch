@@ -1,5 +1,5 @@
 diff --git a/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.cpp b/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.cpp
-index 8974dba745..84977b5a46 100644
+index 8974dba745..39d41e7429 100644
 --- a/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.cpp
 +++ b/src/add-ons/kernel/busses/virtio/virtio_pci/virtio_pci.cpp
 @@ -46,7 +46,12 @@ typedef struct {
@@ -15,15 +15,27 @@ index 8974dba745..84977b5a46 100644
  	pci_device_module_info* pci;
  	pci_device* device;
  	bool virtio1;
-@@ -55,6 +60,7 @@ typedef struct {
+@@ -55,8 +60,10 @@ typedef struct {
  	addr_t commonCfgAddr;
  	addr_t isrAddr;
  	addr_t notifyAddr;
 +	addr_t notifyEnd;
  	uint32 notifyOffsetMultiplier;
  	uint32 irq;
++	uint32 spuriousInterrupts;
  	virtio_irq_type irq_type;
-@@ -99,8 +105,14 @@ virtio_pci_find_capability(virtio_pci_sim_info* bus, uint8 cfgType,
+ 	virtio_sim sim;
+ 	uint16 queue_count;
+@@ -70,6 +77,8 @@ typedef struct {
+ 
+ 
+ device_manager_info* gDeviceManager;
++
++static bool has_modern_capabilities(pci_device_module_info* pci, pci_device* device);
+ virtio_for_controller_interface* gVirtio;
+ 
+ 
+@@ -99,8 +108,14 @@ virtio_pci_find_capability(virtio_pci_sim_info* bus, uint8 cfgType,
  	if (capabilityOffset == 0)
  		return B_ENTRY_NOT_FOUND;
  
@@ -40,7 +52,42 @@ index 8974dba745..84977b5a46 100644
  		for (size_t i = 4; i < length / sizeof(uint32); i++)
  			v->reg[i] = bus->pci->read_pci_config(bus->device, capabilityOffset + i * 4, 4);
  	}
-@@ -423,6 +435,19 @@ get_queue_ring_size(void* cookie, uint16 queue)
+@@ -120,8 +135,14 @@ virtio_pci_interrupt(void *data)
+ 		isr = bus->pci->read_io_8(bus->device,
+ 			bus->base_addr + VIRTIO_PCI_ISR);
+ 	}
+-	if (isr == 0)
++	if (isr == 0) {
++		// HaikuArmQemu fork: diagnostics for shared/lost INTx.
++		uint32 count = ++bus->spuriousInterrupts;
++		if ((count & (count - 1)) == 0)
++			ERROR("bus %p irq %" B_PRIu32 ": interrupt with ISR 0 (%" B_PRIu32 " so far)\n",
++				bus, bus->irq, count);
+ 		return B_UNHANDLED_INTERRUPT;
++	}
+ 
+ 	if (isr & VIRTIO_PCI_ISR_CONFIG)
+ 		gVirtio->config_interrupt_handler(bus->sim);
+@@ -254,10 +275,16 @@ write_guest_features(void* cookie, uint64 features)
+ 	CALLED();
+ 	virtio_pci_sim_info* bus = (virtio_pci_sim_info*)cookie;
+ 	if (bus->virtio1) {
++		// HaikuArmQemu fork: the driver's accepted features go in
++		// driver_feature(_select), not device_feature(_select), which is
++		// read-only. The old code never told a modern device which features
++		// the driver accepted. QEMU ignores the bogus writes and carries on
++		// as if nothing was accepted; Apple's Virtualization.framework block
++		// and GPU devices refuse to operate without VIRTIO_F_VERSION_1.
+ 		volatile uint32 *select = (uint32*)(bus->commonCfgAddr
+-			+ offsetof(struct virtio_pci_common_cfg, device_feature_select));
++			+ offsetof(struct virtio_pci_common_cfg, driver_feature_select));
+ 		volatile uint32 *feature = (uint32*)(bus->commonCfgAddr
+-			+ offsetof(struct virtio_pci_common_cfg, device_feature));
++			+ offsetof(struct virtio_pci_common_cfg, driver_feature));
+ 		*select = 0;
+ 		*feature = features & 0xffffffff;
+ 		*select = 1;
+@@ -423,6 +450,19 @@ get_queue_ring_size(void* cookie, uint16 queue)
  }
  
  
@@ -60,7 +107,7 @@ index 8974dba745..84977b5a46 100644
  static status_t
  setup_queue(void* cookie, uint16 queue, phys_addr_t phy, phys_addr_t phyAvail,
  	phys_addr_t phyUsed)
-@@ -436,15 +461,12 @@ setup_queue(void* cookie, uint16 queue, phys_addr_t phy, phys_addr_t phyAvail,
+@@ -436,15 +476,12 @@ setup_queue(void* cookie, uint16 queue, phys_addr_t phy, phys_addr_t phyAvail,
  			+ offsetof(struct virtio_pci_common_cfg, queue_select));
  		*queueSelect = queue;
  
@@ -82,7 +129,7 @@ index 8974dba745..84977b5a46 100644
  		volatile uint16* queueEnable = (volatile uint16*)(bus->commonCfgAddr
  			+ offsetof(struct virtio_pci_common_cfg, queue_enable));
  		*queueEnable = 1;
-@@ -589,12 +611,27 @@ notify_queue(void* cookie, uint16 queue)
+@@ -589,12 +626,27 @@ notify_queue(void* cookie, uint16 queue)
  {
  	CALLED();
  	virtio_pci_sim_info* bus = (virtio_pci_sim_info*)cookie;
@@ -111,7 +158,7 @@ index 8974dba745..84977b5a46 100644
  		*notifyAddr = queue;
  	} else {
  		bus->pci->write_io_16(bus->device, bus->base_addr
-@@ -617,6 +654,7 @@ init_bus(device_node* node, void** bus_cookie)
+@@ -617,6 +669,7 @@ init_bus(device_node* node, void** bus_cookie)
  		return B_NO_MEMORY;
  	}
  	memset(bus, 0, sizeof(virtio_pci_sim_info));
@@ -119,7 +166,20 @@ index 8974dba745..84977b5a46 100644
  
  	pci_device_module_info* pci;
  	pci_device* device;
-@@ -700,7 +738,12 @@ init_bus(device_node* node, void** bus_cookie)
+@@ -638,8 +691,10 @@ init_bus(device_node* node, void** bus_cookie)
+ 	pci_info *pciInfo = &bus->info;
+ 	pci->get_pci_info(device, pciInfo);
+ 
+-	bus->virtio1 = pciInfo->device_id >= VIRTIO_PCI_DEVICEID_MODERN_MIN
+-		&& pciInfo->device_id <= VIRTIO_PCI_DEVICEID_MODERN_MAX;
++	bus->virtio1 = (pciInfo->device_id >= VIRTIO_PCI_DEVICEID_MODERN_MIN
++			&& pciInfo->device_id <= VIRTIO_PCI_DEVICEID_MODERN_MAX)
++		|| has_modern_capabilities(pci, device);
++			// HaikuArmQemu fork: transitional devices too, see register_child_devices()
+ 
+ 	if (bus->virtio1) {
+ 		struct virtio_pci_cap common, isr, deviceCap;
+@@ -700,7 +755,12 @@ init_bus(device_node* node, void** bus_cookie)
  		bus->commonCfgAddr = registers[common.bar] + common.offset;
  		bus->isrAddr = registers[isr.bar] + isr.offset;
  		bus->notifyAddr = registers[notify.cap.bar] + notify.cap.offset;
@@ -132,7 +192,7 @@ index 8974dba745..84977b5a46 100644
  		if (deviceCfgFound)
  			bus->base_addr = registers[deviceCap.bar] + deviceCap.offset;
  
-@@ -714,6 +757,12 @@ init_bus(device_node* node, void** bus_cookie)
+@@ -714,6 +774,12 @@ init_bus(device_node* node, void** bus_cookie)
  			+ offsetof(struct virtio_pci_common_cfg, num_queues));
  		bus->queue_count = *queueCount;
  		bus->notifyOffsets = new addr_t[bus->queue_count];
@@ -145,7 +205,7 @@ index 8974dba745..84977b5a46 100644
  
  	} else {
  		// legacy interrupt
-@@ -769,6 +818,7 @@ uninit_bus(void* bus_cookie)
+@@ -769,6 +835,7 @@ uninit_bus(void* bus_cookie)
  		delete[] bus->notifyOffsets;
  	}
  
@@ -153,3 +213,48 @@ index 8974dba745..84977b5a46 100644
  	delete bus;
  }
  
+@@ -783,6 +850,27 @@ bus_removed(void* bus_cookie)
+ //	#pragma mark -
+ 
+ 
++// HaikuArmQemu fork: does this (transitional) device also expose the modern
++// (virtio 1.0) capability structures?
++static bool
++has_modern_capabilities(pci_device_module_info* pci, pci_device* device)
++{
++	uint8 offset;
++	if (pci->find_pci_capability(device, PCI_cap_id_vendspec, &offset) != B_OK)
++		return false;
++	// Walk the whole list from there: it can contain non-vendor capabilities too.
++	for (int guard = 0; offset != 0 && guard < 48; guard++) {
++		uint32 head = pci->read_pci_config(device, offset, 4);
++		if ((head & 0xff) == PCI_cap_id_vendspec
++			&& ((head >> 24) & 0xff) == VIRTIO_PCI_CAP_COMMON_CFG) {
++			return true;
++		}
++		offset = (head >> 8) & 0xff;
++	}
++	return false;
++}
++
++
+ static status_t
+ register_child_devices(void* cookie)
+ {
+@@ -802,6 +890,16 @@ register_child_devices(void* cookie)
+ 	if (pciDeviceId >= VIRTIO_PCI_DEVICEID_MODERN_MIN) {
+ 		virtioVersion = 1;
+ 		virtioDeviceId = pciDeviceId - VIRTIO_PCI_DEVICEID_MODERN_MIN;
++	} else if (has_modern_capabilities(pci, device)) {
++		// HaikuArmQemu fork: a transitional device (QEMU's default virtio-*-pci)
++		// offers both interfaces. Prefer the modern one, as Linux does: the
++		// legacy interface needs I/O ports, and on arm64 Haiku's PCI layer
++		// reports host address 0 for every I/O BAR, so all legacy devices
++		// aliased the one at PCI I/O address 0 (the net driver's init reset
++		// the disk).
++		virtioVersion = 1;
++		TRACE_ALWAYS("transitional device %04x: using the modern interface\n",
++			pciDeviceId);
+ 	}
+ 
+ 	char prettyName[25];

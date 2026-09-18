@@ -18,11 +18,14 @@ Haiku arm64 boots to the desktop under Apple's Virtualization.framework, with ke
 - **Our Haiku fork** (`patches/haiku/`, against hrev60122):
   1. `0001`: the kernel keeps a RAM copy of its debug output, tagged `HAIKU-RAMLOG-V1`. It must be `volatile`/`used`, or GCC drops it.
   2. `0002`: `virtio_gpu` skips GPUs without EDID. VZ's own virtio-gpu has none, and app_server hangs on it. Keeping VZ's GPU attached is still necessary, because VZ's absolute pointer maps onto it.
-  3. `0003`: `virtio_pci`, four changes:
+  3. `0003`: `virtio_pci` modern-interface fixes:
+     - The driver's accepted features are written to `driver_feature`, not the read-only `device_feature`. Haiku never told a modern device what it accepted. This was the virtio-blk failure under VZ: VZ's devices refuse to operate without `VERSION_1`.
+     - Transitional devices with modern capabilities use the modern interface, as Linux does. The legacy path uses I/O ports, and on arm64 Haiku's PCI layer gives every I/O BAR host address 0, so all legacy devices aliased one another: initializing virtio-net reset the disk. That was QEMU's `pci-blk`/`pci-scsi` failure.
      - Capabilities are read by `cap_len`. Reading by `length` left `notify_off_multiplier` as garbage on VZ, which caused the `virtio_net` panics.
-     - Notify offsets start as "unset".
-     - Notifies are range- and magic-checked.
+     - Notify offsets start as "unset", and notifies are range- and magic-checked.
      - 64-bit common-config fields are written as two 32-bit halves, per the spec.
+     - Interrupts that find ISR 0 are counted.
+  7. `0007`, `0008`: diagnostics. Failed block requests and every feature negotiation are logged.
   4. `0004`: the loader numbers CPUs in MADT order, with the boot CPU as 0. VZ reports GICC interface number 0 for every CPU.
   5. `0005`: the loader's PSCI calls follow SMCCC (x0–x3 in/out, x4–x17 clobbered) and log each `CPU_ON` result.
   6. `0006`: the loader logs its handoff to the kernel.
@@ -34,9 +37,10 @@ Haiku arm64 boots to the desktop under Apple's Virtualization.framework, with ke
 - **SMP fixed** (patches 0003–0005). The multi-vCPU hang had two causes:
   - VZ's MADT gives every CPU GICC interface number 0, so the loader never started the other CPUs, and the kernel's rendezvous waited for them forever.
   - Once they did start, a `virtio_pci` bug (capabilities read by `length`, not `cap_len`) left `notify_off_multiplier` as garbage on VZ's small notify regions. `virtio_net` then panicked writing to random kernel addresses.
-- **Remaining workarounds, still to fix:**
-  - **`virtio_block` over PCI can't read the disk** ("reading the partition table failed: 80000001"). Patch 0003 didn't fix it. QEMU's `pci-blk` shows the same failure. Boot from NVMe instead.
-  - app_server hangs on VZ's own virtio-gpu (handled by patch 0002). The cause isn't known yet.
+- **virtio over PCI fixed** (patch 0003): virtio-blk boots under VZ, and QEMU's default `virtio-*-pci` devices boot on arm64 with no I/O errors. Both failures traced to `virtio_pci`, not to descriptor chains: Haiku's chains are spec-correct and VZ's custom-device framework consumes them unchanged.
+- **Remaining:**
+  - app_server hangs on VZ's own virtio-gpu (handled by patch 0002). Retested with the feature fix: Haiku's driver negotiates `VERSION_1`, then its first command never completes. Cause unknown; low priority, since our device is the display.
+  - Haiku's legacy virtio-pci path (I/O ports) is still broken on arm64. It's now unused, because transitional devices take the modern path.
 - **Retracted:** Sprint 0's first T4 "PASS" read a syslog a QEMU boot had left in the image. T4 now deletes the image's syslog first and requires `oem id: APPLE`.
 
 ---

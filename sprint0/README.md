@@ -89,7 +89,7 @@ Everything a test writes goes under `work/<test>/`, which is gitignored. Each te
 | Test | macOS 26.5.1 | macOS 27.0 |
 |---|---|---|
 | T1 | PASS, after recording that `virtio-gpu-device` gets no GOP | **PASS 15/15**: no change from 26.5.1 |
-| T2 | Manual run, before the scripted matrix: mmio + blk + ramfb **boots to the desktop**; PCI virtio-blk gives intermittent `I/O error`s (BUILDING.md §6) | **PASS** (pristine image, 180 s/row): `reference`/`mmio-scsi`/`mmio-gpu` all reach first-login with 0 errors; `pci-blk` blocked by 21 I/O errors; `pci-scsi` boots clean but didn't reach first-login in 180 s |
+| T2 | Manual run, before the scripted matrix: mmio + blk + ramfb **boots to the desktop**; PCI virtio-blk gives intermittent `I/O error`s (BUILDING.md §6) | **PASS** (pristine image, 180 s/row): `reference`/`mmio-scsi`/`mmio-gpu` all reach first-login with 0 errors; `pci-blk` blocked by 21 I/O errors; `pci-scsi` boots clean but didn't reach first-login in 180 s. **Root cause found and fixed in the fork** (patch 0003): those rows used Haiku's legacy I/O-port virtio interface, where every I/O BAR gets host address 0 on arm64, so initializing virtio-net reset the disk. With the fork, `pci-blk` reaches first login with 0 errors (150 s run, 2026-09-18); `disable-legacy=on` on the QEMU devices is an equivalent stock workaround |
 | T3 | PASS 20/20 | **PASS 20/20**: platform unchanged. Custom virtio API present at runtime (4/4 classes) |
 | T4 | ready, not run yet | **FAIL.** The earlier "PASS" read a stale QEMU syslog. VZ's GPU plus virtio-blk never reaches userland; see T4 notes. S1 (`hvgpu`) reaches the desktop |
 | T5 | — | **PASS 5/5** |

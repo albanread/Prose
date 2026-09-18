@@ -1,0 +1,29 @@
+diff --git a/src/add-ons/kernel/drivers/disk/virtual/virtio_block/virtio_block.cpp b/src/add-ons/kernel/drivers/disk/virtual/virtio_block/virtio_block.cpp
+index ad15b5566c..3255a88eda 100644
+--- a/src/add-ons/kernel/drivers/disk/virtual/virtio_block/virtio_block.cpp
++++ b/src/add-ons/kernel/drivers/disk/virtual/virtio_block/virtio_block.cpp
+@@ -220,6 +220,7 @@ do_io(void* cookie, IOOperation* operation)
+ 	ConditionVariableEntry entry;
+ 	info->interruptCondition.Add(&entry);
+ 
++	bigtime_t startTime = system_time();
+ 	status_t result = info->virtio->queue_request_v(info->virtio_queue, entries,
+ 		1 + (operation->IsWrite() ? operation->VecCount() : 0 ),
+ 		1 + (operation->IsWrite() ? 0 : operation->VecCount()),
+@@ -228,6 +229,16 @@ do_io(void* cookie, IOOperation* operation)
+ 	if (result == B_OK)
+ 		result = entry.Wait(B_RELATIVE_TIMEOUT, 10 * 1000 * 1000);
+ 
++	// HaikuArmQemu fork: diagnostics for failed requests (timeout vs. status).
++	if (result != B_OK || *ack != VIRTIO_BLK_S_OK) {
++		dprintf("virtio_block: %s sector %" B_PRIu64 " length %lu vecs %" B_PRIu32
++			" request %" B_PRId32 ": wait %s after %" B_PRId64 " us, ack %u\n",
++			operation->IsWrite() ? "write" : "read", (uint64)header->sector,
++			(unsigned long)operation->Length(), operation->VecCount(),
++			info->currentRequest, strerror(result),
++			system_time() - startTime, *ack);
++	}
++
+ 	size_t bytesTransferred = 0;
+ 	status_t status = B_OK;
+ 	if (result != B_OK) {

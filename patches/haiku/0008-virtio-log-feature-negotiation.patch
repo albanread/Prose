@@ -1,0 +1,12 @@
+diff --git a/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp b/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
+index 0f0d51bc56..7cc9a2cd23 100644
+--- a/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
++++ b/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
+@@ -335,5 +335,6 @@ VirtioDevice::_DumpFeatures(const char* title, uint64 features,
+ 			strlcat(features_string, "] ", sizeof(features_string));
+ 		}
+ 	}
+-	TRACE("%s: %s\n", title, features_string);
++	// HaikuArmQemu fork: always log, with the raw bits.
++	dprintf("virtio: %s: %#" B_PRIx64 " %s\n", title, features, features_string);
+ }

@@ -13,7 +13,7 @@
 //   --size WxH    scanout size advertised via EDID/pmodes (default 1280x800)
 //   --ramconsole-log PATH   where the guest-RAM log goes (default ./ramconsole.log)
 //   --no-ramconsole         don't scan guest RAM for Haiku's logs
-//   --disk nvme|usb|virtio  boot disk interface (default nvme: virtio_block fails over PCI)
+//   --disk nvme|usb|virtio  boot disk interface (default nvme; virtio works with fork patch 0003)
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
 import AppKit
@@ -297,7 +297,9 @@ final class CustomVirtioGPU: NSObject, VZCustomVirtioDeviceConfigurationDelegate
 
     // VZCustomVirtioDeviceDelegate
     func customVirtioDeviceDidAcceptDriverOk(_ device: VZCustomVirtioDevice) {
-        log("virtio-gpu DRIVER_OK (features: \(device.negotiatedFeatures.flatMap { "\($0)" } ?? "?"))")
+        let f = device.negotiatedFeatures
+        log("virtio-gpu DRIVER_OK (driver accepted features: "
+            + (f.map { String(format: "0x%08x_%08x", $0.subset1, $0.subset0) } ?? "none") + ")")
     }
 
     func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) {
