@@ -1,7 +1,10 @@
 #!/bin/sh
-# Build the Haiku ARM64 MMC image.
+# Build the Haiku ARM64 image (minimum profile -- see BUILDING.md §5).
 # Requires: build volume mounted (scripts/mount-src.sh), cross-tools configured.
+#
+# Usage: build-image.sh [jam target]   (default: @minimum-mmc)
 set -e
+TARGET="${1:-@minimum-mmc}"
 ROOT="/Volumes/HaikuSrc/haiku"
 
 # jam lives in ~/bin; brew bison/gettext are keg-only and must precede system ones
@@ -11,9 +14,9 @@ ulimit -n 1024
 
 cd "$ROOT"
 JOBS=$(sysctl -n hw.ncpu)
-echo ">>> jam -q -j$JOBS haiku-mmc.image"
-jam -q -j"$JOBS" haiku-mmc.image
+echo ">>> jam -q -j$JOBS $TARGET"
+jam -q -j"$JOBS" "$TARGET"
 
 echo
-echo "Image ready: $ROOT/generated/haiku-mmc.image"
+ls -lh "$ROOT/haiku-mmc.image"
 echo "Run it with: scripts/run-qemu.sh"

@@ -5,7 +5,7 @@
 # Usage: scripts/run-qemu.sh [image] [extra qemu args...]
 # Requires: brew install qemu   (firmware ships with it)
 set -e
-IMAGE="${1:-/Volumes/HaikuSrc/haiku/generated/haiku-mmc.image}"
+IMAGE="${1:-/Volumes/HaikuSrc/haiku/haiku-mmc.image}"
 [ $# -gt 0 ] && shift
 
 FW="/opt/homebrew/share/qemu/edk2-aarch64-code.fd"

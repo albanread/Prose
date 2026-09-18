@@ -9,10 +9,11 @@ Haiku source tree and <https://www.haiku-os.org/guides/building/>.
 | Step | Status |
 |---|---|
 | Case-sensitive build volume | done (`/Volumes/HaikuSrc`) |
-| haiku + buildtools cloned | done (2026-09-18, master) |
+| haiku + buildtools cloned (+ Gerrit tags) | done (2026-09-18, master @ hrev60122) |
 | brew prerequisites + jam | done |
-| configure + arm64 cross-tools | done |
-| `jam haiku-mmc.image` | documented below |
+| configure + arm64 cross-tools (GCC 13.3) | done |
+| `jam @minimum-mmc` (source-built image) | done — `haiku/haiku-mmc.image`, 336 MB, ESP + BFS verified |
+| `jam haiku-mmc.image` (full desktop) | blocked: arm64 HaikuPorts packages unavailable locally; needs bootstrap (see §5) |
 | QEMU/HVF boot | draft command in `scripts/run-qemu.sh`, not yet validated |
 
 ## 1. Why the odd layout: case sensitivity
@@ -86,12 +87,15 @@ git clone https://github.com/haiku/haiku       /Volumes/HaikuSrc/haiku
 git clone https://github.com/haiku/buildtools  /Volumes/HaikuSrc/buildtools
 ```
 
-Canonical development happens on Haiku's Gerrit (`review.haiku-os.org`); the
-GitHub repos are mirrors. To later push branches for review:
+**Important:** the GitHub mirror carries no `hrev*` tags, and the build fails
+late ("you are using a Haiku clone without tags") without them. Fetch the tags
+from Haiku's Gerrit (done here; also adds the `gerrit` remote for later
+contributions):
 
 ```sh
 cd /Volumes/HaikuSrc/haiku
 git remote add gerrit https://review.haiku-os.org/haiku.git
+git fetch gerrit --tags      # ~58k tags; HEAD then describes as hrev<NNNNN>
 ```
 
 ## 4. Configure + build the arm64 cross-toolchain
@@ -118,16 +122,37 @@ Notes:
 ## 5. Build the image
 
 ```sh
-scripts/build-image.sh
-# which is: cd /Volumes/HaikuSrc/haiku && jam -q -j14 haiku-mmc.image
+scripts/build-image.sh              # default: @minimum-mmc
+# which is: cd /Volumes/HaikuSrc/haiku && jam -q -j14 @minimum-mmc
 ```
 
-* Output: `/Volumes/HaikuSrc/haiku/generated/haiku-mmc.image` (raw disk image
-  with an EFI system partition containing the Haiku UEFI loader — for arm64 no
-  u-boot stage is wrapped in).
-* The **first** run downloads a few hundred MB of prebuilt packages from
-  Haiku's repositories — network required.
-* Expect 10–30 min on 14 cores after packages are cached.
+* Output: `/Volumes/HaikuSrc/haiku/haiku-mmc.image` — **in the haiku source
+  root, not `generated/`**: the MMC image target isn't `MakeLocate`d, so jam
+  writes it to its working directory. It also keeps the default file name
+  even under the `@minimum-mmc` profile.
+* Structure (verified): MBR with a 32 MiB EFI System Partition containing
+  `EFI/BOOT/BOOTAA64.EFI` (edk2 auto-boots this) + a 300 MiB BFS partition.
+* The **minimum** profile builds everything from source and needs no binary
+  HaikuPorts packages — this is the supported local target for arm64 today,
+  and the fast dev loop for kernel/driver work (`jam` is incremental).
+
+### Why not the full desktop image (`haiku-mmc.image`)?
+
+Current master only ships a full in-tree HaikuPorts package manifest for
+x86_64 (`build/jam/repositories/HaikuPorts/x86_64` lists 400+ packages; the
+`arm64` file lists only bootstrap tools). A regular arm64 image therefore
+fails:
+
+* dozens of `AddHaikuImagePackages: package ... not available!` warnings, and
+* a fatal `don't know how to make libmidi.so` — the MIDI kit needs the
+  `fluidlite` build feature, which is provided by HaikuPorts packages that
+  are unavailable for arm64 local builds.
+
+The full arm64 package set is produced by Haiku's buildmaster via a
+**bootstrap build** (`--bootstrap` with haikuporter/haikuports trees, then
+`jam -q @bootstrap-raw`) — hours of compilation, from-source everything.
+Getting a full desktop image locally is queued in the roadmap; until then,
+`@minimum-mmc` is our baseline.
 
 ## 6. Run it under QEMU on Apple Silicon (HVF = native speed)
 
@@ -185,3 +210,7 @@ incremental. To force-rebuild one component: `jam -qa <Target>`.
   keg-only paths are on `PATH` as in §4.
 * **jam: too many open files** — `ulimit -n 1024` (build-image.sh does this).
 * **configure "Invalid argument: ../buildtools"** — old syntax; see §4.
+* **"you are using a Haiku clone without tags"** — GitHub mirror has no
+  `hrev*` tags; `git fetch gerrit --tags` (see §3), then re-run jam.
+* **Kernel/boot bring-up debugging** — a minimal image boots much faster:
+  `jam -q @minimum-mmc` (produces `haiku-minimal-mmc.image`).
