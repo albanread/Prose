@@ -1,0 +1,25 @@
+diff --git a/src/system/kernel/arch/arm64/arch_debug_console.cpp b/src/system/kernel/arch/arm64/arch_debug_console.cpp
+index bdaa106ac3..c97dc66248 100644
+--- a/src/system/kernel/arch/arm64/arch_debug_console.cpp
++++ b/src/system/kernel/arch/arm64/arch_debug_console.cpp
+@@ -57,9 +57,20 @@ arch_debug_serial_getchar(void)
+ }
+ 
+ 
++// HaikuArmQemu fork: Apple's Virtualization.framework gives the guest no UART.
++// Keep a copy of all kernel debug output in RAM, behind a tag the host can
++// find by scanning guest memory (tools/hvgpu RAM console).
++// Only the host reads it, so it must be volatile and "used", or the compiler drops it.
++static volatile char sRamLog[128 * 1024] __attribute__((used)) = "HAIKU-RAMLOG-V1\n";
++static volatile size_t sRamLogLength = sizeof("HAIKU-RAMLOG-V1\n") - 1;
++
++
+ void
+ arch_debug_serial_putchar(const char c)
+ {
++	if (sRamLogLength < sizeof(sRamLog) - 1 && c != '\r')
++		sRamLog[sRamLogLength++] = c;
++
+ 	if (sArchDebugUART == NULL)
+ 		return;
+ 

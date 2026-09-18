@@ -65,13 +65,13 @@ Everything a test writes goes under `work/<test>/`, which is gitignored. Each te
 
 ### T4: Haiku under Virtualization.framework
 - Boots a **copy** of the image in `hvz`, in a window, with VZ's own virtio-gpu, then copies Haiku's syslog off the disk.
-- Measured (macOS 27, 150 s run): with hvz's serial port and virtio-gpu attached, the firmware publishes SPCR and a linear GOP, so **`loader` and `framebuffer` read True** — earlier headless-probe-based expectations did not hold. The window stays black regardless: the GOP is not scan-out backed (pixels written after `ExitBootServices` never reach VZ's display), and Haiku's `virtio_gpu` driver does not bind VZ's device (no EDID).
-- **PASS** means the syslog reaches `Running first login script` with no I/O errors or panics. **Run on a fresh (never-booted) image** — the first-login script only runs once per installed system (same caveat as T2).
-- **Also record by eye:**
-  - Does EFI loader text appear? (measured: no)
-  - Does the desktop appear, and at what resolution? (measured: no — black window; system alive underneath)
-  - Do the USB keyboard and pointer work? (devices publish in the guest: two virtio input nodes)
-  - Does networking work? (measured: yes — DHCP lease via VZ NAT)
+- **Correction (2026-09-18):** an earlier "PASS" here was wrong. It read a syslog left in the image by a QEMU boot (ACPI `oem id: BOCHS`, DHCP from `10.0.2.2`). The VZ boot itself never reached userland. The script now deletes the image's syslog before booting and only accepts a syslog containing `oem id: APPLE`.
+- **What actually happens under VZ** (seen live with `tools/hvgpu`'s RAM console):
+  - With more than 1 vCPU, the kernel never starts. It hangs in SMP bring-up, after ExitBootServices and before the kernel's first line of output.
+  - `virtio_block` over PCI can't read the disk ("reading the partition table failed: 80000001"). This is the same bug as T2's `pci-blk` row. Booting from NVMe works.
+  - With VZ's virtio-gpu present, app_server opens it (`graphics/virtio/0`) and hangs waiting for it.
+- **PASS** means the syslog reaches `Running first login script` with no I/O errors or panics, and the syslog comes from a VZ boot.
+- **Working setup (S1):** `tools/hvgpu`, with 1 vCPU, an NVMe boot disk, and our custom virtio-gpu as the only GPU. It boots to the desktop. See the design doc.
 
 ### T5: Metal presenter
 - **Surface setup:** 16 KiB-aligned `mmap` memory wrapped with `makeBuffer(bytesNoCopy:)`. The shader samples the buffer with any stride and any 4-byte-aligned offset, forces alpha, and is paced by `CADisplayLink`.
@@ -91,7 +91,7 @@ Everything a test writes goes under `work/<test>/`, which is gitignored. Each te
 | T1 | PASS, after recording that `virtio-gpu-device` gets no GOP | **PASS 15/15**: no change from 26.5.1 |
 | T2 | Manual run, before the scripted matrix: mmio + blk + ramfb **boots to the desktop**; PCI virtio-blk gives intermittent `I/O error`s (BUILDING.md §6) | **PASS** (pristine image, 180 s/row): `reference`/`mmio-scsi`/`mmio-gpu` all reach first-login with 0 errors; `pci-blk` blocked by 21 I/O errors; `pci-scsi` boots clean but didn't reach first-login in 180 s |
 | T3 | PASS 20/20 | **PASS 20/20**: platform unchanged. Custom virtio API present at runtime (4/4 classes) |
-| T4 | ready, not run yet | **PASS** (150 s): all milestones, 0 errors — boots blind; see T4 notes |
+| T4 | ready, not run yet | **FAIL.** The earlier "PASS" read a stale QEMU syslog. VZ's GPU plus virtio-blk never reaches userland; see T4 notes. S1 (`hvgpu`) reaches the desktop |
 | T5 | — | **PASS 5/5** |
 
 ### What we learned

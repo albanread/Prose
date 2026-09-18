@@ -8,6 +8,32 @@ Tags: **[measured]** means we ran it on the host of record. **[source]** means w
 
 ---
 
+## 0. Status: S1 works on macOS 27 (2026-09-18)
+
+Haiku arm64 boots to the desktop under Apple's Virtualization.framework, with keyboard and mouse. It displays through **our** virtio-gpu, a macOS 27 `VZCustomVirtioDevice` in `tools/hvgpu`, presented with Metal. Haiku's stock `virtio_gpu` driver and accelerant drive it.
+- **Run:** `build/bin/hvgpu <image-copy> --cpus 1 --disk nvme` (VZ writes to the disk, so boot a copy).
+- **RAM console:** VZ gives the guest no UART, so `hvgpu` reads Haiku's logs straight out of guest RAM through `VZGuestMemoryMapping` and prints them as `RAM|` lines.
+  - It finds the loader's log buffer.
+  - It finds the kernel RAM log (patch 0001), which holds all kernel debug output, including panics and KDL.
+- **Our Haiku fork** (`patches/haiku/`, against hrev60122):
+  1. `0001`: the kernel keeps a RAM copy of its debug output, tagged `HAIKU-RAMLOG-V1`. It must be `volatile`/`used`, or GCC drops it.
+  2. `0002`: `virtio_gpu` skips GPUs without EDID. VZ's own virtio-gpu has none, and app_server hangs on it. Keeping VZ's GPU attached is still necessary, because VZ's absolute pointer maps onto it.
+  3. `0003`: `virtio_pci` fixes two bugs.
+     - Notify offsets were uninitialized. Notifying a queue that was never set up wrote to a random kernel address, which panicked in `virtio_net` under VZ.
+     - 64-bit writes to the common config are now two 32-bit writes, as the spec requires.
+- **`hvgpu` fixes on the way:**
+  - Correct virtio-gpu command IDs, little-endian headers, and the echoed fence.
+  - EDID is feature bit 1.
+  - The transfer offset follows the spec.
+  - The Metal overlay sits above VZ's view, and the display link is driven by a visible view.
+- **Remaining workarounds, still to fix:**
+  - **More than 1 vCPU hangs** before the kernel's first output, in the loader's SMP bring-up (PSCI `CPU_ON` under VZ).
+  - **`virtio_block` over PCI can't read the disk** ("reading the partition table failed: 80000001"). Patch 0003 didn't fix it. QEMU's `pci-blk` shows the same failure. Boot from NVMe instead.
+  - app_server hangs on VZ's own virtio-gpu (handled by patch 0002). The cause isn't known yet.
+- **Retracted:** Sprint 0's first T4 "PASS" read a syslog a QEMU boot had left in the image. T4 now deletes the image's syslog first and requires `oem id: APPLE`.
+
+---
+
 ## 1. Decisions
 
 1. **Development baseline: QEMU + HVF.**

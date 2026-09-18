@@ -4,11 +4,20 @@
 # Virtualization.framework, which gives Haiku no serial port.
 # bfs_shell mounts the volume read-write, so only use it on copies of images.
 #
-# usage: haiku-syslog.sh <image> <out-dir>     (needs scripts/mount-src.sh)
+# usage: haiku-syslog.sh <image> <out-dir>     copy the syslog out
+#        haiku-syslog.sh --clear <image>       delete syslog/syslog.old in the image, so
+#                                              a test only ever sees its own boot's log
+# (needs the build volume: scripts/mount-src.sh)
 set -euo pipefail
 
-IMAGE=${1:?usage: haiku-syslog.sh <image> <out-dir>}
-OUT=${2:?usage: haiku-syslog.sh <image> <out-dir>}
+CLEAR=0
+if [ "${1:-}" = "--clear" ]; then
+	CLEAR=1
+	shift
+fi
+IMAGE=${1:?usage: haiku-syslog.sh [--clear] <image> [<out-dir>]}
+OUT=${2:-}
+[ $CLEAR = 1 ] || [ -n "$OUT" ] || { echo "usage: haiku-syslog.sh <image> <out-dir>" >&2; exit 64; }
 BFS_SHELL=${BFS_SHELL:-/Volumes/HaikuSrc/haiku/generated/objects/darwin/arm64/release/tools/bfs_shell/bfs_shell}
 [ -x "$BFS_SHELL" ] || {
 	echo "bfs_shell not found at $BFS_SHELL -- mount the build volume (scripts/mount-src.sh)" >&2
@@ -28,6 +37,12 @@ else:
     sys.exit("no BFS (type 0xEB) partition in the MBR")
 EOF
 )
+
+if [ $CLEAR = 1 ]; then
+	printf '%s\n' "rm /myfs/system/var/log/syslog" "rm /myfs/system/var/log/syslog.old" "sync" "quit" \
+		| "$BFS_SHELL" --start-offset "$START" --end-offset "$END" "$IMAGE" > /dev/null 2>&1 || true
+	exit 0
+fi
 
 mkdir -p "$OUT"
 OUT_ABS=$(cd "$OUT" && pwd)

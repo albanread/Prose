@@ -1,0 +1,20 @@
+diff --git a/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp b/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
+index 413742c901..163ed2fc13 100644
+--- a/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
++++ b/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
+@@ -481,6 +481,15 @@ virtio_gpu_init_device(void* _info, void** _cookie)
+ 	info->virtio->negotiate_features(info->virtio_device, VIRTIO_GPU_F_EDID,
+ 		 &info->features, &get_feature_name);
+ 
++	// HaikuArmQemu fork: under Apple's Virtualization.framework the host adds its
++	// own virtio-gpu next to ours; it offers no EDID and app_server hangs on it.
++	// Our host device offers EDID, so skip GPUs without it: the failed open makes
++	// app_server move on to the next graphics device.
++	if ((info->features & VIRTIO_GPU_F_EDID) == 0) {
++		ERROR("no EDID feature: skipping this virtio-gpu (HaikuArmQemu)\n");
++		return B_NOT_SUPPORTED;
++	}
++
+ 	// TODO read config
+ 
+ 	// Setup queues
