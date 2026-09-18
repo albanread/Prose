@@ -21,6 +21,8 @@ private_workspace/run-vz.sh s2 --display s2 --resize-after 45 1600x1000   # live
 private_workspace/run-vz.sh in --display s2 --input-test   # our own keyboard/tablet (default); --input vz restores VZ's devices + view
 PW_INJECT_SCRIPT=private_workspace/netprobe.sh private_workspace/run-vz.sh net --headless --seconds 80   # guest-side network probe
 private_workspace/extract.sh net /home/netprobe.txt   # ... and its result (any file from a run's image copy)
+PW_INJECT_SCRIPT=private_workspace/soundprobe.sh private_workspace/run-vz.sh snd --seconds 70   # plays a 440 Hz tone through the Mac at ~30 s
+PW_INJECT_SCRIPT=private_workspace/soundprobe.sh private_workspace/run-qemu.sh --headless --copy --sound wav --seconds 100 && python3 private_workspace/wavcheck.py private_workspace/work/qemu/out.wav
 private_workspace/run-qemu.sh            # QEMU + HVF, modern virtio-pci, ramfb, -snapshot
 private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke/haiku.img
 ```

@@ -24,6 +24,7 @@
 //   --input own|vz          own: our virtio-input keyboard + tablet, window entirely ours (default);
 //                           vz: VZ's USB keyboard/pointer + virtio-gpu + VZVirtualMachineView
 //   --input-test            own input: click the Deskbar leaf, Escape, park the pointer (screenshots)
+//   --no-sound              no virtio-snd device (default: output+input to the Mac's audio devices)
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
 import AppKit
@@ -983,6 +984,16 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
             config.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
         }
         config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+        // virtio-snd to the Mac's default output/input (Haiku fork: virtio_sound driver)
+        if !args.contains("--no-sound") {
+            let output = VZVirtioSoundDeviceOutputStreamConfiguration()
+            output.sink = VZHostAudioOutputStreamSink()
+            let input = VZVirtioSoundDeviceInputStreamConfiguration()
+            input.source = VZHostAudioInputStreamSource()
+            let sound = VZVirtioSoundDeviceConfiguration()
+            sound.streams = [output, input]
+            config.audioDevices = [sound]
+        }
         config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 
         if let serialPath = option("--serial") {
