@@ -17,6 +17,7 @@ private_workspace/build.sh               # jam @minimum-mmc in the worktree
 private_workspace/run-vz.sh smoke        # hvgpu, windowed, 8 vCPUs, NVMe, fresh copy in work/smoke
 private_workspace/run-vz.sh t1 --headless --seconds 100 --disk virtio
 private_workspace/run-vz.sh s2 --display s2 --screenshot private_workspace/work/s2/shot.png   # S2 Prose Display instead of the S1 virtio-gpu
+private_workspace/run-vz.sh s2 --display s2 --resize-after 45 1600x1000   # live-resize test: the guest desktop follows the window
 private_workspace/run-qemu.sh            # QEMU + HVF, modern virtio-pci, ramfb, -snapshot
 private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke/haiku.img
 ```

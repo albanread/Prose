@@ -69,7 +69,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
     let maxWidth = 3840, maxHeight = 2160, strideAlign = 64, refreshMHz: UInt32 = 60000
     let poolSize: Int
     let pool: UnsafeMutableRawPointer
-    let surface: FrameSurface?              // presentation image, allocated at the maximum size
+    let surface: FrameSurface?              // a view onto the pool: the presenter samples it directly
     let seq = OSAllocatedUnfairLock(initialState: 0)
 
     private(set) var device: VZCustomVirtioDevice?
@@ -77,6 +77,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
     private var ramConsole: RAMConsole?
     private var poolMapped = false
     private var mode: PRDSMode?
+    private var presented = false           // a commit has arrived for the current mode
     private var eventMask: UInt32 = PRDS.eventMaskRedraw
     private var eventElements: [VZVirtioQueueElement] = []
     private var prefWidth: Int, prefHeight: Int
@@ -93,12 +94,8 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
             fatalError("prds: mmap of the surface pool failed")
         }
         pool = p
-        surface = FrameSurface(width: maxWidth, height: maxHeight)
+        surface = FrameSurface(base: p, length: poolSize)
         super.init()
-        if let surface {
-            surface.width = width
-            surface.height = height
-        }
         log("prds: pool \(poolSize >> 20) MiB at \(pool) (16 KiB aligned: \(Int(bitPattern: pool) % PRDS.shmAlign == 0))")
     }
 
@@ -261,51 +258,50 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         guard width <= maxWidth, height <= maxHeight, offset % PRDS.shmAlign == 0,
               offset + stride * height <= poolSize else { return PRDS.errBounds }
         mode = PRDSMode(width: width, height: height, stride: stride, offset: offset)
-        if let surface {
-            surface.width = width
-            surface.height = height
-        }
-        clearPresentation()
+        clearPresentation()     // black until the first commit of the new mode
         log("prds: mode \(width)x\(height) stride \(stride) at pool offset \(offset)")
         return PRDS.respOK
     }
 
-    /// Fold the committed rects of the surface into the presentation image.
-    /// Completion (returnToQueue by the caller) means we are done reading them.
+    /// The presenter samples the pool directly, so a commit only has to say "something
+    /// changed" (the rects are validated and counted). Completion — returnToQueue by the
+    /// caller — still means the host has taken note of them.
     private func commit(_ req: Data) -> UInt32 {
         guard let mode, let surface else { return PRDS.errState }
         guard req.count >= 24 else { return PRDS.errInvalid }
         let count = Int(leU32(req, 20))
         guard count <= PRDS.maxCommitRects, req.count >= 24 + count * 16 else { return PRDS.errInvalid }
-        var rects: [(x: Int, y: Int, w: Int, h: Int)] = []
         if count == 0 {
-            rects.append((0, 0, mode.width, mode.height))
+            commitRects += 1
+            commitBytes += mode.width * mode.height * 4
         } else {
             for i in 0..<count {
                 let o = 24 + i * 16
-                rects.append((Int(leU32(req, o)), Int(leU32(req, o + 4)), Int(leU32(req, o + 8)), Int(leU32(req, o + 12))))
+                let x0 = max(0, Int(leU32(req, o))), y0 = max(0, Int(leU32(req, o + 4)))
+                let x1 = min(mode.width, x0 + Int(leU32(req, o + 8)))
+                let y1 = min(mode.height, y0 + Int(leU32(req, o + 12)))
+                guard x1 > x0, y1 > y0 else { continue }
+                commitRects += 1
+                commitBytes += (x1 - x0) * (y1 - y0) * 4
             }
         }
-        let src = pool + mode.offset
-        for r in rects {
-            let x0 = max(0, r.x), y0 = max(0, r.y)
-            let x1 = min(mode.width, r.x + r.w), y1 = min(mode.height, r.y + r.h)
-            guard x1 > x0, y1 > y0 else { continue }
-            let bytes = (x1 - x0) * 4
-            for y in y0..<y1 {
-                memcpy(surface.base + y * surface.stride + x0 * 4, src + y * mode.stride + x0 * 4, bytes)
-            }
-            commitRects += 1
-            commitBytes += bytes * (y1 - y0)
+        if !presented {
+            presented = true
+            surface.stride = mode.stride
+            surface.offset = mode.offset
+            surface.width = mode.width
+            surface.height = mode.height
         }
         commits += 1
         seq.withLock { $0 += 1 }
         return PRDS.respOK
     }
 
+    /// Nothing to show until the guest commits: the presenter paints black.
     private func clearPresentation() {
-        guard let surface else { return }
-        memset(surface.base, 0, surface.length)
+        presented = false
+        surface?.width = 0
+        surface?.height = 0
         seq.withLock { $0 += 1 }
     }
 
@@ -353,7 +349,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         let now = Date()
         guard now.timeIntervalSince(lastStats) >= 10 else { return }
         lastStats = now
-        log("prds: \(commits) commits, \(commitRects) rects, \(commitBytes >> 10) KiB copied, "
+        log("prds: \(commits) commits, \(commitRects) rects, \(commitBytes >> 10) KiB touched, "
             + "\(vsyncSeq) vsyncs, \(droppedEvents) events dropped, \(eventElements.count) event buffers posted")
         if let path = option("--screenshot") { screenshot(to: path) }
     }
@@ -365,7 +361,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         let space = CGColorSpaceCreateDeviceRGB()
         let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
             | CGBitmapInfo.byteOrder32Little.rawValue)
-        guard let ctx = CGContext(data: surface.base, width: surface.width, height: surface.height,
+        guard let ctx = CGContext(data: surface.base + surface.offset, width: surface.width, height: surface.height,
                                   bitsPerComponent: 8, bytesPerRow: surface.stride, space: space,
                                   bitmapInfo: info.rawValue),
               let image = ctx.makeImage(),

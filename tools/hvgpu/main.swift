@@ -18,6 +18,7 @@
 //                           s2 is the shared-surface Prose Display (docs/s2-display-device.md)
 //   --pool-mib N            s2 surface pool size (default 64)
 //   --screenshot PATH       s2: dump the presentation surface as PNG every 10 s (with the stats line)
+//   --resize-after N WxH    resize our window after N seconds (tests MODE_HINT / live resize)
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
 import AppKit
@@ -155,12 +156,14 @@ struct ShaderParams {
 /// The host-side frame surface: page-aligned, Metal-wrapped, written by the
 /// device on TRANSFER, sampled by the shader on present.
 final class FrameSurface {
-    var width: Int          // the current mode (s2 changes it; the buffer holds the maximum)
+    var width: Int          // the current mode; 0 = nothing to show (present black)
     var height: Int
-    let stride: Int
+    var stride: Int
+    var offset: Int = 0     // byte offset of the image inside the buffer (s2: pool offset)
     let length: Int
     let base: UnsafeMutableRawPointer
 
+    /// A surface with its own page-aligned buffer (S1: filled by TRANSFER_TO_HOST_2D).
     init?(width: Int, height: Int) {
         self.width = width
         self.height = height
@@ -171,6 +174,15 @@ final class FrameSurface {
               p != UnsafeMutableRawPointer(bitPattern: -1) else { return nil }
         base = p
         memset(base, 0, length)
+    }
+
+    /// A view onto memory owned by someone else (S2: the surface pool the guest draws into).
+    init(base: UnsafeMutableRawPointer, length: Int) {
+        self.base = base
+        self.length = length
+        width = 0
+        height = 0
+        stride = 0
     }
 }
 
@@ -614,7 +626,7 @@ final class Presenter: NSObject {
 
         window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
-        window.title = "hvgpu — Haiku \(width)x\(height) (S1)"
+        window.title = "hvgpu — Haiku \(width)x\(height) (\(displayMode.uppercased()))"
         window.contentView = container
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -644,7 +656,7 @@ final class Presenter: NSObject {
             scale.y = Float(targetAspect / surfAspect)
         }
         return ShaderParams(width: UInt32(surface.width), height: UInt32(surface.height),
-                            strideWords: UInt32(surface.stride / 4), offsetWords: 0,
+                            strideWords: UInt32(surface.stride / 4), offsetWords: UInt32(surface.offset / 4),
                             scale: scale, bias: (SIMD2<Float>(1, 1) - scale) / 2)
     }
 
@@ -656,8 +668,7 @@ final class Presenter: NSObject {
         presenterGPU?.displayTick(timestamp: link.timestamp)
         // --no-overlay: never cover VZ's own display (for testing VZ's virtio-gpu).
         guard !args.contains("--no-overlay") else { return }
-        guard let gpu = presenterGPU, let surface = gpu.surface,
-              surface.width > 0, surface.height > 0 else { return }
+        guard let gpu = presenterGPU, let surface = gpu.surface else { return }
         if layer.drawableSize.width != view.bounds.width * window.backingScaleFactor {
             updateDrawableSize()
         }
@@ -667,22 +678,29 @@ final class Presenter: NSObject {
         lastPresentedSeq = current
         if view.isHidden {
             view.isHidden = false
-            log("first frame from our virtio-gpu: showing the Metal overlay")
+            log("first frame from our display device: showing the Metal overlay")
         }
         guard let drawable = layer.nextDrawable() else { return }
         let cb = queue.makeCommandBuffer()!
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = drawable.texture
-        rp.colorAttachments[0].loadAction = .dontCare
         rp.colorAttachments[0].storeAction = .store
-        let enc = cb.makeRenderCommandEncoder(descriptor: rp)!
-        var p = params(targetWidth: Double(layer.drawableSize.width),
-                       targetHeight: Double(layer.drawableSize.height), surface: surface)
-        enc.setRenderPipelineState(pipeline)
-        enc.setFragmentBuffer(buffer, offset: 0, index: 0)
-        enc.setFragmentBytes(&p, length: MemoryLayout<ShaderParams>.stride, index: 1)
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        enc.endEncoding()
+        if surface.width > 0 && surface.height > 0 {
+            rp.colorAttachments[0].loadAction = .dontCare
+            let enc = cb.makeRenderCommandEncoder(descriptor: rp)!
+            var p = params(targetWidth: Double(layer.drawableSize.width),
+                           targetHeight: Double(layer.drawableSize.height), surface: surface)
+            enc.setRenderPipelineState(pipeline)
+            enc.setFragmentBuffer(buffer, offset: 0, index: 0)
+            enc.setFragmentBytes(&p, length: MemoryLayout<ShaderParams>.stride, index: 1)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            enc.endEncoding()
+        } else {
+            // no scanout (s2: between SET_MODE and the first commit): black
+            rp.colorAttachments[0].loadAction = .clear
+            rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+            cb.makeRenderCommandEncoder(descriptor: rp)!.endEncoding()
+        }
         cb.present(drawable)
         cb.commit()
     }
@@ -758,6 +776,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
 
         if !headless {
             presenter.makeWindow(vm: vm, source: displaySource)
+            presenter.window.delegate = self     // windowDidResize (MODE_HINT), windowShouldClose
         }
         presenterGPU = displaySource
 
@@ -775,6 +794,17 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         if let seconds = runSeconds {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [self] in
                 stopVM(reason: "time limit \(Int(seconds)) s")
+            }
+        }
+        // --resize-after N WxH: resize our window after N seconds (live-resize test)
+        if !headless, let after = option("--resize-after").flatMap(Double.init),
+           let i = args.lastIndex(of: "--resize-after"), i + 2 < args.count {
+            let parts = args[i + 2].split(separator: "x").compactMap { Int($0) }
+            if parts.count == 2 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + after) { [self] in
+                    log("resizing the window to \(parts[0])x\(parts[1])")
+                    presenter.window.setContentSize(NSSize(width: parts[0], height: parts[1]))
+                }
             }
         }
     }

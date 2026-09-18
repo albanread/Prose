@@ -1,0 +1,404 @@
+From a0670bdb83bb5fe8994d2e1e0d4fde9f6565e2fc Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 15:13:27 +0100
+Subject: [PATCH] Prose Display (S2): live resize agent, mode-hint wait, REDRAW
+
+prose_display driver: PRDS_WAIT_MODE_HINT ioctl blocks (with timeout,
+interruptible) until the host sends a MODE_HINT and returns the host's
+preferred size; the semaphore behind it stays kernel-owned because the
+wait happens inside the ioctl. REDRAW events bump redraw_count in the
+shared info. The retrace semaphore is only handed over while the kernel
+still owns it, so clones and the agent don't steal it from app_server.
+
+prose_display.accelerant: a changed redraw_count makes the commit thread
+send a full-surface commit.
+
+prose_display_agent (new server, launched from data/launch/system):
+waits for mode hints and switches the screen with BScreen::SetMode()
+(timing from compute_display_timing, any size up to the maximum), so the
+guest desktop follows the host window like guest tools do on other
+hypervisors. Without the device it idles.
+
+Verified on VZ: hvgpu --resize-after 45 1600x1000 -> MODE_HINT 1600x935
+-> agent: "1280x800 -> 1600x935: No error" -> SET_MODE 1600x935 stride
+6400 on the host within 160 ms; the desktop re-rendered at the new size.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ build/jam/images/definitions/minimum          |   1 +
+ data/launch/system                            |   6 +
+ .../graphics/prose_display/prose_display.h    |   9 ++
+ .../accelerants/prose_display/accelerant.cpp  |   9 +-
+ .../graphics/prose_display/prose_display.cpp  |  36 ++++-
+ src/servers/Jamfile                           |   1 +
+ src/servers/prose_display/Jamfile             |  12 ++
+ .../prose_display/prose_display_agent.cpp     | 126 ++++++++++++++++++
+ .../prose_display/prose_display_agent.rdef    |  13 ++
+ 9 files changed, 209 insertions(+), 4 deletions(-)
+ create mode 100644 src/servers/prose_display/Jamfile
+ create mode 100644 src/servers/prose_display/prose_display_agent.cpp
+ create mode 100644 src/servers/prose_display/prose_display_agent.rdef
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 9dcc1cb184..1d421432b7 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -232,6 +232,7 @@ SYSTEM_SERVERS = [ FFilterByBuildFeatures
+ 	notification_server
+ 	package_daemon
+ 	power_daemon
++	prose_display_agent
+ 	registrar
+ 	syslog_daemon
+ ] ;
+diff --git a/data/launch/system b/data/launch/system
+index d98c711fce..5945770512 100644
+--- a/data/launch/system
++++ b/data/launch/system
+@@ -61,6 +61,12 @@ service x-vnd.Haiku-power_daemon {
+ 	legacy
+ }
+ 
++service x-vnd.Haiku-prose_display_agent {
++	launch /system/servers/prose_display_agent
++	no_safemode
++	legacy
++}
++
+ job x-vnd.Haiku-cddb_lookup {
+ 	launch /system/bin/cddb_lookup
+ 	no_safemode
+diff --git a/headers/private/graphics/prose_display/prose_display.h b/headers/private/graphics/prose_display/prose_display.h
+index 8167628b4d..21acb3cb4e 100644
+--- a/headers/private/graphics/prose_display/prose_display.h
++++ b/headers/private/graphics/prose_display/prose_display.h
+@@ -147,6 +147,14 @@ struct prds_shared_info {
+ 
+ 	area_id			mode_list_area;		/* owned by the primary accelerant */
+ 	uint32			mode_count;
++
++	uint32			redraw_count;		/* bumped by REDRAW events: present everything again */
++};
++
++struct prds_mode_hint {
++	uint32			width;				/* out: the host's current preferred size */
++	uint32			height;
++	bigtime_t		timeout;			/* in: how long to wait for a new hint */
+ };
+ 
+ struct prds_commit_request {
+@@ -162,6 +170,7 @@ enum {
+ 	PRDS_SET_MODE,										/* display_mode* */
+ 	PRDS_COMMIT,										/* prds_commit_request* */
+ 	PRDS_ENABLE_EVENTS,									/* uint32* mask */
++	PRDS_WAIT_MODE_HINT,								/* prds_mode_hint*: blocks until the next hint or timeout */
+ };
+ 
+ 
+diff --git a/src/add-ons/accelerants/prose_display/accelerant.cpp b/src/add-ons/accelerants/prose_display/accelerant.cpp
+index b7e5c82fde..477809bfb1 100644
+--- a/src/add-ons/accelerants/prose_display/accelerant.cpp
++++ b/src/add-ons/accelerants/prose_display/accelerant.cpp
+@@ -71,6 +71,7 @@ commit_thread(void* data)
+ 	prds_commit_request request;
+ 
+ 	bool useRetrace = true;
++	uint32 lastRedraw = info->shared_info->redraw_count;
+ 	while (!info->quit) {
+ 		sem_id retrace = useRetrace ? info->shared_info->retrace_sem : -1;
+ 		status_t waited = B_ERROR;
+@@ -97,7 +98,13 @@ commit_thread(void* data)
+ 			info->dirty_count = 0;
+ 		}
+ 		release_sem(info->dirty_lock);
+-		if (count == 0)
++
++		// the host asked for everything again (REDRAW): a full commit
++		bool redraw = info->shared_info->redraw_count != lastRedraw;
++		if (redraw) {
++			lastRedraw = info->shared_info->redraw_count;
++			count = 0;
++		} else if (count == 0)
+ 			continue;
+ 
+ 		request.rect_count = count;
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index eec33f815e..0dd0f502de 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -74,6 +74,7 @@ struct prds_info {
+ 	area_id						shared_area;
+ 	struct prds_shared_info*	shared;
+ 	sem_id						retrace_sem;
++	sem_id						hint_sem;			// kernel-owned, waited on inside ioctl
+ 
+ 	uint32						mode_width;
+ 	uint32						mode_height;
+@@ -159,12 +160,18 @@ prds_event_callback(void* driverCookie, void* cookie)
+ 				break;
+ 			}
+ 			case PRDS_EVT_MODE_HINT:
++			{
+ 				info->hint_count++;
+ 				info->shared->pref_width = event->mode_hint.width;
+ 				info->shared->pref_height = event->mode_hint.height;
++				int32 waiting;
++				if (get_sem_count(info->hint_sem, &waiting) == B_OK && waiting < 0)
++					release_sem_etc(info->hint_sem, -waiting, B_DO_NOT_RESCHEDULE);
+ 				break;
++			}
+ 			case PRDS_EVT_REDRAW:
+ 				info->redraw_count++;
++				info->shared->redraw_count = (uint32)info->redraw_count;
+ 				atomic_set(&info->need_redraw, 1);
+ 				break;
+ 		}
+@@ -414,6 +421,8 @@ prds_teardown(prds_info* info)
+ 		info->virtio->free_interrupts(info->device);
+ 	if (info->retrace_sem >= 0)
+ 		delete_sem(info->retrace_sem);
++	if (info->hint_sem >= 0)
++		delete_sem(info->hint_sem);
+ 	if (info->command_done >= 0)
+ 		delete_sem(info->command_done);
+ 	if (info->shared_area >= 0)
+@@ -437,7 +446,7 @@ prds_init_driver(device_node* node, void** _cookie)
+ 		return B_NO_MEMORY;
+ 	info->node = node;
+ 	info->pool_area = info->command_area = info->event_area = info->shared_area = -1;
+-	info->command_done = info->retrace_sem = -1;
++	info->command_done = info->retrace_sem = info->hint_sem = -1;
+ 	info->test_thread = -1;
+ 	mutex_init(&info->command_lock, "prose display commands");
+ 
+@@ -512,7 +521,8 @@ prds_init_driver(device_node* node, void** _cookie)
+ 	}
+ 	info->command_done = create_sem(0, "prose display command");
+ 	info->retrace_sem = create_sem(0, "prose display retrace");
+-	if (info->command_done < 0 || info->retrace_sem < 0) {
++	info->hint_sem = create_sem(0, "prose display mode hint");
++	if (info->command_done < 0 || info->retrace_sem < 0 || info->hint_sem < 0) {
+ 		status = info->command_done < 0 ? info->command_done : info->retrace_sem;
+ 		ERROR("creating semaphores failed: %s\n", strerror(status));
+ 		goto error;
+@@ -637,9 +647,12 @@ prds_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
+ 		if (get_sem_info(info->retrace_sem, &semInfo) != B_OK) {
+ 			info->retrace_sem = create_sem(0, "prose display retrace");
+ 			info->shared->retrace_sem = info->retrace_sem;
++			get_sem_info(info->retrace_sem, &semInfo);
+ 		}
++		// the first opener (app_server) gets it; later ones (clones, the agent) leave it
+ 		thread_info threadInfo;
+-		if (info->retrace_sem >= 0 && get_thread_info(find_thread(NULL), &threadInfo) == B_OK
++		if (info->retrace_sem >= 0 && semInfo.team == team_get_kernel_team_id()
++			&& get_thread_info(find_thread(NULL), &threadInfo) == B_OK
+ 			&& threadInfo.team != team_get_kernel_team_id())
+ 			set_sem_owner(info->retrace_sem, threadInfo.team);
+ 	}
+@@ -750,6 +763,23 @@ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 				return B_BAD_ADDRESS;
+ 			return prds_enable_events(info, mask);
+ 		}
++
++		case PRDS_WAIT_MODE_HINT:
++		{
++			// the semaphore stays kernel-owned; the wait happens here on the caller's behalf
++			struct prds_mode_hint hint;
++			if (length < sizeof(hint) || user_memcpy(&hint, buffer, sizeof(hint)) != B_OK)
++				return B_BAD_ADDRESS;
++			status_t status = acquire_sem_etc(info->hint_sem, 1,
++				B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT, hint.timeout);
++			if (status != B_OK && status != B_TIMED_OUT && status != B_WOULD_BLOCK)
++				return status;
++			hint.width = info->shared->pref_width;
++			hint.height = info->shared->pref_height;
++			if (user_memcpy(buffer, &hint, sizeof(hint)) != B_OK)
++				return B_BAD_ADDRESS;
++			return status;
++		}
+ 	}
+ 	return B_DEV_INVALID_IOCTL;
+ }
+diff --git a/src/servers/Jamfile b/src/servers/Jamfile
+index 327d0c2ff6..3f9b525fea 100644
+--- a/src/servers/Jamfile
++++ b/src/servers/Jamfile
+@@ -18,5 +18,6 @@ SubInclude HAIKU_TOP src servers package ;
+ SubInclude HAIKU_TOP src servers power ;
+ SubInclude HAIKU_TOP src servers print ;
+ SubInclude HAIKU_TOP src servers print_addon ;
++SubInclude HAIKU_TOP src servers prose_display ;
+ SubInclude HAIKU_TOP src servers registrar ;
+ SubInclude HAIKU_TOP src servers syslog_daemon ;
+diff --git a/src/servers/prose_display/Jamfile b/src/servers/prose_display/Jamfile
+new file mode 100644
+index 0000000000..25beddd04e
+--- /dev/null
++++ b/src/servers/prose_display/Jamfile
+@@ -0,0 +1,12 @@
++SubDir HAIKU_TOP src servers prose_display ;
++
++UsePrivateHeaders graphics ;
++UsePrivateHeaders [ FDirName graphics common ] ;
++UsePrivateHeaders [ FDirName graphics prose_display ] ;
++
++AddResources prose_display_agent : prose_display_agent.rdef ;
++
++Application prose_display_agent :
++	prose_display_agent.cpp
++	: be libaccelerantscommon.a [ TargetLibsupc++ ]
++	;
+diff --git a/src/servers/prose_display/prose_display_agent.cpp b/src/servers/prose_display/prose_display_agent.cpp
+new file mode 100644
+index 0000000000..b1d91949e8
+--- /dev/null
++++ b/src/servers/prose_display/prose_display_agent.cpp
+@@ -0,0 +1,126 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Prose Display agent: follows the host window. When the host resizes its
++ * window the Prose Display device sends a MODE_HINT; the driver wakes us
++ * (PRDS_WAIT_MODE_HINT) and we switch the screen to that size, the way
++ * guest tools do on other hypervisors. Without the device we just idle.
++ */
++
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <syslog.h>
++#include <unistd.h>
++
++#include <Application.h>
++#include <Screen.h>
++
++#include <compute_display_timing.h>
++#include <create_display_modes.h>
++#include <prose_display.h>
++
++
++static const char* kDevicePath = "/dev/graphics/prose_display/0";
++static const char* kSignature = "application/x-vnd.Haiku-prose_display_agent";
++
++
++static status_t
++switch_to(uint32 width, uint32 height)
++{
++	BScreen screen;
++	if (!screen.IsValid())
++		return B_NO_INIT;
++
++	display_mode current;
++	status_t status = screen.GetMode(&current);
++	if (status != B_OK)
++		return status;
++	if (current.virtual_width == width && current.virtual_height == height)
++		return B_OK;
++
++	display_mode mode = current;
++	compute_display_timing(width, height, 60, false, &mode.timing);
++	fill_display_mode(width, height, &mode);
++	mode.space = B_RGB32;
++
++	status = screen.SetMode(&mode);
++	syslog(status == B_OK ? LOG_INFO : LOG_ERR,
++		"prose_display_agent: %" B_PRIu32 "x%" B_PRIu32 " -> %" B_PRIu32 "x%" B_PRIu32
++		": %s\n", current.virtual_width, current.virtual_height, width, height,
++		strerror(status));
++	return status;
++}
++
++
++static int32
++hint_thread(void* data)
++{
++	int device = *(int*)data;
++	uint32 wanted = 0, wantedHeight = 0;
++	int failures = 0;
++
++	while (true) {
++		prds_mode_hint hint;
++		hint.timeout = 2000000;
++		status_t status = ioctl(device, PRDS_WAIT_MODE_HINT, &hint, sizeof(hint));
++		if (status != B_OK && status != B_TIMED_OUT && errno != B_TIMED_OUT
++			&& errno != B_INTERRUPTED) {
++			if (++failures > 10) {
++				syslog(LOG_ERR, "prose_display_agent: giving up: %s\n", strerror(errno));
++				return 1;
++			}
++			snooze(1000000);
++			continue;
++		}
++		failures = 0;
++		if (hint.width == 0 || hint.height == 0)
++			continue;
++		if (hint.width == wanted && hint.height == wantedHeight)
++			continue;
++
++		// coalesce the burst a live resize produces
++		snooze(150000);
++		prds_mode_hint latest;
++		latest.timeout = 0;
++		if (ioctl(device, PRDS_WAIT_MODE_HINT, &latest, sizeof(latest)) == B_OK
++			|| errno == B_TIMED_OUT) {
++			if (latest.width != 0 && latest.height != 0) {
++				hint.width = latest.width;
++				hint.height = latest.height;
++			}
++		}
++
++		if (switch_to(hint.width, hint.height) == B_OK) {
++			wanted = hint.width;
++			wantedHeight = hint.height;
++		}
++	}
++	return 0;
++}
++
++
++int
++main()
++{
++	int device = open(kDevicePath, O_RDWR);
++	if (device < 0) {
++		// no Prose Display: nothing to do, but stay out of launch_daemon's way
++		while (true)
++			snooze(B_INFINITE_TIMEOUT);
++	}
++
++	BApplication app(kSignature);
++	thread_id thread = spawn_thread(hint_thread, "mode hints", B_NORMAL_PRIORITY, &device);
++	if (thread < 0)
++		return 1;
++	resume_thread(thread);
++	syslog(LOG_INFO, "prose_display_agent: following the host window\n");
++	app.Run();
++	close(device);
++	return 0;
++}
+diff --git a/src/servers/prose_display/prose_display_agent.rdef b/src/servers/prose_display/prose_display_agent.rdef
+new file mode 100644
+index 0000000000..7f64230f88
+--- /dev/null
++++ b/src/servers/prose_display/prose_display_agent.rdef
+@@ -0,0 +1,13 @@
++resource app_signature "application/x-vnd.Haiku-prose_display_agent";
++
++resource app_flags B_BACKGROUND_APP;
++
++resource app_version {
++	major  = 0,
++	middle = 1,
++	minor  = 0,
++	variety = 0,
++	internal = 0,
++	short_info = "Prose Display agent",
++	long_info = "Follows the host window on the Prose Display (S2) device"
++};
+-- 
+2.54.0 (Apple Git-157)
+
