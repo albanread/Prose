@@ -16,9 +16,10 @@
 //   --disk nvme|usb|virtio  boot disk interface (default nvme; virtio works with fork patch 0003)
 //   --display s1|s2         our display device: s1 impersonates virtio-gpu (default),
 //                           s2 is the shared-surface Prose Display (docs/s2-display-device.md)
-//   --pool-mib N            s2 surface pool size (default 64)
+//   --pool-mib N            s2 surface pool size (default 128)
 //   --screenshot PATH       s2: dump the presentation surface as PNG every 10 s (with the stats line)
 //   --resize-after N WxH    resize our window after N seconds (tests MODE_HINT / live resize)
+//   --commit-stats          s2: list the most frequently committed rects with each stats line
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
 import AppKit
@@ -56,6 +57,11 @@ let startTime = Date()
 func log(_ event: String) {
     print(String(format: "HVZ %7.2f ", Date().timeIntervalSince(startTime)) + event)
 }
+
+/// Serializes writes into a display surface (device copies) with the presenter's GPU read
+/// of it: the presenter holds it from encoding until the GPU is done, so a frame can never
+/// show a half-written surface.
+let presentLock = NSLock()
 
 // MARK: - EDID (single detailed timing: WxH@60 reduced blanking)
 
@@ -463,10 +469,12 @@ final class CustomVirtioGPU: NSObject, VZCustomVirtioDeviceConfigurationDelegate
         let dstStride = surface.stride
         guard w > 0, h > 0, Int(offset) + (h - 1) * srcStride + w * 4 <= res.backingLength else { return }
         // Per the spec (and QEMU): row r of the rect starts at backing + offset + r * stride.
-        for row in 0..<h {
-            let s = srcBase + Int(offset) + row * srcStride
-            let d = surface.base + (y + row) * dstStride + x * 4
-            memcpy(d, s, w * 4)
+        presentLock.withLock {
+            for row in 0..<h {
+                let s = srcBase + Int(offset) + row * srcStride
+                let d = surface.base + (y + row) * dstStride + x * 4
+                memcpy(d, s, w * 4)
+            }
         }
     }
 }
@@ -672,15 +680,18 @@ final class Presenter: NSObject {
         if layer.drawableSize.width != view.bounds.width * window.backingScaleFactor {
             updateDrawableSize()
         }
-        let current = gpu.seq.withLock { $0 }
         // Nothing flushed yet: keep the overlay hidden so VZ's own display shows.
-        if current == 0 || current == lastPresentedSeq { return }
-        lastPresentedSeq = current
+        if gpu.seq.withLock({ $0 }) == 0 { return }
+        if gpu.seq.withLock({ $0 }) == lastPresentedSeq { return }
         if view.isHidden {
             view.isHidden = false
             log("first frame from our display device: showing the Metal overlay")
         }
+        // nextDrawable() can block for a frame: get it before taking the lock commits wait on
         guard let drawable = layer.nextDrawable() else { return }
+        presentLock.lock()
+        defer { presentLock.unlock() }
+        lastPresentedSeq = gpu.seq.withLock { $0 }
         let cb = queue.makeCommandBuffer()!
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = drawable.texture
@@ -703,6 +714,7 @@ final class Presenter: NSObject {
         }
         cb.present(drawable)
         cb.commit()
+        cb.waitUntilCompleted()     // the surface may be written again only after the GPU read it
     }
 }
 
@@ -753,7 +765,7 @@ final class CustomVirtioRNG: NSObject, VZCustomVirtioDeviceConfigurationDelegate
 final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVirtualMachineDelegate {
     var vm: VZVirtualMachine!
     let gpu = CustomVirtioGPU()
-    let prds = PRDSDevice(width: width, height: height, poolMiB: Int(option("--pool-mib") ?? "64") ?? 64)
+    let prds = PRDSDevice(width: width, height: height, poolMiB: Int(option("--pool-mib") ?? "128") ?? 128)
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
     let presenter = Presenter()

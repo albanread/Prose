@@ -9,6 +9,7 @@
 import Foundation
 import Virtualization
 import ImageIO
+import Metal
 import os
 
 /// What the Metal presenter needs from a display device.
@@ -69,7 +70,8 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
     let maxWidth = 3840, maxHeight = 2160, strideAlign = 64, refreshMHz: UInt32 = 60000
     let poolSize: Int
     let pool: UnsafeMutableRawPointer
-    let surface: FrameSurface?              // a view onto the pool: the presenter samples it directly
+    let surface: FrameSurface?              // the display buffer: only completed commits land here
+    private(set) var poolBuffer: MTLBuffer? // the pool as the GPU sees it (fb and bb), for blit kernels
     let seq = OSAllocatedUnfairLock(initialState: 0)
 
     private(set) var device: VZCustomVirtioDevice?
@@ -83,6 +85,9 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
     private var prefWidth: Int, prefHeight: Int
     private var vsyncSeq: UInt64 = 0, hintSeq: UInt64 = 0, redrawSeq: UInt64 = 0
     private var commits = 0, commitRects = 0, commitBytes = 0, droppedEvents = 0
+    private var copyNanos: UInt64 = 0, copyMaxNanos: UInt64 = 0
+    private let commitStats = args.contains("--commit-stats")
+    private var rectHistogram: [String: Int] = [:]
     private var lastStats = Date()
 
     init(width: Int, height: Int, poolMiB: Int) {
@@ -94,8 +99,15 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
             fatalError("prds: mmap of the surface pool failed")
         }
         pool = p
-        surface = FrameSurface(base: p, length: poolSize)
+        surface = FrameSurface(width: maxWidth, height: maxHeight)
         super.init()
+        surface?.width = 0          // nothing to show until the guest commits
+        surface?.height = 0
+        // Metal maps the pool too: the guest's front and back buffers become GPU
+        // accessible, which is what a blit kernel (bb -> fb -> display) will use.
+        poolBuffer = MTLCreateSystemDefaultDevice()?.makeBuffer(bytesNoCopy: p, length: poolSize,
+                                                                options: .storageModeShared, deallocator: nil)
+        log("prds: pool mapped for Metal: \(poolBuffer != nil)")
         log("prds: pool \(poolSize >> 20) MiB at \(pool) (16 KiB aligned: \(Int(bitPattern: pool) % PRDS.shmAlign == 0))")
     }
 
@@ -263,45 +275,67 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         return PRDS.respOK
     }
 
-    /// The presenter samples the pool directly, so a commit only has to say "something
-    /// changed" (the rects are validated and counted). Completion — returnToQueue by the
-    /// caller — still means the host has taken note of them.
+    /// The ready signal: app_server has finished these rects in the front buffer (the pool),
+    /// and will not touch them again until we answer. We copy them into the display buffer
+    /// under the presentation lock, so the presenter only ever shows completed commits and
+    /// never reads while we write. Completion — returnToQueue by the caller — means the
+    /// copy is done and the guest may write the front buffer again.
     private func commit(_ req: Data) -> UInt32 {
         guard let mode, let surface else { return PRDS.errState }
         guard req.count >= 24 else { return PRDS.errInvalid }
         let count = Int(leU32(req, 20))
         guard count <= PRDS.maxCommitRects, req.count >= 24 + count * 16 else { return PRDS.errInvalid }
+        var rects: [(x0: Int, y0: Int, x1: Int, y1: Int)] = []
         if count == 0 {
-            commitRects += 1
-            commitBytes += mode.width * mode.height * 4
+            rects.append((0, 0, mode.width, mode.height))
         } else {
             for i in 0..<count {
                 let o = 24 + i * 16
                 let x0 = max(0, Int(leU32(req, o))), y0 = max(0, Int(leU32(req, o + 4)))
                 let x1 = min(mode.width, x0 + Int(leU32(req, o + 8)))
                 let y1 = min(mode.height, y0 + Int(leU32(req, o + 12)))
-                guard x1 > x0, y1 > y0 else { continue }
-                commitRects += 1
-                commitBytes += (x1 - x0) * (y1 - y0) * 4
+                if x1 > x0 && y1 > y0 { rects.append((x0, y0, x1, y1)) }
             }
         }
-        if !presented {
-            presented = true
-            surface.stride = mode.stride
-            surface.offset = mode.offset
-            surface.width = mode.width
-            surface.height = mode.height
+        if commitStats {
+            for r in rects { rectHistogram["\(r.x0),\(r.y0) \(r.x1 - r.x0)x\(r.y1 - r.y0)", default: 0] += 1 }
         }
+        let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        presentLock.withLock {
+            let src = pool + mode.offset
+            for r in rects {
+                let bytes = (r.x1 - r.x0) * 4
+                for y in r.y0..<r.y1 {
+                    memcpy(surface.base + y * surface.stride + r.x0 * 4, src + y * mode.stride + r.x0 * 4, bytes)
+                }
+                commitRects += 1
+                commitBytes += bytes * (r.y1 - r.y0)
+            }
+            if !presented {
+                presented = true
+                surface.width = mode.width
+                surface.height = mode.height
+            }
+        }
+        let elapsed = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start
+        copyNanos += elapsed
+        copyMaxNanos = max(copyMaxNanos, elapsed)
         commits += 1
         seq.withLock { $0 += 1 }
         return PRDS.respOK
     }
 
-    /// Nothing to show until the guest commits: the presenter paints black.
+    /// Nothing to show until the guest commits: the presenter paints black, and the display
+    /// buffer is cleared so uncommitted parts of a new mode do not show stale pixels.
     private func clearPresentation() {
-        presented = false
-        surface?.width = 0
-        surface?.height = 0
+        presentLock.withLock {
+            presented = false
+            if let surface {
+                surface.width = 0
+                surface.height = 0
+                memset(surface.base, 0, surface.length)
+            }
+        }
         seq.withLock { $0 += 1 }
     }
 
@@ -349,8 +383,15 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         let now = Date()
         guard now.timeIntervalSince(lastStats) >= 10 else { return }
         lastStats = now
-        log("prds: \(commits) commits, \(commitRects) rects, \(commitBytes >> 10) KiB touched, "
+        let avg = commits > 0 ? copyNanos / UInt64(commits) / 1000 : 0
+        log("prds: \(commits) commits, \(commitRects) rects, \(commitBytes >> 10) KiB copied "
+            + "(avg \(avg) µs, max \(copyMaxNanos / 1000) µs per commit), "
             + "\(vsyncSeq) vsyncs, \(droppedEvents) events dropped, \(eventElements.count) event buffers posted")
+        if commitStats {
+            let top = rectHistogram.sorted { $0.value > $1.value }.prefix(6)
+            log("prds: top rects: " + top.map { "\($0.key) ×\($0.value)" }.joined(separator: ", "))
+            rectHistogram.removeAll()
+        }
         if let path = option("--screenshot") { screenshot(to: path) }
     }
 
@@ -358,6 +399,8 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
     /// so a headless run can be checked without anyone looking at the window.
     private func screenshot(to path: String) {
         guard let surface, surface.width > 0, surface.height > 0, mode != nil else { return }
+        presentLock.lock()
+        defer { presentLock.unlock() }
         let space = CGColorSpaceCreateDeviceRGB()
         let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
             | CGBitmapInfo.byteOrder32Little.rawValue)
