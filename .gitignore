@@ -9,3 +9,4 @@ src
 # Sprint 0 tool builds and test runs
 build/
 work/
+__pycache__/

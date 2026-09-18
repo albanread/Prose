@@ -156,7 +156,7 @@ final class Presenter: NSObject, NSApplicationDelegate {
 
     let seq = OSAllocatedUnfairLock(initialState: 0)
     var lastPresentedSeq = -1
-    var ticks = 0, presents = 0, noDrawable = 0
+    var ticks = 0, changedTicks = 0, presents = 0, noDrawable = 0
     var frameDurations: [Double] = []
     let gpuTimes = OSAllocatedUnfairLock(initialState: [Double]())
     var selfTestMismatches = -1
@@ -296,6 +296,7 @@ final class Presenter: NSObject, NSApplicationDelegate {
         }
         let current = seq.withLock { $0 }
         if !presentAlways && current == lastPresentedSeq { return }
+        changedTicks += 1
         guard let drawable = layer.nextDrawable() else {
             noDrawable += 1
             return
@@ -322,18 +323,26 @@ final class Presenter: NSObject, NSApplicationDelegate {
         let presentHz = Double(presents) / elapsed
         let gpu = gpuTimes.withLock { $0 }
         let gpuMs = gpu.isEmpty ? 0 : gpu.reduce(0, +) / Double(gpu.count) * 1000
-        let expected = presentAlways ? tickHz : min(producerFPS, displayHz)
+        let producerFrames = seq.withLock { $0 }
+        // The presenter's job: present on every display tick that has new content, never
+        // starve for drawables. Frames a free-running producer overwrites between ticks
+        // ("superseded") are informational: pacing the producer is the guest's job (VSYNC).
         var failures: [String] = []
         if let error { failures.append(error) }
         if selfTestMismatches != 0 { failures.append("self-test mismatches: \(selfTestMismatches)") }
         if error == nil && tickHz < 0.9 * displayHz { failures.append("display link ran at \(tickHz) Hz") }
-        if error == nil && presentHz < 0.9 * expected { failures.append("presented \(presentHz) Hz, expected ~\(expected)") }
+        if noDrawable > 0 { failures.append("no drawable on \(noDrawable) ticks") }
+        if presentAlways && Double(presents) < 0.95 * Double(ticks) {
+            failures.append("presented \(presents) of \(ticks) ticks")
+        }
         let result: [String: Any] = [
             "size": "\(surface.width)x\(surface.height)", "stride": surface.stride, "offset": surface.offset,
             "mapped_bytes": surface.length, "base_page_aligned": Int(bitPattern: surface.base) % Int(getpagesize()) == 0,
             "selftest_mismatches": selfTestMismatches, "display_hz": round(displayHz * 10) / 10,
             "tick_hz": round(tickHz * 10) / 10, "present_hz": round(presentHz * 10) / 10,
             "no_drawable": noDrawable, "gpu_ms_avg": round(gpuMs * 1000) / 1000,
+            "changed_ticks": changedTicks, "producer_frames": producerFrames,
+            "superseded_frames": presentAlways ? 0 : max(0, producerFrames - presents),
             "pass": failures.isEmpty, "failures": failures,
         ]
         let json = try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])

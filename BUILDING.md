@@ -185,9 +185,15 @@ emulation. Two device findings from bring-up (QEMU 11.1.1, macOS, HVF):
   output is not active". `ramfb` provides an 800×600 BGRx GOP that Haiku's
   framebuffer driver + accelerant then drive natively. (virtio-gpu remains
   interesting later, driven by Haiku's own virtio-gpu driver — see roadmap.)
-* **virtio devices must use the mmio transport** (`virtio-blk-device` etc.,
-  not `virtio-blk-pci`). Over PCI under HVF, virtio-blk produced intermittent
-  `I/O error`s that stalled first-boot midway. With mmio the boot is clean.
+* **Disk must be virtio-blk over mmio, or virtio-scsi over either transport.**
+  The intermittent `I/O error`s under HVF are specific to **virtio-blk over
+  PCI** (T2: `pci-blk` 11 errors; `pci-scsi` and all mmio rows clean). Other
+  virtio devices work fine over PCI — the fault is not the PCI transport
+  itself.
+* **Haiku's own `virtio_gpu` driver binds QEMU's `virtio-gpu-device` (mmio)**
+  (T2 `mmio-gpu` row: driver loaded, console showed output). It coexists with
+  `ramfb`; the boot menu draws on ramfb first, then the virtio-gpu console
+  comes up.
 * Obviously, `-display none` hides the window even when everything works —
   it is only for scripted/serial-only runs.
 
