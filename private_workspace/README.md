@@ -27,6 +27,7 @@ PW_INJECT_SCRIPT=private_workspace/soundprobe.sh private_workspace/run-qemu.sh -
 PW_SHARE=~/Projects private_workspace/run-vz.sh work   # HostFS: that Mac folder as the disk /HostFS (default ~/Documents/HostFS; PW_SHARE= for none)
 private_workspace/run-vz.sh work --share ~/a --share-ro ~/b   # several folders: /HostFS/a, /HostFS/b
 private_workspace/hostfs-test.sh         # HostFS end to end: scratch share + hostfsprobe.sh, both views compared
+private_workspace/trap-test.sh [qemu|vz] # user-mode exceptions -> signals (patch 0029): trap_check.c run at boot, plus what debug_server logged
 private_workspace/run-qemu.sh            # QEMU + HVF, modern virtio-pci, ramfb, -snapshot
 private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke/haiku.img
 ```

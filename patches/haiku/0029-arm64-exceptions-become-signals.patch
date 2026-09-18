@@ -1,0 +1,247 @@
+From f0c1a3eddd7d4fe8212b5f4909e60f11910bbcd7 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 22:38:05 +0100
+Subject: [PATCH] arm64: every exception from user mode becomes a real signal
+
+do_sync_handler() had no case for an unknown exception (EC 0x00: UDF, an
+unallocated encoding, SVE on a CPU without it) and no default. The code
+after the switch then used uninitialised variables: debug_server named a
+garbage exception ("Alignment exception") and the thread got a garbage
+signal (SIGBUS BUS_ADRALN at address 0). Programs that probe CPU features
+by catching SIGILL, like OpenSSL on systems without a HWCAP interface,
+ended up in the debugger instead.
+
+- Undefined instructions (EC 0x00), SVE and SME access traps, and illegal
+  execution state: SIGILL, ILL_ILLOPC, B_INVALID_OPCODE_EXCEPTION.
+  PSTATE.IL is cleared first, or the signal handler would fault as well.
+- A system register or instruction EL0 may not use (EC 0x18: ID
+  registers, DAIF, timer controls): SIGILL, ILL_PRVOPC,
+  B_GENERAL_PROTECTION_FAULT, as for privileged instructions on x86.
+- SP alignment faults (SCTLR_EL1.SA0 is set): SIGBUS, BUS_ADRALN at SP.
+- Trapped floating-point exceptions: SIGFPE with the code the ISS names.
+- Data and instruction aborts the VM does not resolve: alignment faults
+  (an exclusive across a 16-byte granule) SIGBUS BUS_ADRALN, anything
+  else (external aborts) SIGBUS BUS_ADRERR and a syslog line, at FAR.
+- BRK (__builtin_trap()): a SIGTRAP handler gets SIGTRAP, TRAP_BRKPT.
+  Otherwise the debugger sees a breakpoint first, as for int3 on x86, and
+  the thread then gets SIGTRAP, since resuming would only trap again.
+- Anything else from user mode: SIGILL, ILL_ILLTRP and a syslog line with
+  the ESR. Kernel mode still panics with the ESR; after the "unhandled
+  pagefault" panic the handler returns instead of falling through.
+
+Verified with trap_check (HaikuArmQemu private_workspace/trap-test.sh)
+under QEMU+HVF and Virtualization.framework on an M4: UDF, ptrue,
+smstart, mrs ID_AA64ISAR0_EL1, msr daifset, brk, misaligned PC, SP and
+ldxr, and illegal state each deliver the expected signal, code and
+address to a handler; without handlers debug_server reports "Invalid
+opcode exception" and "Breakpoint hit" and kills the team. Before, all of
+them got SIGBUS BUS_ADRALN at 0 and illegal state looped.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ .../private/kernel/arch/arm64/arm_registers.h |   9 ++
+ src/system/kernel/arch/arm64/arch_int.cpp     | 126 +++++++++++++++++-
+ 2 files changed, 133 insertions(+), 2 deletions(-)
+
+diff --git a/headers/private/kernel/arch/arm64/arm_registers.h b/headers/private/kernel/arch/arm64/arm_registers.h
+index 39c99afdc8..61fadcbcfd 100644
+--- a/headers/private/kernel/arch/arm64/arm_registers.h
++++ b/headers/private/kernel/arch/arm64/arm_registers.h
+@@ -123,6 +123,13 @@
+ #define	 ISS_DATA_DFSC_ECC_L3	(0x1f << 0)
+ #define	 ISS_DATA_DFSC_ALIGN	(0x21 << 0)
+ #define	 ISS_DATA_DFSC_TLB_CONFLICT (0x30 << 0)
++#define	 ISS_FP_TFV		(0x01 << 23)	/* trapped fault flags valid */
++#define	 ISS_FP_IOF		(0x01 << 0)
++#define	 ISS_FP_DZF		(0x01 << 1)
++#define	 ISS_FP_OFF		(0x01 << 2)
++#define	 ISS_FP_UFF		(0x01 << 3)
++#define	 ISS_FP_IXF		(0x01 << 4)
++#define	 ISS_FP_IDF		(0x01 << 7)
+ #define	ESR_ELx_IL		(0x01 << 25)
+ #define	ESR_ELx_EC_SHIFT	26
+ #define	ESR_ELx_EC_MASK		(0x3f << 26)
+@@ -133,6 +140,8 @@
+ #define	 EXCP_SVC32		0x11	/* SVC trap for AArch32 */
+ #define	 EXCP_SVC64		0x15	/* SVC trap for AArch64 */
+ #define	 EXCP_MSR		0x18	/* MSR/MRS trap */
++#define	 EXCP_SVE		0x19	/* SVE trap */
++#define	 EXCP_SME		0x1d	/* SME trap */
+ #define	 EXCP_INSN_ABORT_L	0x20	/* Instruction abort, from lower EL */
+ #define	 EXCP_INSN_ABORT	0x21	/* Instruction abort, from same EL */
+ #define	 EXCP_PC_ALIGN		0x22	/* PC alignment fault */
+diff --git a/src/system/kernel/arch/arm64/arch_int.cpp b/src/system/kernel/arch/arm64/arch_int.cpp
+index 844428c1ff..dcf7c4aad4 100644
+--- a/src/system/kernel/arch/arm64/arch_int.cpp
++++ b/src/system/kernel/arch/arm64/arch_int.cpp
+@@ -261,6 +261,26 @@ private:
+ };
+ 
+ 
++static int32
++fp_exception_code(uint64 esr)
++{
++	// The ISS names the exception only when TFV is set.
++	if ((esr & ISS_FP_TFV) != 0) {
++		if ((esr & ISS_FP_IOF) != 0)
++			return FPE_FLTINV;
++		if ((esr & ISS_FP_DZF) != 0)
++			return FPE_FLTDIV;
++		if ((esr & ISS_FP_OFF) != 0)
++			return FPE_FLTOVF;
++		if ((esr & (ISS_FP_UFF | ISS_FP_IDF)) != 0)
++			return FPE_FLTUND;
++		if ((esr & ISS_FP_IXF) != 0)
++			return FPE_FLTRES;
++	}
++	return FPE_FLTINV;
++}
++
++
+ extern "C" void
+ do_sync_handler(iframe * frame)
+ {
+@@ -277,12 +297,51 @@ do_sync_handler(iframe * frame)
+ 	bool isUser = (frame->spsr & PSR_M_MASK) == PSR_M_EL0t;
+ 	bool isExec = false;
+ 	switch (ESR_ELx_EXCEPTION(frame->esr)) {
++		case EXCP_ILL_STATE:
++			// PSTATE.IL, set by an illegal exception return. Clear it, or
++			// the signal handler could not run either.
++			frame->spsr &= ~PSR_IL;
++			// fall through
++		case EXCP_UNKNOWN:
++			// An undefined instruction: UDF, an unallocated encoding, an
++			// extension this CPU lacks (SVE on Apple's cores), or one EL0 may
++			// never execute (HVC, SMC, ERET).
++		case EXCP_SVE:
++		case EXCP_SME:
++			// SVE and SME stay disabled (their register state is not
++			// switched), so to user code they are not implemented.
++			exceptionType = B_INVALID_OPCODE_EXCEPTION;
++			signalNumber = SIGILL;
++			signalCode = ILL_ILLOPC;
++			signalAddress = frame->elr;
++			break;
++		case EXCP_MSR:
++			// A system register or instruction EL0 has no access to, such as
++			// an ID register or the timer's control registers
++			exceptionType = B_GENERAL_PROTECTION_FAULT;
++			signalNumber = SIGILL;
++			signalCode = ILL_PRVOPC;
++			signalAddress = frame->elr;
++			break;
+ 		case EXCP_PC_ALIGN:
+ 			exceptionType = B_ALIGNMENT_EXCEPTION;
+ 			signalNumber = SIGBUS;
+ 			signalCode = BUS_ADRALN;
+ 			signalAddress = frame->elr;
+ 			break;
++		case EXCP_SP_ALIGN:
++			// a load or store through a misaligned SP (SCTLR_EL1.SA0)
++			exceptionType = B_ALIGNMENT_EXCEPTION;
++			signalNumber = SIGBUS;
++			signalCode = BUS_ADRALN;
++			signalAddress = frame->sp;
++			break;
++		case EXCP_TRAP_FP:
++			exceptionType = B_FLOATING_POINT_EXCEPTION;
++			signalNumber = SIGFPE;
++			signalCode = fp_exception_code(frame->esr);
++			signalAddress = frame->elr;
++			break;
+ 		case EXCP_INSN_ABORT_L:
+ 		case EXCP_INSN_ABORT:
+ 			isExec = true;
+@@ -326,8 +385,27 @@ do_sync_handler(iframe * frame)
+ 				break;
+ 			}
+ 
+-			if (!known)
++			if (!known) {
++				// Not a fault the VM resolves: an alignment fault (exclusive
++				// or atomic access, device memory) or an external abort.
++				// Kernel mode panics below.
++				if ((frame->esr & ISS_DATA_DFSC_MASK) == ISS_DATA_DFSC_ALIGN) {
++					exceptionType = B_ALIGNMENT_EXCEPTION;
++					signalCode = BUS_ADRALN;
++				} else {
++					if (isUser) {
++						dprintf("thread %" B_PRId32 ": abort from user mode, "
++							"FAR=%lx ELR=%lx ESR=%lx\n",
++							thread_get_current_thread_id(), frame->far,
++							frame->elr, frame->esr);
++					}
++					exceptionType = B_SEGMENT_VIOLATION;
++					signalCode = BUS_ADRERR;
++				}
++				signalNumber = SIGBUS;
++				signalAddress = frame->far;
+ 				break;
++			}
+ 
+ 			if (debug_debugger_running()) {
+ 				Thread* thread = thread_get_current_thread();
+@@ -364,7 +442,7 @@ do_sync_handler(iframe * frame)
+ 
+ 			panic("unhandled pagefault! FAR=%lx ELR=%lx ESR=%lx",
+ 				frame->far, frame->elr, frame->esr);
+-			break;
++			return;
+ 		}
+ 
+ 		case EXCP_SVC64:
+@@ -396,6 +474,50 @@ do_sync_handler(iframe * frame)
+ 			syscall_dispatcher(syscall, (void*)args, &frame->x[0]);
+ 			return;
+ 		}
++
++		case EXCP_BRK:
++			if (isUser) {
++				// BRK: __builtin_trap(), or a breakpoint compiled into the
++				// program. Unless a SIGTRAP handler is installed, the
++				// debugger sees a breakpoint first, as for int3 on x86.
++				// Resuming at the BRK would only trap again, so the thread
++				// then gets SIGTRAP, as on other arm64 systems.
++				struct sigaction action;
++				Thread* thread = thread_get_current_thread();
++				uint64 address = frame->elr;
++
++				enable_interrupts();
++
++				if (sigaction(SIGTRAP, NULL, &action) != 0
++					|| action.sa_handler == SIG_DFL
++					|| action.sa_handler == SIG_IGN) {
++					user_debug_breakpoint_hit(true);
++				}
++
++				if (frame->elr == address) {
++					Signal signal(SIGTRAP, TRAP_BRKPT, B_ERROR,
++						thread->team->id);
++					signal.SetAddress((void*)address);
++					send_signal_to_thread(thread, signal, 0);
++				}
++				return;
++			}
++			// fall through: a BRK in the kernel panics below
++
++		default:
++			// Any other exception from user mode is unexpected: log it and
++			// send SIGILL. Kernel mode panics below.
++			if (isUser) {
++				dprintf("thread %" B_PRId32 ": unexpected exception from user "
++					"mode, EC=%lx ELR=%lx ESR=%lx\n",
++					thread_get_current_thread_id(),
++					ESR_ELx_EXCEPTION(frame->esr), frame->elr, frame->esr);
++			}
++			exceptionType = B_INVALID_OPCODE_EXCEPTION;
++			signalNumber = SIGILL;
++			signalCode = ILL_ILLTRP;
++			signalAddress = frame->elr;
++			break;
+ 	}
+ 
+ 	if (isUser) {
+-- 
+2.54.0 (Apple Git-157)
+

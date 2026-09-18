@@ -28,6 +28,9 @@ if [ -n "${PW_PACKAGES:-}" ]; then
 fi
 D="$PW_WORK/qemu"
 mkdir -p "$D"
+# a socket path must fit sun_path (104 bytes on macOS); worktree paths may not
+MON="$D/monitor.sock"
+[ ${#MON} -lt 104 ] || MON="${TMPDIR:-/tmp}/pw-qemu-$$.sock"
 if [ -z "$SNAPSHOT" ]; then
 	cp "$PW_IMAGE" "$IMAGE"
 	if [ -n "${PW_PACKAGES:-}" ]; then
@@ -56,7 +59,7 @@ args=(-M virt -cpu host -accel hvf -smp 8 -m 4G -bios "$FW" $SNAPSHOT -no-reboot
 	-drive "if=none,file=$IMAGE,format=raw,id=hd0" -device "virtio-blk-$SFX,drive=hd0"
 	-netdev user,id=net0 -device "virtio-net-$SFX,netdev=net0"
 	-device "virtio-keyboard-$SFX" -device "virtio-tablet-$SFX" -device ramfb
-	-serial "file:$D/serial.log" -monitor "unix:$D/monitor.sock,server,nowait")
+	-serial "file:$D/serial.log" -monitor "unix:$MON,server,nowait")
 if [ "$HEADLESS" = 1 ]; then args+=(-display none); else args+=(-display cocoa); fi
 case "$SOUND" in
 	wav) args+=(-audiodev "wav,id=snd0,path=$D/out.wav,out.frequency=48000" -device "virtio-sound-$SFX,audiodev=snd0") ;;
@@ -65,7 +68,7 @@ esac
 echo ">>> serial: $D/serial.log"
 if [ -n "$SECONDS_LIMIT" ]; then
 	# system_powerdown first so the guest syncs its disk (a hard kill loses written files)
-	( sleep $((SECONDS_LIMIT - 30)); echo system_powerdown | nc -U "$D/monitor.sock" > /dev/null 2>&1 ) &
+	( sleep $((SECONDS_LIMIT - 30)); echo system_powerdown | nc -U "$MON" > /dev/null 2>&1 ) &
 	gtimeout "$SECONDS_LIMIT" qemu-system-aarch64 "${args[@]}" ${EXTRA[@]+"${EXTRA[@]}"} || true
 	python3 "$PW_ROOT/sprint0/boot_markers.py" "$D/serial.log" || true
 else
