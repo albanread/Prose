@@ -19,6 +19,7 @@
 //   --pool-mib N            s2 surface pool size (default 128)
 //   --screenshot PATH       s2: dump the presentation surface as PNG every 10 s (with the stats line)
 //   --resize-after N WxH    resize our window after N seconds (tests MODE_HINT / live resize)
+//   --resize-drag N WxH     animate the window to WxH from N seconds on, like a hand drag (40 steps)
 //   --commit-stats          s2: list the most frequently committed rects with each stats line
 //   --input own|vz          own: our virtio-input keyboard + tablet, window entirely ours (default);
 //                           vz: VZ's USB keyboard/pointer + virtio-gpu + VZVirtualMachineView
@@ -886,6 +887,25 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
             DispatchQueue.main.asyncAfter(deadline: .now() + 39) { [self] in
                 shot(3)
                 log(router.stats)
+            }
+        }
+        // --resize-drag N WxH: from N seconds on, animate the window to WxH in 40 steps of
+        // 30 ms, like a hand dragging the corner: many hints, ideally one mode switch.
+        if !headless, let after = option("--resize-drag").flatMap(Double.init),
+           let i = args.lastIndex(of: "--resize-drag"), i + 2 < args.count {
+            let parts = args[i + 2].split(separator: "x").compactMap { Double($0) }
+            if parts.count == 2 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + after) { [self] in
+                    let start = presenter.view.bounds.size
+                    log("dragging the window from \(Int(start.width))x\(Int(start.height)) to \(Int(parts[0]))x\(Int(parts[1]))")
+                    for k in 1...40 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + Double(k) * 0.03) { [self] in
+                            let t = Double(k) / 40
+                            presenter.window.setContentSize(NSSize(width: start.width + (parts[0] - start.width) * t,
+                                                                   height: start.height + (parts[1] - start.height) * t))
+                        }
+                    }
+                }
             }
         }
         // --resize-after N WxH: resize our window after N seconds (live-resize test)

@@ -1,0 +1,153 @@
+From 8408283d17ae5b996e89af50cbf601ecb007a11f Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 17:08:07 +0100
+Subject: [PATCH] Prose Display (S2): switch modes once the host window stops
+ moving
+
+prose_display_agent: a drag of the host window produces a hint per
+mouse move; the agent used to switch modes every ~170 ms, always a step
+behind the corner. It now waits until no hint has arrived for 250 ms
+(capped at 1.5 s so a long drag still updates midway) and switches once
+to the final size.
+
+prose_display driver: PRDS_WAIT_MODE_HINT takes the size the caller
+last applied and returns at once when the host's preferred size differs,
+so a hint that arrives while the agent is busy switching is never lost
+(the previous version relied on the caller waiting at the moment the
+event came in).
+
+Verified on VZ with hvgpu --resize-drag (40 hints over 1.2 s): one
+switch, 260 ms after the last hint; a hand drag in a 25-minute session
+had produced ~14 trailing switches.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../graphics/prose_display/prose_display.cpp  | 15 +++--
+ .../prose_display/prose_display_agent.cpp     | 65 +++++++++++++------
+ 2 files changed, 56 insertions(+), 24 deletions(-)
+
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index cd933a46e7..2ee1cdb250 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -783,10 +783,17 @@ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 			struct prds_mode_hint hint;
+ 			if (length < sizeof(hint) || user_memcpy(&hint, buffer, sizeof(hint)) != B_OK)
+ 				return B_BAD_ADDRESS;
+-			status_t status = acquire_sem_etc(info->hint_sem, 1,
+-				B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT, hint.timeout);
+-			if (status != B_OK && status != B_TIMED_OUT && status != B_WOULD_BLOCK)
+-				return status;
++			// The caller passes the size it last applied: if the host already wants
++			// something else there is nothing to wait for (a hint that arrived while
++			// the caller was busy must not be lost).
++			status_t status = B_OK;
++			if (hint.width == 0 || (hint.width == info->shared->pref_width
++					&& hint.height == info->shared->pref_height)) {
++				status = acquire_sem_etc(info->hint_sem, 1,
++					B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT, hint.timeout);
++				if (status != B_OK && status != B_TIMED_OUT && status != B_WOULD_BLOCK)
++					return status;
++			}
+ 			hint.width = info->shared->pref_width;
+ 			hint.height = info->shared->pref_height;
+ 			if (user_memcpy(buffer, &hint, sizeof(hint)) != B_OK)
+diff --git a/src/servers/prose_display/prose_display_agent.cpp b/src/servers/prose_display/prose_display_agent.cpp
+index b1d91949e8..9456c2dc18 100644
+--- a/src/servers/prose_display/prose_display_agent.cpp
++++ b/src/servers/prose_display/prose_display_agent.cpp
+@@ -57,19 +57,46 @@ switch_to(uint32 width, uint32 height)
+ }
+ 
+ 
++// A drag of the host window produces a hint per mouse move. Wait until they
++// stop for kSettleTime before switching (with a cap, so a long drag still
++// updates on the way), and let the driver tell us at once when the host wants
++// a size other than the one we applied last, so no hint is ever lost.
++static const bigtime_t kSettleTime = 250000;
++static const bigtime_t kMaxSettleWait = 1500000;
++static const bigtime_t kIdlePoll = 2000000;
++
++
++enum { kHintError = -1, kHintTimeout = 0, kHintArrived = 1 };
++
++
++/*!	Returns kHintArrived when a hint arrived or the host already wants a size
++	other than applied*, kHintTimeout when nothing happened for \a timeout.
++	\a hint carries the host's current preferred size either way. */
++static int
++wait_for_hint(int device, uint32 appliedWidth, uint32 appliedHeight, bigtime_t timeout,
++	prds_mode_hint& hint)
++{
++	hint.width = appliedWidth;
++	hint.height = appliedHeight;
++	hint.timeout = timeout;
++	if (ioctl(device, PRDS_WAIT_MODE_HINT, &hint, sizeof(hint)) == 0)
++		return kHintArrived;
++	if (errno == B_TIMED_OUT || errno == B_WOULD_BLOCK || errno == B_INTERRUPTED)
++		return kHintTimeout;
++	return kHintError;
++}
++
++
+ static int32
+ hint_thread(void* data)
+ {
+ 	int device = *(int*)data;
+-	uint32 wanted = 0, wantedHeight = 0;
++	uint32 applied = 0, appliedHeight = 0;
+ 	int failures = 0;
+ 
+ 	while (true) {
+ 		prds_mode_hint hint;
+-		hint.timeout = 2000000;
+-		status_t status = ioctl(device, PRDS_WAIT_MODE_HINT, &hint, sizeof(hint));
+-		if (status != B_OK && status != B_TIMED_OUT && errno != B_TIMED_OUT
+-			&& errno != B_INTERRUPTED) {
++		if (wait_for_hint(device, applied, appliedHeight, kIdlePoll, hint) == kHintError) {
+ 			if (++failures > 10) {
+ 				syslog(LOG_ERR, "prose_display_agent: giving up: %s\n", strerror(errno));
+ 				return 1;
+@@ -78,26 +105,24 @@ hint_thread(void* data)
+ 			continue;
+ 		}
+ 		failures = 0;
+-		if (hint.width == 0 || hint.height == 0)
+-			continue;
+-		if (hint.width == wanted && hint.height == wantedHeight)
++		if (hint.width == 0 || hint.height == 0
++			|| (hint.width == applied && hint.height == appliedHeight))
+ 			continue;
+ 
+-		// coalesce the burst a live resize produces
+-		snooze(150000);
+-		prds_mode_hint latest;
+-		latest.timeout = 0;
+-		if (ioctl(device, PRDS_WAIT_MODE_HINT, &latest, sizeof(latest)) == B_OK
+-			|| errno == B_TIMED_OUT) {
+-			if (latest.width != 0 && latest.height != 0) {
+-				hint.width = latest.width;
+-				hint.height = latest.height;
+-			}
++		// the corner is moving: follow it until it has been still for a while
++		bigtime_t start = system_time();
++		while (system_time() - start < kMaxSettleWait) {
++			prds_mode_hint latest;
++			int result = wait_for_hint(device, hint.width, hint.height, kSettleTime, latest);
++			if (result != kHintArrived)
++				break;				// quiet for kSettleTime (or an error): settled
++			if (latest.width != 0 && latest.height != 0)
++				hint = latest;		// still moving (a repeated size just restarts the wait)
+ 		}
+ 
+ 		if (switch_to(hint.width, hint.height) == B_OK) {
+-			wanted = hint.width;
+-			wantedHeight = hint.height;
++			applied = hint.width;
++			appliedHeight = hint.height;
+ 		}
+ 	}
+ 	return 0;
+-- 
+2.54.0 (Apple Git-157)
+
