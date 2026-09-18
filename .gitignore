@@ -1,0 +1,7 @@
+# Case-sensitive build volume image + mountpoint symlink
+HaikuBuild.sparsebundle*
+src
+
+# Local scratch
+*.log
+.DS_Store
