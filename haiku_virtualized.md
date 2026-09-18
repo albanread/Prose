@@ -343,7 +343,7 @@ Scope decision: we fork Haiku (PROSE) and change whatever the experience needs. 
 1. ✅ Turn the patch series into a proper branch in the Haiku tree: branch `vz-fork` in the private worktree, one commit per patch, `patches/haiku/` as the exported form. (The PROSE branding lives on the colleague's tree; merge later.)
 2. ✅ Clean shutdown and reboot: PSCI plus the ACPI power-button event (PL061 GPIO events on VZ, GED on QEMU), with per-IRQ trigger configuration in the GIC driver.
 3. ✅ Wall clock at boot: UEFI `GetTime()` via the loader turned out simpler than a device config field.
-4. Write the **S2 spec** (`docs/s2-display-device.md`): config layout, shared-region geometry, queue protocol, sync rules, event queue (vsync, mode hint, redraw). This is the contract the guest and host sides build against in parallel.
+4. ✅ Draft the **S2 spec**: [docs/s2-display-device.md](docs/s2-display-device.md) (config layout, shared-region geometry, queue protocol, sync rules, event queue). Draft 1 is out for review; §12 lists what must be measured on the host before version 1 is frozen.
 5. Time-boxed: a virtqueue dump in `hvgpu` (Haiku prints ring addresses; the host reads them from guest RAM) to close the VZ-GPU question. Drop it if it takes more than a day.
 
 **Sprint 2: S2, the zero-copy display.**
