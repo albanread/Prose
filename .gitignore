@@ -5,3 +5,7 @@ src
 # Local scratch
 *.log
 .DS_Store
+
+# Sprint 0 tool builds and test runs
+build/
+work/
