@@ -24,6 +24,9 @@ private_workspace/extract.sh net /home/netprobe.txt   # ... and its result (any 
 PW_INJECT_SCRIPT=private_workspace/soundprobe.sh private_workspace/run-vz.sh snd --seconds 70   # plays a 440 Hz tone through the Mac at ~30 s
 PW_INJECT_SCRIPT=private_workspace/midiprobe.sh private_workspace/run-vz.sh midi --seconds 75 --midi-log   # a C-major scale via the Midi Kit, then direct, through the Mac's GM synth
 PW_INJECT_SCRIPT=private_workspace/soundprobe.sh private_workspace/run-qemu.sh --headless --copy --sound wav --seconds 100 && python3 private_workspace/wavcheck.py private_workspace/work/qemu/out.wav
+PW_SHARE=~/Projects private_workspace/run-vz.sh work   # HostFS: that Mac folder as the disk /HostFS (default ~/HostFS; PW_SHARE= for none)
+private_workspace/run-vz.sh work --share ~/a --share-ro ~/b   # several folders: /HostFS/a, /HostFS/b
+private_workspace/hostfs-test.sh         # HostFS end to end: scratch share + hostfsprobe.sh, both views compared
 private_workspace/run-qemu.sh            # QEMU + HVF, modern virtio-pci, ramfb, -snapshot
 private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke/haiku.img
 ```

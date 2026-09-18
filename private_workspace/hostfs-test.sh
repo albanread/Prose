@@ -16,6 +16,8 @@ head -c $((64 << 20)) /dev/urandom > "$SHARE/random.bin"
 shasum -a 256 "$SHARE/random.bin" | cut -d' ' -f1 > "$SHARE/random.bin.sha256"
 for i in $(seq 1 50); do echo "file $i" > "$SHARE/tree/a/f$i.txt"; done
 echo deep > "$SHARE/tree/a/b/deep.txt"
+mkdir "$SHARE/big"
+( cd "$SHARE/big" && for i in $(seq 1 1000); do echo "$i" > "file-$i.txt"; done )
 
 PW_INJECT_SCRIPT="$PW_ROOT/private_workspace/hostfsprobe.sh" \
 	"$PW_ROOT/private_workspace/run-vz.sh" "$NAME" --headless --seconds 120 \
@@ -32,4 +34,8 @@ if [ -f "$SHARE/random-copy.bin" ]; then
 	echo "random-copy.bin $(shasum -a 256 "$SHARE/random-copy.bin" | cut -d' ' -f1)"
 fi
 [ -f "$SHARE/from-haiku-renamed.txt" ] && cat "$SHARE/from-haiku-renamed.txt"
+echo ">>> Haiku attributes as the Mac sees them (xattrs):"
+for f in hello.txt noext StyledEdit-copy; do
+	[ -e "$SHARE/$f" ] && { echo "$f:"; xattr "$SHARE/$f" | sed 's/^/  /'; }
+done
 exit 0

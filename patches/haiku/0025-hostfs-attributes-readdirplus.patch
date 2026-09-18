@@ -1,0 +1,1377 @@
+From cda36df249c201e1f2847ac2cda9337dcf52edfd Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 21:24:55 +0100
+Subject: [PATCH] HostFS: attributes as host xattrs, READDIRPLUS, idle nodes
+
+- Attributes: a Haiku attribute is the host xattr "user.haiku.<name>"
+  holding the type code (little endian) and the data, the convention of
+  Haiku's build tools on the host; '/' and '%' in names are escaped the
+  same way. Probed at mount (FUSE_LISTXATTR on the root); the "noattr"
+  mount parameter turns them off. Files without a stored BEOS:TYPE get one
+  from their extension (mime_ext_table, as on FAT), so Tracker shows the
+  right icons without writing to the host. The volume says B_FS_HAS_MIME,
+  and B_FS_HAS_ATTR when the host keeps xattrs (Apple's server does).
+- Directories are read with FUSE_READDIRPLUS when the host offers it (it
+  does): every entry comes with its node ID, so dirent.d_ino is the vnode ID
+  the entry gets on lookup -- Tracker starts node monitoring from d_ino.
+  The lookups the host counts for those entries go into the node table as
+  soon as the reply arrives.
+- Nodes nothing uses any more stay in the table as idle nodes (at most
+  2048, oldest forgotten first) instead of being forgotten at once, so
+  listing a directory does not cost a FORGET per entry, and a vnode the VFS
+  drops is found again without a new lookup count.
+---
+ .../kernel/file_systems/hostfs/Jamfile        |   7 +-
+ .../kernel/file_systems/hostfs/Volume.cpp     |  94 ++-
+ .../kernel/file_systems/hostfs/attributes.cpp | 722 ++++++++++++++++++
+ .../kernel/file_systems/hostfs/hostfs.h       |  45 ++
+ .../file_systems/hostfs/kernel_interface.cpp  | 232 ++++--
+ 5 files changed, 1018 insertions(+), 82 deletions(-)
+ create mode 100644 src/add-ons/kernel/file_systems/hostfs/attributes.cpp
+
+diff --git a/src/add-ons/kernel/file_systems/hostfs/Jamfile b/src/add-ons/kernel/file_systems/hostfs/Jamfile
+index 35fe3326f9..ae244f5292 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/Jamfile
++++ b/src/add-ons/kernel/file_systems/hostfs/Jamfile
+@@ -1,9 +1,14 @@
+ SubDir HAIKU_TOP src add-ons kernel file_systems hostfs ;
+ 
+ UsePrivateKernelHeaders ;
+-UsePrivateHeaders shared storage virtio ;
++UsePrivateHeaders shared storage file_systems virtio ;
+ 
+ KernelAddon hostfs :
++	attributes.cpp
+ 	kernel_interface.cpp
+ 	Volume.cpp
++	mime_ext_table.c
+ ;
++
++SEARCH on [ FGristFiles mime_ext_table.c ]
++	+= [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems shared ] ;
+diff --git a/src/add-ons/kernel/file_systems/hostfs/Volume.cpp b/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
+index 71af26b1bf..d351c9de53 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
++++ b/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
+@@ -125,6 +125,7 @@ Node::Node(Volume* volume, uint64 nodeid, const fuse_attr& attr)
+ 	pending(0),
+ 	children(0),
+ 	published(false),
++	idle(false),
+ 	attr(attr),
+ 	attrTime(system_time()),
+ 	size(attr.size),
+@@ -157,8 +158,10 @@ Volume::Volume(fs_volume* fsVolume)
+ 	:
+ 	fFSVolume(fsVolume),
+ 	fDevice(-1),
++	fIdleCount(0),
+ 	fRoot(NULL),
+ 	fReadOnly(false),
++	fXattrs(false),
+ 	fMinor(0),
+ 	fInitFlags(0),
+ 	fMaxRead(B_PAGE_SIZE),
+@@ -216,7 +219,8 @@ Volume::Mount(const char* device, uint32 flags, const char* args)
+ 	init.minor = HOSTFS_FUSE_MINOR;
+ 	init.max_readahead = fTransport.max_data;
+ 	init.flags = FUSE_ASYNC_READ | FUSE_ATOMIC_O_TRUNC | FUSE_EXPORT_SUPPORT
+-		| FUSE_BIG_WRITES | FUSE_DONT_MASK | FUSE_PARALLEL_DIROPS | FUSE_MAX_PAGES;
++		| FUSE_BIG_WRITES | FUSE_DONT_MASK | FUSE_DO_READDIRPLUS | FUSE_PARALLEL_DIROPS
++		| FUSE_MAX_PAGES;
+ 	fuse_init_out reply = {};
+ 	status = Request(FUSE_INIT, 0, &init, sizeof(init), NULL, NULL, NULL, 0, &reply,
+ 		sizeof(reply));
+@@ -266,6 +270,10 @@ Volume::Mount(const char* device, uint32 flags, const char* args)
+ 	fRoot->published = true;
+ 	fNodes.Insert(fRoot);
+ 
++	// Haiku attributes as host xattrs, unless the host has none or the
++	// mount parameters say "noattr"
++	fXattrs = (args == NULL || strstr(args, "noattr") == NULL) && hostfs_probe_xattrs(this);
++
+ 	status = publish_vnode(fFSVolume, FUSE_ROOT_ID, fRoot, &gHostFSVnodeOps, S_IFDIR, 0);
+ 	if (status != B_OK) {
+ 		fNodes.Remove(fRoot);
+@@ -288,6 +296,14 @@ Volume::Unmount()
+ 		MutexLocker locker(fLock);
+ 		left = fNodes.CountElements();
+ 	}
++	// give back what the idle nodes hold
++	Node* reclaim = NULL;
++	{
++		MutexLocker locker(fLock);
++		_TrimIdle(0, reclaim);
++		left = fNodes.CountElements();
++	}
++	_Reclaim(reclaim);
+ 	if (left > 1)
+ 		INFORM("unmounting with %" B_PRId32 " nodes still in the table\n", left);
+ 
+@@ -468,6 +484,7 @@ Volume::AcquireEntry(const fuse_entry_out& entry, uint64 parent, const char* nam
+ 			}
+ 			fNodes.Insert(node);
+ 		}
++		_Busy(node);
+ 		node->lookups++;
+ 		node->pending++;
+ 		if (entry.nodeid != FUSE_ROOT_ID && parent != 0 && name != NULL) {
+@@ -487,8 +504,10 @@ Volume::AcquireNode(uint64 nodeid)
+ {
+ 	MutexLocker locker(fLock);
+ 	Node* node = fNodes.Lookup(nodeid);
+-	if (node != NULL)
++	if (node != NULL) {
++		_Busy(node);
+ 		node->pending++;
++	}
+ 	return node;
+ }
+ 
+@@ -500,8 +519,10 @@ Volume::AcquireParent(Node* node)
+ 	MutexLocker locker(fLock);
+ 	uint64 parent = node->nodeid == FUSE_ROOT_ID ? FUSE_ROOT_ID : node->parent;
+ 	Node* parentNode = parent != 0 ? fNodes.Lookup(parent) : NULL;
+-	if (parentNode != NULL)
++	if (parentNode != NULL) {
++		_Busy(parentNode);
+ 		parentNode->pending++;
++	}
+ 	return parentNode;
+ }
+ 
+@@ -523,6 +544,7 @@ void
+ Volume::Publish(Node* node)
+ {
+ 	MutexLocker locker(fLock);
++	_Busy(node);
+ 	node->published = true;
+ }
+ 
+@@ -571,6 +593,16 @@ Volume::IsPublished(Node* node)
+ }
+ 
+ 
++bool
++Volume::GetName(Node* node, char* buffer, size_t bufferSize)
++{
++	MutexLocker locker(fLock);
++	if (node->name == NULL)
++		return false;
++	return strlcpy(buffer, node->name, bufferSize) < bufferSize;
++}
++
++
+ /*!	Must be called with the lock held. Returns the node's former parent if it
+ 	changed, so that the caller can see whether it is still needed.
+ */
+@@ -586,6 +618,8 @@ Volume::_SetParent(Node* node, uint64 parent, const char* name)
+ 		}
+ 		Node* newParent = fNodes.Lookup(parent);
+ 		if (newParent != NULL) {
++			// a directory with a child in the table is never idle
++			_Busy(newParent);
+ 			newParent->children++;
+ 			node->parent = parent;
+ 		} else
+@@ -602,22 +636,60 @@ Volume::_SetParent(Node* node, uint64 parent, const char* name)
+ }
+ 
+ 
+-/*!	Must be called with the lock held. Takes \a node out of the table if
+-	nothing needs it any more -- and then its parent, if that was all that kept
+-	the parent -- and prepends them to \a reclaimList for _Reclaim().
++/*!	Must be called with the lock held. The node is in use again: out of the
++	idle list.
++*/
++void
++Volume::_Busy(Node* node)
++{
++	if (node->idle) {
++		fIdleNodes.Remove(node);
++		node->idle = false;
++		fIdleCount--;
++	}
++}
++
++
++/*!	Must be called with the lock held. If nothing needs \a node any more, it
++	becomes idle: it stays in the table, with its lookups, until the idle list
++	grows past HOSTFS_MAX_IDLE_NODES. Nodes that fall off the end are prepended
++	to \a reclaimList for _Reclaim().
+ */
+ void
+ Volume::_Collect(Node* node, Node*& reclaimList)
+ {
+-	while (node != NULL && node->nodeid != FUSE_ROOT_ID && !node->published
+-		&& node->pending == 0 && node->children == 0) {
++	if (node == NULL || node->nodeid == FUSE_ROOT_ID || node->published
++		|| node->pending > 0 || node->children > 0 || node->idle) {
++		return;
++	}
++	fIdleNodes.Add(node);
++	node->idle = true;
++	fIdleCount++;
++	_TrimIdle(HOSTFS_MAX_IDLE_NODES, reclaimList);
++}
++
++
++/*!	Must be called with the lock held. Takes the oldest idle nodes out of the
++	table until at most \a keep are left. A directory whose last child goes
++	becomes idle itself.
++*/
++void
++Volume::_TrimIdle(int32 keep, Node*& reclaimList)
++{
++	while (fIdleCount > keep) {
++		Node* node = fIdleNodes.RemoveHead();
++		node->idle = false;
++		fIdleCount--;
+ 		fNodes.Remove(node);
+ 		Node* parent = node->parent != 0 ? fNodes.Lookup(node->parent) : NULL;
+-		if (parent != NULL)
+-			parent->children--;
+ 		node->hashLink = reclaimList;
+ 		reclaimList = node;
+-		node = parent;
++		if (parent != NULL && --parent->children == 0 && parent->nodeid != FUSE_ROOT_ID
++			&& !parent->published && parent->pending == 0 && !parent->idle) {
++			fIdleNodes.Add(parent);
++			parent->idle = true;
++			fIdleCount++;
++		}
+ 	}
+ }
+ 
+diff --git a/src/add-ons/kernel/file_systems/hostfs/attributes.cpp b/src/add-ons/kernel/file_systems/hostfs/attributes.cpp
+new file mode 100644
+index 0000000000..35dbba8dea
+--- /dev/null
++++ b/src/add-ons/kernel/file_systems/hostfs/attributes.cpp
+@@ -0,0 +1,722 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * HostFS attributes. A Haiku attribute is a host extended attribute named
++ * "user.haiku.<name>" whose value is the attribute's type code (uint32,
++ * little endian) followed by its data -- the convention Haiku's own build
++ * tools use on the host (src/build/libroot/fs_attr_untyped.cpp), so
++ * attributes they wrote show up, and ours survive on the Mac. In names, '/'
++ * is written as "%\" and '%' as "%%".
++ *
++ * Files without a stored BEOS:TYPE get one from their extension, like on FAT,
++ * so Tracker shows the right icons and opens the right application without
++ * writing anything to the host.
++ */
++
++
++#include "hostfs.h"
++
++#include <ByteOrder.h>
++#include <dirent.h>
++#include <new>
++#include <stdlib.h>
++#include <string.h>
++
++#include <fs_attr.h>
++#include <kernel.h>
++#include <NodeMonitor.h>
++#include <TypeConstants.h>
++#include <util/AutoLock.h>
++#include <AutoDeleter.h>
++
++#include <file_systems/mime_ext_table.h>
++
++
++#define XATTR_PREFIX			"user.haiku."
++#define XATTR_PREFIX_LENGTH		(sizeof(XATTR_PREFIX) - 1)
++#define TYPE_HEADER_SIZE		sizeof(uint32)
++#define MAX_XATTR_NAME			255
++#define MIME_TYPE_ATTRIBUTE		"BEOS:TYPE"
++#define FALLBACK_MIME_TYPE		"application/octet-stream"
++
++// setxattr(2) flags as Linux numbers them
++#define LINUX_XATTR_CREATE		1
++
++
++struct AttrCookie {
++	char		name[B_ATTR_NAME_LENGTH];
++	uint32		type;
++	int			openMode;
++	bool		emulated;	// BEOS:TYPE from the file name
++};
++
++
++struct AttrDirCookie {
++	char*		names;		// NUL-separated attribute names
++	size_t		length;
++	size_t		position;
++};
++
++
++static inline Volume*
++get_volume(fs_volume* volume)
++{
++	return (Volume*)volume->private_volume;
++}
++
++
++static inline Node*
++get_node(fs_vnode* vnode)
++{
++	return (Node*)vnode->private_node;
++}
++
++
++static status_t
++copy_out(void* to, const void* from, size_t size)
++{
++	if (IS_USER_ADDRESS(to))
++		return user_memcpy(to, from, size);
++	memcpy(to, from, size);
++	return B_OK;
++}
++
++
++static status_t
++copy_in(void* to, const void* from, size_t size)
++{
++	if (IS_USER_ADDRESS(from))
++		return user_memcpy(to, from, size);
++	memcpy(to, from, size);
++	return B_OK;
++}
++
++
++//	#pragma mark - names
++
++
++static status_t
++xattr_name_for(const char* attribute, char* buffer, size_t bufferSize)
++{
++	size_t length = strlcpy(buffer, XATTR_PREFIX, bufferSize);
++	for (const char* c = attribute; *c != '\0'; c++) {
++		const char* insert;
++		char single[2] = { *c, '\0' };
++		switch (*c) {
++			case '/':
++				insert = "%\\";
++				break;
++			case '%':
++				insert = "%%";
++				break;
++			default:
++				insert = single;
++				break;
++		}
++		size_t insertLength = strlen(insert);
++		if (length + insertLength >= bufferSize || length + insertLength > MAX_XATTR_NAME)
++			return B_NAME_TOO_LONG;
++		memcpy(buffer + length, insert, insertLength + 1);
++		length += insertLength;
++	}
++	return B_OK;
++}
++
++
++/*!	Returns the attribute name for an xattr name, or false if the xattr is
++	not one of ours.
++*/
++static bool
++attribute_name_for(const char* xattr, char* buffer, size_t bufferSize)
++{
++	if (strncmp(xattr, XATTR_PREFIX, XATTR_PREFIX_LENGTH) != 0)
++		return false;
++	size_t length = 0;
++	for (const char* c = xattr + XATTR_PREFIX_LENGTH; *c != '\0'; c++) {
++		char out = *c;
++		if (*c == '%' && (c[1] == '\\' || c[1] == '%')) {
++			out = c[1] == '\\' ? '/' : '%';
++			c++;
++		}
++		if (length + 1 >= bufferSize)
++			return false;
++		buffer[length++] = out;
++	}
++	buffer[length] = '\0';
++	return length > 0;
++}
++
++
++/*!	The MIME type the file's name implies, or NULL if the name says nothing
++	(no extension the table knows).
++*/
++static const char*
++emulated_mime_type(Volume* volume, Node* node)
++{
++	if (!node->IsFile())
++		return NULL;
++	char name[B_FILE_NAME_LENGTH];
++	if (!volume->GetName(node, name, sizeof(name)))
++		return NULL;
++	const char* mime = NULL;
++	set_mime(&mime, name);
++	if (mime == NULL || strcmp(mime, FALLBACK_MIME_TYPE) == 0)
++		return NULL;
++	return mime;
++}
++
++
++//	#pragma mark - xattr requests
++
++
++/*!	Reads the whole value of \a xattr into a new malloc()ed buffer. */
++static status_t
++read_xattr(Volume* volume, Node* node, const char* xattr, uint8** _value,
++	size_t* _length)
++{
++	for (int attempt = 0; attempt < 3; attempt++) {
++		fuse_getxattr_in in = {};
++		fuse_getxattr_out out;
++		status_t status = volume->Request(FUSE_GETXATTR, node->nodeid, &in, sizeof(in),
++			xattr, NULL, NULL, 0, &out, sizeof(out));
++		if (status != B_OK)
++			return status;
++		if (out.size > volume->MaxData())
++			return B_BUFFER_OVERFLOW;
++
++		uint8* value = (uint8*)malloc(max_c(out.size, 1u));
++		if (value == NULL)
++			return B_NO_MEMORY;
++		size_t length = 0;
++		if (out.size > 0) {
++			in.size = out.size;
++			status = volume->Request(FUSE_GETXATTR, node->nodeid, &in, sizeof(in), xattr,
++				NULL, NULL, 0, NULL, 0, value, out.size, &length);
++			if (status == ERANGE) {
++				// it grew in between
++				free(value);
++				continue;
++			}
++			if (status != B_OK) {
++				free(value);
++				return status;
++			}
++		}
++		*_value = value;
++		*_length = length;
++		return B_OK;
++	}
++	return B_BUSY;
++}
++
++
++static status_t
++write_xattr(Volume* volume, Node* node, const char* xattr, const void* value,
++	size_t length, uint32 flags)
++{
++	if (length > volume->MaxData())
++		return B_FILE_TOO_LARGE;
++	// without FUSE_SETXATTR_EXT the arguments are the 8-byte compat form
++	fuse_setxattr_in in = {};
++	in.size = length;
++	in.flags = flags;
++	return volume->Request(FUSE_SETXATTR, node->nodeid, &in, FUSE_COMPAT_SETXATTR_IN_SIZE,
++		xattr, NULL, value, length, NULL, 0);
++}
++
++
++/*!	Reads the attribute \a name: its type and a malloc()ed copy of its data. */
++static status_t
++read_attribute(Volume* volume, Node* node, const char* name, uint32* _type,
++	uint8** _data, size_t* _length)
++{
++	char xattr[MAX_XATTR_NAME + 1];
++	status_t status = xattr_name_for(name, xattr, sizeof(xattr));
++	if (status != B_OK)
++		return status;
++
++	uint8* value;
++	size_t length;
++	status = read_xattr(volume, node, xattr, &value, &length);
++	if (status != B_OK)
++		return status;
++
++	if (length < TYPE_HEADER_SIZE) {
++		// not written by Haiku: raw data
++		*_type = B_RAW_TYPE;
++		*_data = value;
++		*_length = length;
++		return B_OK;
++	}
++	uint32 type;
++	memcpy(&type, value, TYPE_HEADER_SIZE);
++	*_type = B_LENDIAN_TO_HOST_INT32(type);
++	memmove(value, value + TYPE_HEADER_SIZE, length - TYPE_HEADER_SIZE);
++	*_data = value;
++	*_length = length - TYPE_HEADER_SIZE;
++	return B_OK;
++}
++
++
++static status_t
++write_attribute(Volume* volume, Node* node, const char* name, uint32 type,
++	const void* data, size_t length, uint32 flags)
++{
++	char xattr[MAX_XATTR_NAME + 1];
++	status_t status = xattr_name_for(name, xattr, sizeof(xattr));
++	if (status != B_OK)
++		return status;
++
++	uint8* value = (uint8*)malloc(TYPE_HEADER_SIZE + length);
++	if (value == NULL)
++		return B_NO_MEMORY;
++	MemoryDeleter valueDeleter(value);
++	uint32 typeCode = B_HOST_TO_LENDIAN_INT32(type);
++	memcpy(value, &typeCode, TYPE_HEADER_SIZE);
++	if (length > 0)
++		memcpy(value + TYPE_HEADER_SIZE, data, length);
++	return write_xattr(volume, node, xattr, value, TYPE_HEADER_SIZE + length, flags);
++}
++
++
++//	#pragma mark - attribute directories
++
++
++status_t
++hostfs_open_attr_dir(fs_volume* _volume, fs_vnode* _node, void** _cookie)
++{
++	Volume* volume = get_volume(_volume);
++	Node* node = get_node(_node);
++
++	AttrDirCookie* cookie = new(std::nothrow) AttrDirCookie;
++	if (cookie == NULL)
++		return B_NO_MEMORY;
++	ObjectDeleter<AttrDirCookie> cookieDeleter(cookie);
++	cookie->names = NULL;
++	cookie->length = 0;
++	cookie->position = 0;
++
++	// the host's list: every xattr name, NUL-separated
++	char* list = NULL;
++	size_t listLength = 0;
++	if (volume->SupportsXattrs()) {
++		fuse_getxattr_in in = {};
++		fuse_getxattr_out out;
++		status_t status = volume->Request(FUSE_LISTXATTR, node->nodeid, &in, sizeof(in),
++			NULL, NULL, NULL, 0, &out, sizeof(out));
++		if (status == B_OK && out.size > 0 && out.size <= volume->MaxData()) {
++			list = (char*)malloc(out.size);
++			if (list == NULL)
++				return B_NO_MEMORY;
++			in.size = out.size;
++			status = volume->Request(FUSE_LISTXATTR, node->nodeid, &in, sizeof(in), NULL,
++				NULL, NULL, 0, NULL, 0, list, out.size, &listLength);
++			if (status != B_OK)
++				listLength = 0;
++		}
++	}
++	MemoryDeleter listDeleter(list);
++
++	// keep ours, as attribute names, plus the emulated MIME type
++	size_t capacity = listLength + B_ATTR_NAME_LENGTH + 1;
++	cookie->names = (char*)malloc(capacity);
++	if (cookie->names == NULL)
++		return B_NO_MEMORY;
++	bool haveType = false;
++	for (size_t offset = 0; offset < listLength;) {
++		const char* xattr = list + offset;
++		size_t xattrLength = strnlen(xattr, listLength - offset);
++		offset += xattrLength + 1;
++		if (offset > listLength + 1)
++			break;
++		char name[B_ATTR_NAME_LENGTH];
++		char terminated[MAX_XATTR_NAME + 1];
++		strlcpy(terminated, xattr, min_c(xattrLength + 1, sizeof(terminated)));
++		if (!attribute_name_for(terminated, name, sizeof(name)))
++			continue;
++		if (strcmp(name, MIME_TYPE_ATTRIBUTE) == 0)
++			haveType = true;
++		size_t nameLength = strlen(name) + 1;
++		if (cookie->length + nameLength > capacity)
++			break;
++		memcpy(cookie->names + cookie->length, name, nameLength);
++		cookie->length += nameLength;
++	}
++	if (!haveType && emulated_mime_type(volume, node) != NULL
++		&& cookie->length + sizeof(MIME_TYPE_ATTRIBUTE) <= capacity) {
++		memcpy(cookie->names + cookie->length, MIME_TYPE_ATTRIBUTE,
++			sizeof(MIME_TYPE_ATTRIBUTE));
++		cookie->length += sizeof(MIME_TYPE_ATTRIBUTE);
++	}
++
++	*_cookie = cookieDeleter.Detach();
++	return B_OK;
++}
++
++
++status_t
++hostfs_close_attr_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie)
++{
++	return B_OK;
++}
++
++
++status_t
++hostfs_free_attr_dir_cookie(fs_volume* _volume, fs_vnode* _node, void* _cookie)
++{
++	AttrDirCookie* cookie = (AttrDirCookie*)_cookie;
++	free(cookie->names);
++	delete cookie;
++	return B_OK;
++}
++
++
++status_t
++hostfs_read_attr_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie,
++	struct dirent* buffer, size_t bufferSize, uint32* _num)
++{
++	Volume* volume = get_volume(_volume);
++	AttrDirCookie* cookie = (AttrDirCookie*)_cookie;
++
++	if (cookie->position >= cookie->length) {
++		*_num = 0;
++		return B_OK;
++	}
++	const char* name = cookie->names + cookie->position;
++	size_t nameLength = strlen(name);
++	size_t recordLength = offsetof(struct dirent, d_name) + nameLength + 1;
++	if (recordLength > bufferSize)
++		return B_BUFFER_OVERFLOW;
++
++	buffer->d_dev = volume->ID();
++	buffer->d_ino = -1;
++	memcpy(buffer->d_name, name, nameLength + 1);
++	buffer->d_reclen = recordLength;
++	cookie->position += nameLength + 1;
++	*_num = 1;
++	return B_OK;
++}
++
++
++status_t
++hostfs_rewind_attr_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie)
++{
++	((AttrDirCookie*)_cookie)->position = 0;
++	return B_OK;
++}
++
++
++//	#pragma mark - attributes
++
++
++status_t
++hostfs_create_attr(fs_volume* _volume, fs_vnode* _node, const char* name, uint32 type,
++	int openMode, void** _cookie)
++{
++	Volume* volume = get_volume(_volume);
++	Node* node = get_node(_node);
++	if (volume->IsReadOnly())
++		return B_READ_ONLY_DEVICE;
++	if (!volume->SupportsXattrs())
++		return B_NOT_SUPPORTED;
++	if (strlen(name) >= B_ATTR_NAME_LENGTH)
++		return B_NAME_TOO_LONG;
++
++	AttrCookie* cookie = new(std::nothrow) AttrCookie;
++	if (cookie == NULL)
++		return B_NO_MEMORY;
++	ObjectDeleter<AttrCookie> cookieDeleter(cookie);
++	strlcpy(cookie->name, name, sizeof(cookie->name));
++	cookie->type = type;
++	cookie->openMode = openMode;
++	cookie->emulated = false;
++
++	uint32 oldType;
++	uint8* data;
++	size_t length;
++	status_t status = read_attribute(volume, node, name, &oldType, &data, &length);
++	if (status == B_OK) {
++		free(data);
++		if ((openMode & O_EXCL) != 0)
++			return B_FILE_EXISTS;
++		if ((openMode & O_TRUNC) == 0 && oldType == type) {
++			*_cookie = cookieDeleter.Detach();
++			return B_OK;
++		}
++	} else if (status != B_ENTRY_NOT_FOUND)
++		return status;
++
++	// new, truncated, or changing type: an empty value of the new type
++	status = write_attribute(volume, node, name, type, NULL, 0,
++		(openMode & O_EXCL) != 0 ? LINUX_XATTR_CREATE : 0);
++	if (status != B_OK)
++		return status;
++
++	notify_attribute_changed(volume->ID(), volume->ParentOf(node), node->nodeid, name,
++		B_ATTR_CREATED);
++	*_cookie = cookieDeleter.Detach();
++	return B_OK;
++}
++
++
++status_t
++hostfs_open_attr(fs_volume* _volume, fs_vnode* _node, const char* name, int openMode,
++	void** _cookie)
++{
++	Volume* volume = get_volume(_volume);
++	Node* node = get_node(_node);
++	const bool writable = (openMode & O_RWMASK) != O_RDONLY;
++	if (writable && volume->IsReadOnly())
++		return B_READ_ONLY_DEVICE;
++
++	AttrCookie* cookie = new(std::nothrow) AttrCookie;
++	if (cookie == NULL)
++		return B_NO_MEMORY;
++	ObjectDeleter<AttrCookie> cookieDeleter(cookie);
++	strlcpy(cookie->name, name, sizeof(cookie->name));
++	cookie->openMode = openMode;
++	cookie->emulated = false;
++
++	status_t status = B_ENTRY_NOT_FOUND;
++	if (volume->SupportsXattrs()) {
++		uint8* data;
++		size_t length;
++		status = read_attribute(volume, node, name, &cookie->type, &data, &length);
++		if (status == B_OK)
++			free(data);
++	}
++	if (status == B_ENTRY_NOT_FOUND && strcmp(name, MIME_TYPE_ATTRIBUTE) == 0
++		&& emulated_mime_type(volume, node) != NULL) {
++		cookie->type = B_MIME_STRING_TYPE;
++		cookie->emulated = true;
++		status = B_OK;
++	}
++	if (status != B_OK)
++		return status;
++	if (writable && cookie->emulated && !volume->SupportsXattrs())
++		return B_NOT_ALLOWED;
++
++	if (writable && (openMode & O_TRUNC) != 0) {
++		status = write_attribute(volume, node, name, cookie->type, NULL, 0, 0);
++		if (status != B_OK)
++			return status;
++		cookie->emulated = false;
++		notify_attribute_changed(volume->ID(), volume->ParentOf(node), node->nodeid,
++			name, B_ATTR_CHANGED);
++	}
++
++	*_cookie = cookieDeleter.Detach();
++	return B_OK;
++}
++
++
++status_t
++hostfs_close_attr(fs_volume* _volume, fs_vnode* _node, void* _cookie)
++{
++	return B_OK;
++}
++
++
++status_t
++hostfs_free_attr_cookie(fs_volume* _volume, fs_vnode* _node, void* _cookie)
++{
++	delete (AttrCookie*)_cookie;
++	return B_OK;
++}
++
++
++/*!	The attribute's current data, from the host or the file name. */
++static status_t
++attribute_data(Volume* volume, Node* node, AttrCookie* cookie, uint8** _data,
++	size_t* _length)
++{
++	if (!cookie->emulated) {
++		uint32 type;
++		status_t status = read_attribute(volume, node, cookie->name, &type, _data,
++			_length);
++		if (status != B_ENTRY_NOT_FOUND || strcmp(cookie->name, MIME_TYPE_ATTRIBUTE) != 0)
++			return status;
++	}
++	const char* mime = emulated_mime_type(volume, node);
++	if (mime == NULL)
++		return B_ENTRY_NOT_FOUND;
++	size_t length = strlen(mime) + 1;
++	*_data = (uint8*)strdup(mime);
++	if (*_data == NULL)
++		return B_NO_MEMORY;
++	*_length = length;
++	return B_OK;
++}
++
++
++status_t
++hostfs_read_attr(fs_volume* _volume, fs_vnode* _node, void* _cookie, off_t pos,
++	void* buffer, size_t* _length)
++{
++	Volume* volume = get_volume(_volume);
++	Node* node = get_node(_node);
++	AttrCookie* cookie = (AttrCookie*)_cookie;
++	if (pos < 0)
++		return B_BAD_VALUE;
++
++	uint8* data;
++	size_t length;
++	status_t status = attribute_data(volume, node, cookie, &data, &length);
++	if (status != B_OK)
++		return status;
++	MemoryDeleter dataDeleter(data);
++
++	if ((uint64)pos >= length) {
++		*_length = 0;
++		return B_OK;
++	}
++	size_t toCopy = min_c(*_length, length - (size_t)pos);
++	status = copy_out(buffer, data + pos, toCopy);
++	if (status != B_OK)
++		return status;
++	*_length = toCopy;
++	return B_OK;
++}
++
++
++status_t
++hostfs_write_attr(fs_volume* _volume, fs_vnode* _node, void* _cookie, off_t pos,
++	const void* buffer, size_t* _length)
++{
++	Volume* volume = get_volume(_volume);
++	Node* node = get_node(_node);
++	AttrCookie* cookie = (AttrCookie*)_cookie;
++	if (volume->IsReadOnly())
++		return B_READ_ONLY_DEVICE;
++	if (!volume->SupportsXattrs())
++		return B_NOT_SUPPORTED;
++	if ((cookie->openMode & O_RWMASK) == O_RDONLY)
++		return B_NOT_ALLOWED;
++	if (pos < 0 || (uint64)pos + *_length > volume->MaxData() - TYPE_HEADER_SIZE)
++		return B_FILE_TOO_LARGE;
++
++	// Attributes are small: read what is there, splice, write it all back.
++	uint8* old = NULL;
++	size_t oldLength = 0;
++	if (pos > 0 || !cookie->emulated) {
++		status_t status = attribute_data(volume, node, cookie, &old, &oldLength);
++		if (status != B_OK && status != B_ENTRY_NOT_FOUND)
++			return status;
++	}
++	MemoryDeleter oldDeleter(old);
++
++	size_t end = (size_t)pos + *_length;
++	size_t newLength = max_c(end, oldLength);
++	uint8* data = (uint8*)malloc(max_c(newLength, 1u));
++	if (data == NULL)
++		return B_NO_MEMORY;
++	MemoryDeleter dataDeleter(data);
++	memset(data, 0, newLength);
++	if (old != NULL)
++		memcpy(data, old, oldLength);
++	status_t status = copy_in(data + pos, buffer, *_length);
++	if (status != B_OK)
++		return status;
++
++	status = write_attribute(volume, node, cookie->name, cookie->type, data, newLength, 0);
++	if (status != B_OK)
++		return status;
++	cookie->emulated = false;
++
++	notify_attribute_changed(volume->ID(), volume->ParentOf(node), node->nodeid,
++		cookie->name, B_ATTR_CHANGED);
++	return B_OK;
++}
++
++
++status_t
++hostfs_read_attr_stat(fs_volume* _volume, fs_vnode* _node, void* _cookie,
++	struct stat* stat)
++{
++	Volume* volume = get_volume(_volume);
++	Node* node = get_node(_node);
++	AttrCookie* cookie = (AttrCookie*)_cookie;
++
++	uint8* data;
++	size_t length;
++	status_t status = attribute_data(volume, node, cookie, &data, &length);
++	if (status != B_OK)
++		return status;
++	free(data);
++
++	stat->st_size = length;
++	stat->st_type = cookie->type;
++	return B_OK;
++}
++
++
++status_t
++hostfs_remove_attr(fs_volume* _volume, fs_vnode* _node, const char* name)
++{
++	Volume* volume = get_volume(_volume);
++	Node* node = get_node(_node);
++	if (volume->IsReadOnly())
++		return B_READ_ONLY_DEVICE;
++	if (!volume->SupportsXattrs())
++		return B_NOT_SUPPORTED;
++
++	char xattr[MAX_XATTR_NAME + 1];
++	status_t status = xattr_name_for(name, xattr, sizeof(xattr));
++	if (status != B_OK)
++		return status;
++	status = volume->Request(FUSE_REMOVEXATTR, node->nodeid, NULL, 0, xattr, NULL, NULL,
++		0, NULL, 0);
++	if (status != B_OK)
++		return status;
++
++	notify_attribute_changed(volume->ID(), volume->ParentOf(node), node->nodeid, name,
++		B_ATTR_REMOVED);
++	return B_OK;
++}
++
++
++status_t
++hostfs_rename_attr(fs_volume* _volume, fs_vnode* _fromNode, const char* fromName,
++	fs_vnode* _toNode, const char* toName)
++{
++	Volume* volume = get_volume(_volume);
++	Node* fromNode = get_node(_fromNode);
++	Node* toNode = get_node(_toNode);
++	if (volume->IsReadOnly())
++		return B_READ_ONLY_DEVICE;
++	if (!volume->SupportsXattrs())
++		return B_NOT_SUPPORTED;
++
++	uint32 type;
++	uint8* data;
++	size_t length;
++	status_t status = read_attribute(volume, fromNode, fromName, &type, &data, &length);
++	if (status != B_OK)
++		return status;
++	MemoryDeleter dataDeleter(data);
++
++	status = write_attribute(volume, toNode, toName, type, data, length, 0);
++	if (status == B_OK)
++		status = hostfs_remove_attr(_volume, _fromNode, fromName);
++	if (status == B_OK) {
++		notify_attribute_changed(volume->ID(), volume->ParentOf(toNode), toNode->nodeid,
++			toName, B_ATTR_CREATED);
++	}
++	return status;
++}
++
++
++/*!	Called at mount: does the host keep extended attributes for us? */
++bool
++hostfs_probe_xattrs(Volume* volume)
++{
++	fuse_getxattr_in in = {};
++	fuse_getxattr_out out;
++	status_t status = volume->Request(FUSE_LISTXATTR, FUSE_ROOT_ID, &in, sizeof(in), NULL,
++		NULL, NULL, 0, &out, sizeof(out));
++	INFORM("extended attributes on the host: %s (listxattr on the root: %s, %"
++		B_PRIu32 " bytes)\n", status == B_OK ? "yes" : "no", strerror(status),
++		status == B_OK ? out.size : 0);
++	return status == B_OK;
++}
+diff --git a/src/add-ons/kernel/file_systems/hostfs/hostfs.h b/src/add-ons/kernel/file_systems/hostfs/hostfs.h
+index 7927c50550..7ba3b355b6 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/hostfs.h
++++ b/src/add-ons/kernel/file_systems/hostfs/hostfs.h
+@@ -27,6 +27,7 @@
+ #include <fs_interface.h>
+ #include <KernelExport.h>
+ #include <lock.h>
++#include <util/DoublyLinkedList.h>
+ #include <util/OpenHashTable.h>
+ 
+ #include <virtio_fs.h>
+@@ -52,6 +53,10 @@
+ // the FUSE protocol minor this client speaks (the host may answer lower)
+ #define HOSTFS_FUSE_MINOR		31
+ 
++// nodes nothing uses any more are kept (and not forgotten) up to this many,
++// so that listing a directory does not mean forgetting every entry again
++#define HOSTFS_MAX_IDLE_NODES	2048
++
+ 
+ class Volume;
+ 
+@@ -82,6 +87,8 @@ struct Node {
+ 											// get_vnode()
+ 			int32				children;	// table nodes with this parent
+ 			bool				published;	// the VFS has a vnode for it
++			bool				idle;		// in the idle list
++			DoublyLinkedListLink<Node> idleLink;
+ 
+ 	// guarded by lock
+ 			mutex				lock;
+@@ -117,6 +124,8 @@ struct NodeHashDefinition {
+ };
+ 
+ typedef BOpenHashTable<NodeHashDefinition> NodeTable;
++typedef DoublyLinkedList<Node,
++	DoublyLinkedListMemberGetLink<Node, &Node::idleLink> > IdleNodeList;
+ 
+ 
+ struct FileCookie {
+@@ -131,6 +140,7 @@ struct DirCookie {
+ 			size_t				length;
+ 			size_t				position;
+ 			bool				eof;
++			bool				plus;		// buffer holds READDIRPLUS records
+ };
+ 
+ 
+@@ -153,6 +163,9 @@ public:
+ 			size_t				MaxWrite() const { return fMaxWrite; }
+ 			uint32				Minor() const { return fMinor; }
+ 			uint32				InitFlags() const { return fInitFlags; }
++			size_t				MaxData() const
++									{ return fTransport.max_data; }
++			bool				SupportsXattrs() const { return fXattrs; }
+ 
+ 	// FUSE requests
+ 			status_t			Request(uint32 opcode, uint64 nodeid,
+@@ -184,11 +197,15 @@ public:
+ 									const char* name);
+ 			uint64				ParentOf(Node* node);
+ 			bool				IsPublished(Node* node);
++			bool				GetName(Node* node, char* buffer,
++									size_t bufferSize);
+ 
+ private:
+ 			Node*				_SetParent(Node* node, uint64 parent,
+ 									const char* name);
++			void				_Busy(Node* node);
+ 			void				_Collect(Node* node, Node*& reclaimList);
++			void				_TrimIdle(int32 keep, Node*& reclaimList);
+ 			void				_Reclaim(Node* reclaimList);
+ 
+ private:
+@@ -197,8 +214,11 @@ private:
+ 			virtio_fs_transport	fTransport;
+ 			mutex				fLock;
+ 			NodeTable			fNodes;
++			IdleNodeList		fIdleNodes;
++			int32				fIdleCount;
+ 			Node*				fRoot;
+ 			bool				fReadOnly;
++			bool				fXattrs;
+ 			uint32				fMinor;
+ 			uint32				fInitFlags;
+ 			size_t				fMaxRead;
+@@ -211,5 +231,30 @@ private:
+ status_t	linux_to_haiku_error(int32 error, uint32 opcode);
+ uint32		haiku_to_linux_open_flags(int openMode);
+ 
++// attributes.cpp
++bool		hostfs_probe_xattrs(Volume* volume);
++status_t	hostfs_open_attr_dir(fs_volume* volume, fs_vnode* node, void** _cookie);
++status_t	hostfs_close_attr_dir(fs_volume* volume, fs_vnode* node, void* cookie);
++status_t	hostfs_free_attr_dir_cookie(fs_volume* volume, fs_vnode* node,
++				void* cookie);
++status_t	hostfs_read_attr_dir(fs_volume* volume, fs_vnode* node, void* cookie,
++				struct dirent* buffer, size_t bufferSize, uint32* _num);
++status_t	hostfs_rewind_attr_dir(fs_volume* volume, fs_vnode* node, void* cookie);
++status_t	hostfs_create_attr(fs_volume* volume, fs_vnode* node, const char* name,
++				uint32 type, int openMode, void** _cookie);
++status_t	hostfs_open_attr(fs_volume* volume, fs_vnode* node, const char* name,
++				int openMode, void** _cookie);
++status_t	hostfs_close_attr(fs_volume* volume, fs_vnode* node, void* cookie);
++status_t	hostfs_free_attr_cookie(fs_volume* volume, fs_vnode* node, void* cookie);
++status_t	hostfs_read_attr(fs_volume* volume, fs_vnode* node, void* cookie,
++				off_t pos, void* buffer, size_t* _length);
++status_t	hostfs_write_attr(fs_volume* volume, fs_vnode* node, void* cookie,
++				off_t pos, const void* buffer, size_t* _length);
++status_t	hostfs_read_attr_stat(fs_volume* volume, fs_vnode* node, void* cookie,
++				struct stat* stat);
++status_t	hostfs_rename_attr(fs_volume* volume, fs_vnode* fromNode,
++				const char* fromName, fs_vnode* toNode, const char* toName);
++status_t	hostfs_remove_attr(fs_volume* volume, fs_vnode* node, const char* name);
++
+ 
+ #endif	// HOSTFS_H
+diff --git a/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp b/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp
+index ddcb283ce4..389ee63214 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp
++++ b/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp
+@@ -391,7 +391,9 @@ hostfs_read_fs_info(fs_volume* _volume, struct fs_info* info)
+ {
+ 	Volume* volume = get_volume(_volume);
+ 
+-	info->flags = B_FS_IS_PERSISTENT | B_FS_SUPPORTS_NODE_MONITORING;
++	info->flags = B_FS_IS_PERSISTENT | B_FS_SUPPORTS_NODE_MONITORING | B_FS_HAS_MIME;
++	if (volume->SupportsXattrs())
++		info->flags |= B_FS_HAS_ATTR;
+ 	if (volume->IsReadOnly())
+ 		info->flags |= B_FS_IS_READONLY;
+ 	info->block_size = 4096;
+@@ -1374,6 +1376,106 @@ hostfs_free_dir_cookie(fs_volume* _volume, fs_vnode* _node, void* _cookie)
+ }
+ 
+ 
++/*!	Walks the records of a READDIR or READDIRPLUS reply. \a callback gets
++	each entry and, for READDIRPLUS, its lookup (NULL for "." and "..", which
++	the host does not count), and returns false to stop.
++*/
++template<typename Callback>
++static bool
++for_each_dir_record(const uint8* buffer, size_t length, size_t& position, bool plus,
++	Callback callback)
++{
++	while (position < length) {
++		const fuse_entry_out* lookup = NULL;
++		const fuse_dirent* entry;
++		size_t recordSize;
++		if (plus) {
++			const fuse_direntplus* record = (const fuse_direntplus*)(buffer + position);
++			if (position + FUSE_NAME_OFFSET_DIRENTPLUS > length)
++				return false;
++			entry = &record->dirent;
++			recordSize = FUSE_DIRENTPLUS_SIZE(record);
++			if (record->entry_out.nodeid != 0)
++				lookup = &record->entry_out;
++		} else {
++			entry = (const fuse_dirent*)(buffer + position);
++			if (position + FUSE_NAME_OFFSET > length)
++				return false;
++			recordSize = FUSE_DIRENT_SIZE(entry);
++		}
++		if (position + recordSize > length || entry->namelen == 0
++			|| entry->namelen >= B_FILE_NAME_LENGTH) {
++			return false;
++		}
++		if (!callback(entry, lookup, recordSize))
++			return true;
++		position += recordSize;
++	}
++	return true;
++}
++
++
++static inline bool
++is_dot_or_dotdot(const fuse_dirent* entry)
++{
++	return (entry->namelen == 1 && entry->name[0] == '.')
++		|| (entry->namelen == 2 && entry->name[0] == '.' && entry->name[1] == '.');
++}
++
++
++/*!	Reads the next batch of entries from the host. With READDIRPLUS every
++	entry comes with a lookup the host counts; they all go into the node table
++	right away (as idle nodes), so none is lost if the caller stops reading.
++*/
++static status_t
++dir_fetch(Volume* volume, Node* dir, DirCookie* cookie)
++{
++	if (cookie->buffer == NULL) {
++		cookie->buffer = (uint8*)malloc(DIR_BUFFER_SIZE);
++		if (cookie->buffer == NULL)
++			return B_NO_MEMORY;
++	}
++	const bool plus = (volume->InitFlags() & FUSE_DO_READDIRPLUS) != 0;
++	fuse_read_in in = {};
++	in.fh = cookie->fh;
++	in.offset = cookie->offset;
++	in.size = DIR_BUFFER_SIZE;
++	size_t length = 0;
++	status_t status = volume->Request(plus ? FUSE_READDIRPLUS : FUSE_READDIR, dir->nodeid,
++		&in, sizeof(in), NULL, NULL, NULL, 0, NULL, 0, cookie->buffer, DIR_BUFFER_SIZE,
++		&length);
++	if (status != B_OK)
++		return status;
++
++	cookie->length = length;
++	cookie->position = 0;
++	cookie->plus = plus;
++	if (length == 0) {
++		cookie->eof = true;
++		return B_OK;
++	}
++
++	if (plus) {
++		size_t position = 0;
++		for_each_dir_record(cookie->buffer, length, position, true,
++			[&](const fuse_dirent* entry, const fuse_entry_out* lookup, size_t) {
++				if (lookup == NULL || is_dot_or_dotdot(entry))
++					return true;
++				char name[B_FILE_NAME_LENGTH];
++				memcpy(name, entry->name, entry->namelen);
++				name[entry->namelen] = '\0';
++				Node* node = volume->AcquireEntry(*lookup, dir->nodeid, name);
++				if (node != NULL) {
++					node_update(volume, node, lookup->attr);
++					volume->Unpend(node);
++				}
++				return true;
++			});
++	}
++	return B_OK;
++}
++
++
+ static status_t
+ hostfs_read_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie,
+ 	struct dirent* buffer, size_t bufferSize, uint32* _num)
+@@ -1386,76 +1488,66 @@ hostfs_read_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie,
+ 	uint32 count = 0;
+ 	uint8* out = (uint8*)buffer;
+ 	size_t space = bufferSize;
++	bool overflow = false;
+ 
+-	while (count < maxCount) {
++	while (count < maxCount && !overflow) {
+ 		if (cookie->position >= cookie->length) {
+ 			if (cookie->eof)
+ 				break;
+-			if (cookie->buffer == NULL) {
+-				cookie->buffer = (uint8*)malloc(DIR_BUFFER_SIZE);
+-				if (cookie->buffer == NULL)
+-					return B_NO_MEMORY;
+-			}
+-			fuse_read_in in = {};
+-			in.fh = cookie->fh;
+-			in.offset = cookie->offset;
+-			in.size = DIR_BUFFER_SIZE;
+-			size_t length = 0;
+-			status_t status = volume->Request(FUSE_READDIR, node->nodeid, &in, sizeof(in),
+-				NULL, NULL, NULL, 0, NULL, 0, cookie->buffer, DIR_BUFFER_SIZE, &length);
++			status_t status = dir_fetch(volume, node, cookie);
+ 			if (status != B_OK) {
+ 				if (count > 0)
+ 					break;
+ 				return status;
+ 			}
+-			cookie->length = length;
+-			cookie->position = 0;
+-			if (length == 0) {
+-				cookie->eof = true;
++			if (cookie->eof)
+ 				break;
+-			}
+ 		}
+ 
+-		const fuse_dirent* entry = (const fuse_dirent*)(cookie->buffer + cookie->position);
+-		if (cookie->position + FUSE_NAME_OFFSET > cookie->length
+-			|| cookie->position + FUSE_DIRENT_SIZE(entry) > cookie->length
+-			|| entry->namelen == 0 || entry->namelen >= B_FILE_NAME_LENGTH) {
+-			INFORM("malformed READDIR reply for node %" B_PRIu64 "\n", node->nodeid);
++		bool wellFormed = for_each_dir_record(cookie->buffer, cookie->length,
++			cookie->position, cookie->plus,
++			[&](const fuse_dirent* entry, const fuse_entry_out* lookup, size_t) {
++				if (count >= maxCount)
++					return false;
++				const size_t recordLength = ROUNDUP(offsetof(struct dirent, d_name)
++					+ entry->namelen + 1, 8);
++				if (recordLength > space) {
++					overflow = true;
++					return false;
++				}
++
++				struct dirent* dirent = (struct dirent*)out;
++				dirent->d_dev = volume->ID();
++				dirent->d_pdev = volume->ID();
++				dirent->d_pino = node->nodeid;
++				memcpy(dirent->d_name, entry->name, entry->namelen);
++				dirent->d_name[entry->namelen] = '\0';
++				if (is_dot_or_dotdot(entry)) {
++					uint64 parent = entry->namelen == 2 ? volume->ParentOf(node) : 0;
++					dirent->d_ino = parent != 0 ? parent : node->nodeid;
++				} else if (lookup != NULL) {
++					// the vnode ID the entry will have when it is looked up
++					dirent->d_ino = lookup->nodeid;
++				} else
++					dirent->d_ino = entry->ino;
++				dirent->d_reclen = recordLength;
++
++				out += recordLength;
++				space -= recordLength;
++				count++;
++				cookie->offset = entry->off;
++				return true;
++			});
++		if (!wellFormed) {
++			INFORM("malformed directory reply for node %" B_PRIu64 "\n", node->nodeid);
+ 			cookie->eof = true;
+ 			cookie->length = 0;
+ 			break;
+ 		}
+-
+-		const size_t recordLength = ROUNDUP(offsetof(struct dirent, d_name)
+-			+ entry->namelen + 1, 8);
+-		if (recordLength > space) {
+-			if (count == 0)
+-				return B_BUFFER_OVERFLOW;
+-			break;
+-		}
+-
+-		struct dirent* dirent = (struct dirent*)out;
+-		dirent->d_dev = volume->ID();
+-		dirent->d_pdev = volume->ID();
+-		dirent->d_pino = node->nodeid;
+-		memcpy(dirent->d_name, entry->name, entry->namelen);
+-		dirent->d_name[entry->namelen] = '\0';
+-		if (strcmp(dirent->d_name, ".") == 0)
+-			dirent->d_ino = node->nodeid;
+-		else if (strcmp(dirent->d_name, "..") == 0) {
+-			uint64 parent = volume->ParentOf(node);
+-			dirent->d_ino = parent != 0 ? parent : node->nodeid;
+-		} else
+-			dirent->d_ino = entry->ino;
+-		dirent->d_reclen = recordLength;
+-
+-		out += recordLength;
+-		space -= recordLength;
+-		count++;
+-		cookie->offset = entry->off;
+-		cookie->position += FUSE_DIRENT_SIZE(entry);
+ 	}
+ 
++	if (overflow && count == 0)
++		return B_BUFFER_OVERFLOW;
+ 	*_num = count;
+ 	return B_OK;
+ }
+@@ -1550,24 +1642,24 @@ fs_vnode_ops gHostFSVnodeOps = {
+ 	&hostfs_read_dir,
+ 	&hostfs_rewind_dir,
+ 
+-	// attribute directory operations (not yet)
+-	NULL,	// open_attr_dir
+-	NULL,	// close_attr_dir
+-	NULL,	// free_attr_dir_cookie
+-	NULL,	// read_attr_dir
+-	NULL,	// rewind_attr_dir
+-
+-	// attribute operations (not yet)
+-	NULL,	// create_attr
+-	NULL,	// open_attr
+-	NULL,	// close_attr
+-	NULL,	// free_attr_cookie
+-	NULL,	// read_attr
+-	NULL,	// write_attr
+-	NULL,	// read_attr_stat
++	// attribute directory operations (attributes.cpp)
++	&hostfs_open_attr_dir,
++	&hostfs_close_attr_dir,
++	&hostfs_free_attr_dir_cookie,
++	&hostfs_read_attr_dir,
++	&hostfs_rewind_attr_dir,
++
++	// attribute operations (attributes.cpp)
++	&hostfs_create_attr,
++	&hostfs_open_attr,
++	&hostfs_close_attr,
++	&hostfs_free_attr_cookie,
++	&hostfs_read_attr,
++	&hostfs_write_attr,
++	&hostfs_read_attr_stat,
+ 	NULL,	// write_attr_stat
+-	NULL,	// rename_attr
+-	NULL,	// remove_attr
++	&hostfs_rename_attr,
++	&hostfs_remove_attr,
+ };
+ 
+ 
+-- 
+2.54.0 (Apple Git-157)
+

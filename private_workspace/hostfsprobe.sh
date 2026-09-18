@@ -36,7 +36,21 @@
 		echo "== run a program from the host"
 		cp /boot/system/bin/listdev "$H/listdev-copy" && "$H/listdev-copy" > /dev/null && echo "exec ok"
 		echo "== tree"; ls -laR "$H/tree"
-		echo "== find"; find "$H/tree" -type f | wc -l
+		echo "== directory entries carry the vnode IDs (ls -i reads d_ino, stat asks the node)"
+		ls -i "$H/tree/a" | head -3; stat -c "%i %n" "$H/tree/a/b" "$H/tree/a/f1.txt" "$H/tree/a/f10.txt"
+		echo "== list 1000 files"; time ls -l "$H/big" | wc -l
+		echo "== list them again"; time ls -l "$H/big" | wc -l
+		echo "== attributes: emulated MIME type of hello.txt"
+		listattr -l "$H/hello.txt"; catattr BEOS:TYPE "$H/hello.txt"
+		echo "== attributes: add, read, list, remove"
+		addattr -t string Prose:note "set in Haiku" "$H/hello.txt" && catattr Prose:note "$H/hello.txt"
+		addattr -t int32 Prose:count 42 "$H/hello.txt" && catattr Prose:count "$H/hello.txt"
+		listattr -l "$H/hello.txt"
+		rmattr Prose:count "$H/hello.txt" && listattr "$H/hello.txt"
+		echo "== attributes: mimeset stores a sniffed type"
+		cp /boot/system/bin/listdev "$H/noext" && mimeset -f "$H/noext" && catattr BEOS:TYPE "$H/noext"
+		echo "== attributes: copyattr of an application keeps them"
+		copyattr -d -r /boot/system/apps/StyledEdit "$H/StyledEdit-copy" && listattr "$H/StyledEdit-copy"
 		echo "== error: no such file"; cat "$H/does-not-exist" 2>&1
 		echo "== error: rmdir non-empty"; rmdir "$H/tree" 2>&1
 		echo "== done $(date)"
