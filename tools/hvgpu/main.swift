@@ -29,6 +29,10 @@
 //   --no-midi               no Prose MIDI device (default: guest MIDI -> Mac's GM synth + CoreMIDI)
 //   --no-synth              keep the CoreMIDI endpoints but don't play guest MIDI on the Mac's synth
 //   --midi-log              log every MIDI message from the guest
+//   --share PATH            HostFS: share a macOS directory read-write; the guest mounts it
+//                           as a disk (repeatable; hostfs.swift)
+//   --share-ro PATH         HostFS: the same, read-only
+//   --share-tag TAG         HostFS: virtio-fs tag = Haiku volume name (default HostFS)
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
 import AppKit
@@ -1087,6 +1091,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
             config.audioDevices = [sound]
         }
         config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+        // HostFS (hostfs.swift): --share / --share-ro directories over VZ's virtio-fs
+        if let hostFS = try makeHostFSDevice() {
+            config.directorySharingDevices = [hostFS]
+        }
 
         if let serialPath = option("--serial") {
             FileManager.default.createFile(atPath: serialPath, contents: nil)
