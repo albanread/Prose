@@ -25,6 +25,9 @@
 //                           vz: VZ's USB keyboard/pointer + virtio-gpu + VZVirtualMachineView
 //   --input-test            own input: click the Deskbar leaf, Escape, park the pointer (screenshots)
 //   --no-sound              no virtio-snd device (default: output+input to the Mac's audio devices)
+//   --no-midi               no Prose MIDI device (default: guest MIDI -> Mac's GM synth + CoreMIDI)
+//   --no-synth              keep the CoreMIDI endpoints but don't play guest MIDI on the Mac's synth
+//   --midi-log              log every MIDI message from the guest
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
 import AppKit
@@ -823,6 +826,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     let gpu = CustomVirtioGPU()
     let prds = PRDSDevice(width: width, height: height, poolMiB: Int(option("--pool-mib") ?? "128") ?? 128)
     lazy var router = InputRouter(presenter: presenter)
+    let midi = ProseMIDIDevice()
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
     let presenter = Presenter()
@@ -964,6 +968,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         } else if !args.contains("--no-custom-gpu") {   // --no-custom-gpu: VZ's GPU only
             config.customVirtioDevices = [displaySource.configuration]
         }
+        if !args.contains("--no-midi") {
+            // the Prose MIDI port (midi.swift): the guest's MIDI played by the Mac
+            config.customVirtioDevices += [midi.configuration]
+        }
         if ownInput {
             // Our own virtio-input keyboard and tablet (input.swift): no VZ graphics device,
             // no USB keyboard or pointing device, no VZVirtualMachineView.
@@ -1010,6 +1018,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
 
     func stopVM(reason: String) {
         if let router = inputRouter { log(router.stats) }
+        if !args.contains("--no-midi") { log(midi.stats) }
         guard !stopping else { return }
         stopping = true
         log("stopping: \(reason)")
