@@ -1,0 +1,253 @@
+From 0cac1f7eaa03dde07d02de8a87f04bcf99e23ee4 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 16:09:05 +0100
+Subject: [PATCH] Prose Display (S2): app_server's back buffer in the surface
+ pool
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Accelerant.h: new optional hook B_GET_BACK_BUFFER_CONFIG (0x501),
+get_back_buffer_config(frame_buffer_config*): a device-provided back
+buffer for the current mode. app_server uses it in place of its
+MallocBuffer (DeviceBackBuffer: B_RGBA32, the mode's size, any stride);
+accelerants without the hook see no change.
+
+prose_display driver: reserves a back buffer region in the pool after
+the space for the largest front buffer (offset 0x1fa4000 for 3840x2160,
+if the pool holds both); shared info carries bb_offset/bb_size.
+
+prose_display.accelerant: B_GET_BACK_BUFFER_CONFIG hands out pool +
+bb_offset with the front buffer's stride, so both buffers app_server
+works with are in memory the host (and its GPU) can reach — the
+prerequisite for a bb -> display blit kernel. app_server's memset after
+creation takes the first-touch cost.
+
+Verified on VZ: desktop renders from the pool-resident back buffer;
+mode changes (hand and scripted resizes) re-create it at the new size.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ headers/os/add-ons/graphics/Accelerant.h      |  4 ++
+ .../graphics/prose_display/prose_display.h    |  2 +
+ .../prose_display/accelerant_protos.h         |  1 +
+ .../accelerants/prose_display/hooks.cpp       |  2 +
+ .../accelerants/prose_display/mode.cpp        | 24 ++++++++++
+ .../graphics/prose_display/prose_display.cpp  | 13 +++++
+ .../interface/local/AccelerantHWInterface.cpp | 47 ++++++++++++++++++-
+ .../interface/local/AccelerantHWInterface.h   |  1 +
+ 8 files changed, 92 insertions(+), 2 deletions(-)
+
+diff --git a/headers/os/add-ons/graphics/Accelerant.h b/headers/os/add-ons/graphics/Accelerant.h
+index d1de12e3d2..3d2c259037 100644
+--- a/headers/os/add-ons/graphics/Accelerant.h
++++ b/headers/os/add-ons/graphics/Accelerant.h
+@@ -80,6 +80,7 @@ enum {
+ 
+ 	/* frame buffer presentation (PROSE fork) */
+ 	B_COMMIT_RECTANGLES = 0x500,		/* optional: these frame buffer rectangles changed */
++	B_GET_BACK_BUFFER_CONFIG,			/* optional: a device-provided back buffer for the current mode */
+ 
+ 	/* 3D acceleration */
+ 	B_ACCELERANT_PRIVATE_START = (int)0x80000000
+@@ -346,6 +347,9 @@ typedef void (*screen_to_screen_scaled_filtered_blit)(engine_token* et,
+    buffer; a display that presents on demand (a shared surface) sends them on. */
+ typedef status_t (*commit_rectangles)(const fill_rect_params* list,
+ 	uint32 count);
++/* PROSE fork: app_server draws into this buffer (always B_RGBA32, same size as
++   the mode) instead of one it allocates itself; the device can then reach it. */
++typedef status_t (*get_back_buffer_config)(frame_buffer_config* config);
+ 
+ typedef void (*fill_span)(engine_token* et, uint32 color, uint16* list,
+ 	uint32 count);
+diff --git a/headers/private/graphics/prose_display/prose_display.h b/headers/private/graphics/prose_display/prose_display.h
+index 21acb3cb4e..caa62751e8 100644
+--- a/headers/private/graphics/prose_display/prose_display.h
++++ b/headers/private/graphics/prose_display/prose_display.h
+@@ -144,6 +144,8 @@ struct prds_shared_info {
+ 	display_mode	current_mode;		/* size and space from the driver, timing from the accelerant */
+ 	uint32			bytes_per_row;
+ 	uint64			mode_offset;		/* pool offset of the current surface */
++	uint64			bb_offset;			/* pool offset of app_server's back buffer region, 0 if none */
++	uint64			bb_size;
+ 
+ 	area_id			mode_list_area;		/* owned by the primary accelerant */
+ 	uint32			mode_count;
+diff --git a/src/add-ons/accelerants/prose_display/accelerant_protos.h b/src/add-ons/accelerants/prose_display/accelerant_protos.h
+index 9ef2dcf1c2..148014fc03 100644
+--- a/src/add-ons/accelerants/prose_display/accelerant_protos.h
++++ b/src/add-ons/accelerants/prose_display/accelerant_protos.h
+@@ -29,6 +29,7 @@ status_t prose_display_get_preferred_mode(display_mode* mode);
+ status_t prose_display_set_display_mode(display_mode* mode);
+ status_t prose_display_get_display_mode(display_mode* mode);
+ status_t prose_display_get_frame_buffer_config(frame_buffer_config* config);
++status_t prose_display_get_back_buffer_config(frame_buffer_config* config);
+ status_t prose_display_get_pixel_clock_limits(display_mode* mode, uint32* low,
+ 	uint32* high);
+ 
+diff --git a/src/add-ons/accelerants/prose_display/hooks.cpp b/src/add-ons/accelerants/prose_display/hooks.cpp
+index 1cba49eb79..1352bb8ed1 100644
+--- a/src/add-ons/accelerants/prose_display/hooks.cpp
++++ b/src/add-ons/accelerants/prose_display/hooks.cpp
+@@ -41,6 +41,8 @@ get_accelerant_hook(uint32 feature, void* data)
+ 			return (void*)prose_display_get_display_mode;
+ 		case B_GET_FRAME_BUFFER_CONFIG:
+ 			return (void*)prose_display_get_frame_buffer_config;
++		case B_GET_BACK_BUFFER_CONFIG:
++			return (void*)prose_display_get_back_buffer_config;
+ 		case B_GET_PIXEL_CLOCK_LIMITS:
+ 			return (void*)prose_display_get_pixel_clock_limits;
+ 
+diff --git a/src/add-ons/accelerants/prose_display/mode.cpp b/src/add-ons/accelerants/prose_display/mode.cpp
+index 65574ce742..ea4be18896 100644
+--- a/src/add-ons/accelerants/prose_display/mode.cpp
++++ b/src/add-ons/accelerants/prose_display/mode.cpp
+@@ -166,6 +166,30 @@ prose_display_get_frame_buffer_config(frame_buffer_config* config)
+ }
+ 
+ 
++/*!	app_server's back buffer, in the pool: the same memory the display device
++	(and the host's GPU) can reach, with the front buffer's stride. app_server
++	memsets it after creation, which also takes the first-touch cost up front.
++*/
++status_t
++prose_display_get_back_buffer_config(frame_buffer_config* config)
++{
++	const prds_shared_info& shared = *gInfo->shared_info;
++	if (gInfo->pool == NULL || shared.bb_offset == 0)
++		return B_UNSUPPORTED;
++	if ((uint64)shared.bytes_per_row * shared.current_mode.virtual_height > shared.bb_size)
++		return B_UNSUPPORTED;
++
++	config->frame_buffer = gInfo->pool + shared.bb_offset;
++	config->frame_buffer_dma = NULL;
++	config->bytes_per_row = shared.bytes_per_row;
++	syslog(LOG_INFO, "prose_display: back buffer in the pool at %p (offset %" B_PRIu64
++		"), %ux%u, stride %u\n", config->frame_buffer, shared.bb_offset,
++		shared.current_mode.virtual_width, shared.current_mode.virtual_height,
++		shared.bytes_per_row);
++	return B_OK;
++}
++
++
+ status_t
+ prose_display_get_pixel_clock_limits(display_mode* mode, uint32* _low,
+ 	uint32* _high)
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index 0dd0f502de..cd933a46e7 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -551,6 +551,19 @@ prds_init_driver(device_node* node, void** _cookie)
+ 		info->shared->stride_align = info->config.stride_align;
+ 		info->shared->retrace_sem = info->retrace_sem;
+ 		info->shared->mode_list_area = -1;
++
++		// app_server's back buffer lives in the pool too (so the host's GPU can
++		// reach both buffers), after the space for the largest front buffer
++		uint64 frontMax = (uint64)ALIGN_UP(info->config.max_width * 4, info->config.stride_align)
++			* info->config.max_height;
++		frontMax = ALIGN_UP(frontMax, PRDS_SHM_ALIGNMENT);
++		if (frontMax * 2 <= info->pool_size) {
++			info->shared->bb_offset = frontMax;
++			info->shared->bb_size = frontMax;
++			INFO("back buffer region at pool offset %#" B_PRIx64 ", %" B_PRIu64 " KiB\n",
++				frontMax, frontMax >> 10);
++		} else
++			INFO("pool too small for a back buffer region (%" B_PRIu64 " KiB)\n", info->pool_size >> 10);
+ 	}
+ 
+ 	// This sets DRIVER_OK: from here on the device is live.
+diff --git a/src/servers/app/drawing/interface/local/AccelerantHWInterface.cpp b/src/servers/app/drawing/interface/local/AccelerantHWInterface.cpp
+index 56c863808d..047fd7008c 100644
+--- a/src/servers/app/drawing/interface/local/AccelerantHWInterface.cpp
++++ b/src/servers/app/drawing/interface/local/AccelerantHWInterface.cpp
+@@ -54,6 +54,36 @@
+ using std::nothrow;
+ 
+ 
++/*!	PROSE fork: a back buffer the accelerant provides (B_GET_BACK_BUFFER_CONFIG),
++	typically in memory the display device can reach. Used exactly like the
++	MallocBuffer it replaces: always B_RGBA32, the mode's size, any stride.
++*/
++class DeviceBackBuffer : public RenderingBuffer {
++public:
++	DeviceBackBuffer(const frame_buffer_config& config, uint32 width, uint32 height)
++		:
++		fBits(config.frame_buffer),
++		fBytesPerRow(config.bytes_per_row),
++		fWidth(width),
++		fHeight(height)
++	{
++	}
++
++	virtual status_t InitCheck() const { return fBits != NULL ? B_OK : B_NO_INIT; }
++	virtual color_space ColorSpace() const { return B_RGBA32; }
++	virtual void* Bits() const { return fBits; }
++	virtual uint32 BytesPerRow() const { return fBytesPerRow; }
++	virtual uint32 Width() const { return fWidth; }
++	virtual uint32 Height() const { return fHeight; }
++
++private:
++	void*	fBits;
++	uint32	fBytesPerRow;
++	uint32	fWidth;
++	uint32	fHeight;
++};
++
++
+ #ifdef DEBUG_DRIVER_MODULE
+ #	include <stdio.h>
+ #	define ATRACE(x) printf x
+@@ -117,6 +147,7 @@ AccelerantHWInterface::AccelerantHWInterface()
+ 	fAccGetTimingConstraints(NULL),
+ 	fAccProposeDisplayMode(NULL),
+ 	fAccCommitRectangles(NULL),
++	fAccGetBackBufferConfig(NULL),
+ 	fAccSetCursorShape(NULL),
+ 	fAccSetCursorBitmap(NULL),
+ 	fAccMoveCursor(NULL),
+@@ -394,6 +425,8 @@ AccelerantHWInterface::_SetupDefaultHooks()
+ 	// PROSE fork: displays that present on demand want to know what changed
+ 	fAccCommitRectangles
+ 		= (commit_rectangles)fAccelerantHook(B_COMMIT_RECTANGLES, NULL);
++	fAccGetBackBufferConfig
++		= (get_back_buffer_config)fAccelerantHook(B_GET_BACK_BUFFER_CONFIG, NULL);
+ 
+ 	// cursor
+ 	fAccSetCursorShape
+@@ -649,8 +682,18 @@ AccelerantHWInterface::SetMode(const display_mode& mode)
+ 
+ 		fBackBuffer.Unset();
+ 
+-		fBackBuffer.SetTo(new(nothrow) MallocBuffer(
+-			fFrontBuffer->Width(), fFrontBuffer->Height()));
++		// PROSE fork: the accelerant may provide the back buffer itself, in
++		// memory the display device (and its GPU) can reach
++		frame_buffer_config backConfig;
++		if (fAccGetBackBufferConfig != NULL
++			&& fAccGetBackBufferConfig(&backConfig) == B_OK
++			&& backConfig.frame_buffer != NULL) {
++			fBackBuffer.SetTo(new(nothrow) DeviceBackBuffer(backConfig,
++				fFrontBuffer->Width(), fFrontBuffer->Height()));
++		} else {
++			fBackBuffer.SetTo(new(nothrow) MallocBuffer(
++				fFrontBuffer->Width(), fFrontBuffer->Height()));
++		}
+ 
+ 		status = fBackBuffer.IsSet()
+ 			? fBackBuffer->InitCheck() : B_NO_MEMORY;
+diff --git a/src/servers/app/drawing/interface/local/AccelerantHWInterface.h b/src/servers/app/drawing/interface/local/AccelerantHWInterface.h
+index c6bee386c6..8c3866b4f4 100644
+--- a/src/servers/app/drawing/interface/local/AccelerantHWInterface.h
++++ b/src/servers/app/drawing/interface/local/AccelerantHWInterface.h
+@@ -135,6 +135,7 @@ private:
+ 			get_monitor_info		fAccGetMonitorInfo;
+ 			get_edid_info			fAccGetEDIDInfo;
+ 			commit_rectangles		fAccCommitRectangles;
++			get_back_buffer_config	fAccGetBackBufferConfig;
+ 			set_cursor_shape		fAccSetCursorShape;
+ 			set_cursor_bitmap		fAccSetCursorBitmap;
+ 			move_cursor				fAccMoveCursor;
+-- 
+2.54.0 (Apple Git-157)
+
