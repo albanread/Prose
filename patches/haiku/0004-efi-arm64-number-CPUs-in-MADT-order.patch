@@ -1,0 +1,39 @@
+diff --git a/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp b/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp
+index fc50f8ba8b..91a99ccde1 100644
+--- a/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp
++++ b/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp
+@@ -101,6 +101,17 @@ arch_handle_acpi()
+ 		uint64 gicr_base = 0;
+ 		uint8 version = 0;
+ 
++		// HaikuArmQemu fork: number CPUs in MADT order, with the CPU we run on
++		// as 0. The GICC "CPU interface number" only means something for
++		// GICv2; Apple's Virtualization.framework reports 0 for every CPU
++		// (valid for GICv3), so using it as the id made every CPU look like the
++		// boot CPU. None were started, and the kernel waited for them forever.
++		uint64 bootMpidr;
++		asm volatile("mrs %0, MPIDR_EL1" : "=r" (bootMpidr));
++		bootMpidr &= 0xff00ffffffULL;	// affinity fields, as in the MADT
++		platform_cpu_info* firstCpu = NULL;
++		uint32 cpuCount = 0;
++
+ 		acpi_apic *desc = (acpi_apic*)(madt + 1);
+ 		while (desc != (acpi_apic*)((char*)madt + madt->header.length)) {
+ 			if (desc->type == ACPI_MADT_GIC_INTERFACE) {
+@@ -112,8 +123,15 @@ arch_handle_acpi()
+ 				arch_smp_register_cpu(&cpu);
+ 				if (cpu == NULL)
+ 					break;
+-				cpu->id = acpi_gicc->cpu_interface_num;
++				cpu->id = cpuCount++;
+ 				cpu->mpidr = acpi_gicc->mpidr;
++				if (firstCpu == NULL) {
++					firstCpu = cpu;
++				} else if (cpu->mpidr == bootMpidr) {
++					// The boot CPU must be CPU 0.
++					cpu->mpidr = firstCpu->mpidr;
++					firstCpu->mpidr = bootMpidr;
++				}
+ 			} else if (desc->type == ACPI_MADT_GIC_DISTRIBUTOR) {
+ 				acpi_gic_distributor *acpi_gicd = (acpi_gic_distributor*)desc;
+ 				gicd_base = acpi_gicd->base_address;

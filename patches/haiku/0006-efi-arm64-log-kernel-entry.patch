@@ -1,0 +1,12 @@
+diff --git a/src/system/boot/platform/efi/arch/arm64/arch_start.cpp b/src/system/boot/platform/efi/arch/arm64/arch_start.cpp
+index f34e07ca15..9f8684e91d 100644
+--- a/src/system/boot/platform/efi/arch/arm64/arch_start.cpp
++++ b/src/system/boot/platform/efi/arch/arm64/arch_start.cpp
+@@ -213,6 +213,7 @@ arch_start_kernel(addr_t kernelEntry)
+ 	if (arch_mmu_read_access(kernelEntry)
+ 		&& arch_mmu_read_access(gKernelArgs.cpu_kstack[0].start)) {
+ 		// Enter the kernel!
++		dprintf("Entering the kernel on the boot CPU\n");
+ 		arch_enter_kernel(&gKernelArgs, kernelEntry,
+ 			gKernelArgs.cpu_kstack[0].start + gKernelArgs.cpu_kstack[0].size, 0);
+ 	} else {

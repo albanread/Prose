@@ -11,23 +11,30 @@ Tags: **[measured]** means we ran it on the host of record. **[source]** means w
 ## 0. Status: S1 works on macOS 27 (2026-09-18)
 
 Haiku arm64 boots to the desktop under Apple's Virtualization.framework, with keyboard and mouse. It displays through **our** virtio-gpu, a macOS 27 `VZCustomVirtioDevice` in `tools/hvgpu`, presented with Metal. Haiku's stock `virtio_gpu` driver and accelerant drive it.
-- **Run:** `build/bin/hvgpu <image-copy> --cpus 1 --disk nvme` (VZ writes to the disk, so boot a copy).
+- **Run:** `build/bin/hvgpu <image-copy> --cpus 8 --disk nvme` (VZ writes to the disk, so boot a copy). SMP works; 2, 4 and 8 vCPUs were tested.
 - **RAM console:** VZ gives the guest no UART, so `hvgpu` reads Haiku's logs straight out of guest RAM through `VZGuestMemoryMapping` and prints them as `RAM|` lines.
   - It finds the loader's log buffer.
   - It finds the kernel RAM log (patch 0001), which holds all kernel debug output, including panics and KDL.
 - **Our Haiku fork** (`patches/haiku/`, against hrev60122):
   1. `0001`: the kernel keeps a RAM copy of its debug output, tagged `HAIKU-RAMLOG-V1`. It must be `volatile`/`used`, or GCC drops it.
   2. `0002`: `virtio_gpu` skips GPUs without EDID. VZ's own virtio-gpu has none, and app_server hangs on it. Keeping VZ's GPU attached is still necessary, because VZ's absolute pointer maps onto it.
-  3. `0003`: `virtio_pci` fixes two bugs.
-     - Notify offsets were uninitialized. Notifying a queue that was never set up wrote to a random kernel address, which panicked in `virtio_net` under VZ.
-     - 64-bit writes to the common config are now two 32-bit writes, as the spec requires.
+  3. `0003`: `virtio_pci`, four changes:
+     - Capabilities are read by `cap_len`. Reading by `length` left `notify_off_multiplier` as garbage on VZ, which caused the `virtio_net` panics.
+     - Notify offsets start as "unset".
+     - Notifies are range- and magic-checked.
+     - 64-bit common-config fields are written as two 32-bit halves, per the spec.
+  4. `0004`: the loader numbers CPUs in MADT order, with the boot CPU as 0. VZ reports GICC interface number 0 for every CPU.
+  5. `0005`: the loader's PSCI calls follow SMCCC (x0–x3 in/out, x4–x17 clobbered) and log each `CPU_ON` result.
+  6. `0006`: the loader logs its handoff to the kernel.
 - **`hvgpu` fixes on the way:**
   - Correct virtio-gpu command IDs, little-endian headers, and the echoed fence.
   - EDID is feature bit 1.
   - The transfer offset follows the spec.
   - The Metal overlay sits above VZ's view, and the display link is driven by a visible view.
+- **SMP fixed** (patches 0003–0005). The multi-vCPU hang had two causes:
+  - VZ's MADT gives every CPU GICC interface number 0, so the loader never started the other CPUs, and the kernel's rendezvous waited for them forever.
+  - Once they did start, a `virtio_pci` bug (capabilities read by `length`, not `cap_len`) left `notify_off_multiplier` as garbage on VZ's small notify regions. `virtio_net` then panicked writing to random kernel addresses.
 - **Remaining workarounds, still to fix:**
-  - **More than 1 vCPU hangs** before the kernel's first output, in the loader's SMP bring-up (PSCI `CPU_ON` under VZ).
   - **`virtio_block` over PCI can't read the disk** ("reading the partition table failed: 80000001"). Patch 0003 didn't fix it. QEMU's `pci-blk` shows the same failure. Boot from NVMe instead.
   - app_server hangs on VZ's own virtio-gpu (handled by patch 0002). The cause isn't known yet.
 - **Retracted:** Sprint 0's first T4 "PASS" read a syslog a QEMU boot had left in the image. T4 now deletes the image's syslog first and requires `oem id: APPLE`.

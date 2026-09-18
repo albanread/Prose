@@ -1,0 +1,85 @@
+diff --git a/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp b/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp
+index e697a773e3..856e6f2961 100644
+--- a/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp
++++ b/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp
+@@ -40,8 +40,8 @@ extern "C" void arch_enter_kernel(struct kernel_args* kernelArgs,
+ 	addr_t kernelEntry, addr_t kernelStackTop, uint32 cpu);
+ void arm64_common_cpu_startup();
+ 
+-static void arm64_psci_call_smc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2);
+-static void arm64_psci_call_hvc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2);
++static int64 arm64_psci_call_smc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2);
++static int64 arm64_psci_call_hvc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2);
+ 
+ 
+ static platform_cpu_info sCpus[SMP_MAX_CPUS];
+@@ -50,7 +50,7 @@ static uint32 sCpuCount = 0;
+ static struct kernel_args* sKernelArgs;
+ static uint64 sKernelEntry;
+ static uint64 sSecondaryStacks[SMP_MAX_CPUS];
+-static void (*sPsciCallFn)(uint64, uint64, uint64, uint64);
++static int64 (*sPsciCallFn)(uint64, uint64, uint64, uint64);
+ 
+ enum class CpuEnableMethod {
+ 	Unknown,
+@@ -181,8 +181,13 @@ arch_smp_boot_other_cpus(addr_t ttbr1, uint64 kernelEntry, addr_t virtKernelArgs
+ 
+ 		switch (sCpuEnableMethod) {
+ 		case CpuEnableMethod::Psci:
+-			sPsciCallFn(PSCI_CPU_ON, cpu->mpidr, (uint64)arm64_secondary_startup, 0);
++		{
++			int64 result = sPsciCallFn(PSCI_CPU_ON, cpu->mpidr,
++				(uint64)arm64_secondary_startup, 0);
++			dprintf("smp: PSCI CPU_ON cpu %" B_PRIu32 " (mpidr 0x%" B_PRIx64 ") -> %"
++				B_PRId64 "\n", cpu->id, cpu->mpidr, result);
+ 			break;
++		}
+ 		case CpuEnableMethod::SpinTable:
+ 			*((uint64*)cpu->releaseAddr) = (uint64)arm64_secondary_startup;
+ 			asm("sev");
+@@ -284,23 +289,33 @@ arm64_handle_fdt_psci_node(const void* fdt, int node)
+ }
+ 
+ 
+-static void
++// HaikuArmQemu fork: per the SMC Calling Convention, x0-x3 carry results and
++// SMCCC 1.0 firmware may clobber x4-x17. The old asm declared x0-x3 as inputs
++// only, so any register the firmware changed corrupted the caller: QEMU's PSCI
++// only writes x0, Apple's Virtualization.framework evidently writes more, and
++// SMP boot hung there. Return x0 (the PSCI status) and declare the clobbers.
++#define PSCI_CALL(insn) \
++	register uint64 x0 asm("x0") = func; \
++	register uint64 x1 asm("x1") = arg0; \
++	register uint64 x2 asm("x2") = arg1; \
++	register uint64 x3 asm("x3") = arg2; \
++	asm volatile(insn \
++		: "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) \
++		: \
++		: "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", \
++		  "x14", "x15", "x16", "x17", "memory"); \
++	return (int64)x0;
++
++
++static int64
+ arm64_psci_call_smc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2)
+ {
+-	register uint64 x0 asm("x0") = func;
+-	register uint64 x1 asm("x1") = arg0;
+-	register uint64 x2 asm("x2") = arg1;
+-	register uint64 x3 asm("x3") = arg2;
+-	asm("smc #0" :: "r" (x0), "r" (x1), "r" (x2), "r" (x3));
++	PSCI_CALL("smc #0")
+ }
+ 
+ 
+-static void
++static int64
+ arm64_psci_call_hvc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2)
+ {
+-	register uint64 x0 asm("x0") = func;
+-	register uint64 x1 asm("x1") = arg0;
+-	register uint64 x2 asm("x2") = arg1;
+-	register uint64 x3 asm("x3") = arg2;
+-	asm("hvc #0" :: "r" (x0), "r" (x1), "r" (x2), "r" (x3));
++	PSCI_CALL("hvc #0")
+ }
