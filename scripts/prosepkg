@@ -1,0 +1,3 @@
+#!/bin/sh
+# prosepkg — Prose's package builder (packages/builder/prosepkg.py)
+exec python3 "$(dirname "$0")/../packages/builder/prosepkg.py" "$@"

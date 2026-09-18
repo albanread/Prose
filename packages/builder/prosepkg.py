@@ -1,0 +1,1253 @@
+#!/usr/bin/env python3
+"""prosepkg — Prose's package builder.
+
+Cross-builds haikuports recipes into Haiku packages (.hpkg) for arm64 on
+this macOS host. Recipes run unmodified where possible; cross-specific
+changes live in packages/builder/overlay. See packages/README.md.
+
+Everything the builder writes lives below ROOT (the case-sensitive build
+volume). The Haiku tree is an input only: `bootstrap` copies what it needs
+(toolchain, host tools, system packages) once, and builds never touch the
+tree again.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.request
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+# -- configuration --------------------------------------------------------------
+
+ROOT = Path(os.environ.get('PROSEPKG_ROOT', '/Volumes/HaikuSrc/prose-packages'))
+HAIKU_TREE = Path(os.environ.get('PROSEPKG_HAIKU_TREE', '/Volumes/HaikuSrc/haiku'))
+BUILDER_DIR = Path(__file__).resolve().parent
+OVERLAY_DIR = BUILDER_DIR / 'overlay'
+RUNTIME_SH = BUILDER_DIR / 'recipe-runtime.sh'
+
+ARCH = 'arm64'
+TRIPLE = 'aarch64-unknown-haiku'
+BUILD_TRIPLE = 'aarch64-apple-darwin'
+PACKAGER = 'Prose Package Builder <packages@prose.local>'
+VENDOR = 'Prose'
+JOBS = os.cpu_count() or 8
+
+HAIKUPORTS = ROOT / 'haikuports'
+TOOLCHAIN = ROOT / 'toolchain' / 'cross-tools-arm64'
+HOSTTOOLS = ROOT / 'hosttools'
+BASE = ROOT / 'base'
+BASE_SYSROOT = BASE / 'sysroot'
+ENV_DIR = ROOT / 'env'
+DOWNLOADS = ROOT / 'downloads'
+WORK = ROOT / 'work'
+REPO = ROOT / 'repo'
+CACHE = ROOT / 'cache'
+LOGS = ROOT / 'logs'
+RESULTS = ROOT / 'results.json'
+
+BASH = '/opt/homebrew/bin/bash'
+HOST_PATH = [
+	'/opt/homebrew/opt/coreutils/libexec/gnubin',
+	'/opt/homebrew/opt/gnu-sed/libexec/gnubin',
+	'/opt/homebrew/bin',
+	'/usr/bin', '/bin', '/usr/sbin', '/sbin',
+]
+
+# host tools the Haiku build produced for itself (tools/<dir>/<name> or tools/<name>)
+HOST_TOOL_NAMES = [
+	'rc', 'xres', 'mimeset', 'settype', 'setversion', 'addattr', 'copyattr',
+	'resattr', 'collectcatkeys', 'linkcatkeys', 'package', 'package_repo',
+	'bfs_shell',
+]
+
+# the system packages of the target image: what a Prose system provides
+BASE_PACKAGES_BUILT = ['haiku.hpkg', 'haiku_devel.hpkg', 'makefile_engine.hpkg']
+
+BINUTILS = ['addr2line', 'ar', 'as', 'c++filt', 'elfedit', 'ld', 'nm', 'objcopy',
+	'objdump', 'ranlib', 'readelf', 'size', 'strings', 'strip']
+
+RELATIVE_CONFIGURE_DIRS = [
+	('dataDir', 'data'), ('dataRootDir', 'data'), ('binDir', 'bin'),
+	('sbinDir', 'bin'), ('libDir', 'lib'), ('includeDir', 'develop/headers'),
+	('oldIncludeDir', 'develop/headers'), ('docDir', 'documentation/packages/{name}'),
+	('infoDir', 'documentation/info'), ('manDir', 'documentation/man'),
+	('libExecDir', 'lib'), ('sharedStateDir', 'var'), ('localStateDir', 'var'),
+]
+RELATIVE_OTHER_DIRS = [
+	('addOnsDir', 'add-ons'), ('appsDir', 'apps'), ('debugInfoDir', 'develop/debug'),
+	('developDir', 'develop'), ('developDocDir', 'develop/documentation/{name}'),
+	('developLibDir', 'develop/lib'), ('documentationDir', 'documentation'),
+	('fontsDir', 'data/fonts'), ('postInstallDir', 'boot/post-install'),
+	('preUninstallDir', 'boot/pre-uninstall'), ('preferencesDir', 'preferences'),
+	('settingsDir', 'settings'),
+]
+
+# -- small utilities --------------------------------------------------------------
+
+
+class BuildError(Exception):
+	pass
+
+
+def say(*parts):
+	print('prosepkg:', *parts, flush=True)
+
+
+def run(cmd, cwd=None, env=None, log=None, check=True, capture=False):
+	"""Run a command; stream into the log file if one is given."""
+	if log is not None:
+		log.write('$ ' + ' '.join(str(c) for c in cmd) + '\n')
+		log.flush()
+		proc = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env,
+			stdout=subprocess.PIPE if capture else log,
+			stderr=subprocess.STDOUT if not capture else log, text=True)
+	else:
+		proc = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env,
+			capture_output=capture, text=True)
+	if check and proc.returncode != 0:
+		raise BuildError('command failed (%d): %s' % (proc.returncode,
+			' '.join(str(c) for c in cmd)))
+	return proc
+
+
+def write_file(path, text, mode=0o644):
+	"""Replace a file by rename: never writes through an existing symlink."""
+	path = Path(path)
+	path.parent.mkdir(parents=True, exist_ok=True)
+	tmp = path.with_name('.' + path.name + '.new')
+	tmp.write_text(text)
+	os.chmod(tmp, mode)
+	os.replace(tmp, path)
+
+
+def sha256(path):
+	h = hashlib.sha256()
+	with open(path, 'rb') as f:
+		for chunk in iter(lambda: f.read(1 << 20), b''):
+			h.update(chunk)
+	return h.hexdigest()
+
+
+def rmtree(path):
+	path = Path(path)
+	if path.is_symlink() or path.is_file():
+		path.unlink()
+	elif path.exists():
+		# make everything writable first (read-only trees from extraction)
+		subprocess.run(['chmod', '-R', 'u+w', str(path)], check=False)
+		shutil.rmtree(path)
+
+
+def clone_tree(src, dst):
+	"""APFS clone (copy-on-write) of a directory tree."""
+	rmtree(dst)
+	dst.parent.mkdir(parents=True, exist_ok=True)
+	run(['/bin/cp', '-c', '-R', src, dst])
+
+
+def entries(value):
+	"""Split a PROVIDES/REQUIRES style value into entries (comments dropped)."""
+	result = []
+	for line in (value or '').splitlines():
+		line = line.split('#', 1)[0].strip()
+		if line:
+			result.append(line)
+	return result
+
+
+def entry_name(entry):
+	"""'lib:libfoo >= 1.2' -> 'lib:libfoo'"""
+	return re.split(r'\s|[<>=!]', entry.strip(), maxsplit=1)[0]
+
+
+def natural_key(version):
+	return [int(p) if p.isdigit() else p for p in re.split(r'(\d+)', version)]
+
+
+def load_json(path, default):
+	try:
+		return json.loads(Path(path).read_text())
+	except (OSError, ValueError):
+		return default
+
+
+def save_json(path, data):
+	write_file(path, json.dumps(data, indent=1, sort_keys=True) + '\n')
+
+
+def host_tool(name):
+	return HOSTTOOLS / 'bin' / name
+
+
+# -- bootstrap ----------------------------------------------------------------------
+
+
+def bootstrap(args):
+	for d in (ROOT, DOWNLOADS, WORK, REPO, CACHE, LOGS):
+		d.mkdir(parents=True, exist_ok=True)
+	bootstrap_toolchain(args.refresh)
+	bootstrap_hosttools(args.refresh)
+	bootstrap_base(args.refresh)
+	bootstrap_env()
+	check_toolchain()
+	say('bootstrap complete:', ROOT)
+
+
+def bootstrap_toolchain(refresh):
+	src = HAIKU_TREE / 'generated' / 'cross-tools-arm64'
+	if TOOLCHAIN.exists() and not refresh:
+		return
+	gcc = src / 'bin' / (TRIPLE + '-gcc')
+	with open(gcc, 'rb') as f:
+		if f.read(4) != b'\xcf\xfa\xed\xfe':
+			raise BuildError('%s is not a Mach-O executable: the toolchain is '
+				'damaged (see scripts/repair-cross-gcc.sh)' % gcc)
+	say('copying toolchain from', src)
+	rmtree(TOOLCHAIN)
+	TOOLCHAIN.parent.mkdir(parents=True, exist_ok=True)
+	run(['ditto', src, TOOLCHAIN])
+	rmtree(TOOLCHAIN / 'sysroot')
+	# read-only: nothing may ever write into the compiler again
+	run(['chmod', '-R', 'a-w', TOOLCHAIN])
+
+
+def bootstrap_hosttools(refresh):
+	if (HOSTTOOLS / 'bin' / 'package').exists() and not refresh:
+		return
+	tools = HAIKU_TREE / 'generated' / 'objects' / 'darwin' / 'arm64' / 'release' / 'tools'
+	libdir = HAIKU_TREE / 'generated' / 'objects' / 'darwin' / 'lib'
+	say('copying host tools from', tools)
+	rmtree(HOSTTOOLS)
+	(HOSTTOOLS / 'bin').mkdir(parents=True)
+	(HOSTTOOLS / 'lib').mkdir(parents=True)
+	copied = []
+	for name in HOST_TOOL_NAMES:
+		for candidate in (tools / name / name, tools / name, tools / 'locale' / name):
+			if candidate.is_file():
+				shutil.copy2(candidate, HOSTTOOLS / 'bin' / name)
+				copied.append(HOSTTOOLS / 'bin' / name)
+				break
+		else:
+			raise BuildError('host tool %s not found under %s' % (name, tools))
+	for lib in sorted(libdir.glob('*_build.so')):
+		shutil.copy2(lib, HOSTTOOLS / 'lib' / lib.name)
+		copied.append(HOSTTOOLS / 'lib' / lib.name)
+	# jam (Haiku's), used by some recipes
+	jam = shutil.which('jam')
+	if jam:
+		shutil.copy2(jam, HOSTTOOLS / 'bin' / 'jam')
+	# make the copies independent of the Haiku tree: relative dylib paths
+	prefix = str(libdir) + '/'
+	for f in copied:
+		out = run(['otool', '-L', f], capture=True).stdout.splitlines()[1:]
+		changes = []
+		for line in out:
+			dep = line.strip().split(' ')[0]
+			if dep.startswith(prefix):
+				name = dep[len(prefix):]
+				if f.parent.name == 'lib':
+					changes += ['-change', dep, '@loader_path/' + name]
+				else:
+					changes += ['-change', dep, '@executable_path/../lib/' + name]
+		if f.parent.name == 'lib':
+			changes += ['-id', '@loader_path/' + f.name]
+		if changes:
+			run(['install_name_tool'] + changes + [f], capture=True)
+			run(['codesign', '--force', '--sign', '-', f], capture=True)
+	run([HOSTTOOLS / 'bin' / 'package', 'list', '-i',
+		HAIKU_TREE / 'generated/objects/haiku/arm64/packaging/packages/makefile_engine.hpkg'],
+		capture=True)
+
+
+def base_package_sources():
+	built = HAIKU_TREE / 'generated' / 'objects' / 'haiku' / ARCH / 'packaging' / 'packages'
+	download = HAIKU_TREE / 'generated' / 'download'
+	sources = [built / name for name in BASE_PACKAGES_BUILT]
+	sources += sorted(p for p in download.glob('*.hpkg')
+		if p.name.endswith('-%s.hpkg' % ARCH) or p.name.endswith('-any.hpkg'))
+	return [p for p in sources if '_source-' not in p.name]
+
+
+def package_info(hpkg):
+	"""Parse `package list -i` into a dict of lists."""
+	out = run([host_tool('package'), 'list', '-i', hpkg], capture=True).stdout
+	info = {}
+	for line in out.splitlines():
+		m = re.match(r'\s*([a-z][a-z -]*):\s*(.*)$', line)
+		if m:
+			info.setdefault(m.group(1).strip(), []).append(m.group(2).strip())
+	return info
+
+
+def bootstrap_base(refresh):
+	if (BASE / 'provides.json').exists() and not refresh:
+		return
+	say('setting up the base system packages and sysroot')
+	rmtree(BASE)
+	(BASE / 'packages').mkdir(parents=True)
+	manifest = {}
+	provides = {}
+	system = BASE_SYSROOT / 'boot' / 'system'
+	system.mkdir(parents=True)
+	for src in base_package_sources():
+		dst = BASE / 'packages' / src.name
+		shutil.copy2(src, dst)
+		manifest[src.name] = {'source': str(src), 'sha256': sha256(dst)}
+		info = package_info(dst)
+		name = info['name'][0]
+		for p in info.get('provides', []) + [name]:
+			provides.setdefault(entry_name(p), []).append(name)
+		run([host_tool('package'), 'extract', '-C', system, dst], capture=True)
+		(system / '.PackageInfo').unlink(missing_ok=True)
+	# the system MIME database (attributes live in user.haiku.* xattrs)
+	mimedb = HAIKU_TREE / 'generated' / 'objects' / 'common' / 'data' / 'mime_db' / 'mime_db'
+	run(['ditto', mimedb, BASE / 'mime_db'])
+	save_json(BASE / 'manifest.json', manifest)
+	save_json(BASE / 'provides.json', provides)
+
+
+def wrapper(path, body):
+	write_file(path, '#!/bin/bash\n# generated by prosepkg bootstrap; do not edit\n' + body, 0o755)
+
+
+COMPILER_WRAPPER = r'''
+# Cross compiler for the current build's sysroot. Haiku-absolute paths in
+# arguments (/boot/..., /system/...) are mapped into the sysroot, like a
+# chroot would see them.
+: "${PROSE_SYSROOT:?PROSE_SYSROOT is not set (run builds through prosepkg)}"
+args=()
+for a in "$@"; do
+	case "$a" in
+	/boot/*) a="$PROSE_SYSROOT$a" ;;
+	/system/*) a="$PROSE_SYSROOT/boot$a" ;;
+	-I/boot/*|-L/boot/*) a="${a:0:2}$PROSE_SYSROOT${a:2}" ;;
+	-I/system/*|-L/system/*) a="${a:0:2}$PROSE_SYSROOT/boot${a:2}" ;;
+	-isystem/boot/*) a="-isystem$PROSE_SYSROOT${a:8}" ;;
+	esac
+	args+=("$a")
+done
+exec %(real)s --sysroot="$PROSE_SYSROOT" "${args[@]}"
+'''
+
+
+def bootstrap_env():
+	say('generating the build environment in', ENV_DIR)
+	rmtree(ENV_DIR)
+	bindir = ENV_DIR / 'bin'
+	bindir.mkdir(parents=True)
+	real = TOOLCHAIN / 'bin'
+	for tool in ('gcc', 'g++', 'c++', 'cpp'):
+		body = COMPILER_WRAPPER % {'real': real / (TRIPLE + '-' + tool)}
+		wrapper(bindir / (TRIPLE + '-' + tool), body)
+		wrapper(bindir / tool, body)
+	cc = COMPILER_WRAPPER % {'real': real / (TRIPLE + '-gcc')}
+	wrapper(bindir / (TRIPLE + '-cc'), cc)
+	wrapper(bindir / 'cc', cc)
+	for tool in BINUTILS:
+		extra = ' --sysroot="$PROSE_SYSROOT"' if tool == 'ld' else ''
+		body = 'exec %s%s "$@"\n' % (real / (TRIPLE + '-' + tool), extra)
+		wrapper(bindir / (TRIPLE + '-' + tool), body)
+		wrapper(bindir / tool, body)
+	pkgconfig = r'''
+: "${PROSE_SYSROOT:?}"
+S="$PROSE_SYSROOT/boot/system"
+export PKG_CONFIG_SYSROOT_DIR="$PROSE_SYSROOT"
+export PKG_CONFIG_LIBDIR="$S/develop/lib/pkgconfig:$S/data/pkgconfig:$S/lib/pkgconfig"
+unset PKG_CONFIG_PATH
+exec /opt/homebrew/bin/pkgconf "$@"
+'''
+	wrapper(bindir / 'pkg-config', pkgconfig)
+	wrapper(bindir / (TRIPLE + '-pkg-config'), pkgconfig)
+	wrapper(bindir / 'mimeset', r'''
+# host mimeset with the build's MIME databases (writable one first)
+for a in "$@"; do
+	[ "$a" = --mimedb ] && exec %(tool)s "$@"
+done
+exec %(tool)s --mimedb "${PROSE_MIMEDB_WORK:?}" --mimedb "${PROSE_MIMEDB_SYSTEM:?}" "$@"
+''' % {'tool': host_tool('mimeset')})
+	# Haiku utilities that makefiles call while being parsed
+	wrapper(bindir / 'finddir', r'''
+# finddir for the build sysroot (what a chroot would answer)
+: "${PROSE_SYSROOT:?}"
+S="$PROSE_SYSROOT/boot/system"; H="$PROSE_SYSROOT/boot/home/config"
+while [ $# -gt 0 ]; do
+	case "$1" in -v|-c) shift 2 ;; -e|-p) shift ;; *) break ;; esac
+done
+case "$1" in
+B_SYSTEM_DIRECTORY|B_BEOS_SYSTEM_DIRECTORY) echo "$S" ;;
+B_SYSTEM_ADDONS_DIRECTORY|B_BEOS_ADDONS_DIRECTORY) echo "$S/add-ons" ;;
+B_SYSTEM_APPS_DIRECTORY|B_APPS_DIRECTORY|B_BEOS_APPS_DIRECTORY) echo "$S/apps" ;;
+B_SYSTEM_BIN_DIRECTORY|B_BEOS_BIN_DIRECTORY) echo "$S/bin" ;;
+B_SYSTEM_DATA_DIRECTORY|B_BEOS_DATA_DIRECTORY) echo "$S/data" ;;
+B_SYSTEM_DEVELOP_DIRECTORY|B_DEVELOP_DIRECTORY) echo "$S/develop" ;;
+B_SYSTEM_DOCUMENTATION_DIRECTORY) echo "$S/documentation" ;;
+B_SYSTEM_HEADERS_DIRECTORY) echo "$S/develop/headers" ;;
+B_SYSTEM_LIB_DIRECTORY|B_BEOS_LIB_DIRECTORY) echo "$S/lib" ;;
+B_SYSTEM_DEVELOP_LIB_DIRECTORY) echo "$S/develop/lib" ;;
+B_SYSTEM_PREFERENCES_DIRECTORY|B_PREFERENCES_DIRECTORY) echo "$S/preferences" ;;
+B_SYSTEM_SETTINGS_DIRECTORY|B_COMMON_SETTINGS_DIRECTORY) echo "$S/settings" ;;
+B_SYSTEM_ETC_DIRECTORY|B_COMMON_ETC_DIRECTORY) echo "$S/settings/etc" ;;
+B_SYSTEM_NONPACKAGED_DIRECTORY) echo "$S/non-packaged" ;;
+B_SYSTEM_NONPACKAGED_*) d="${1#B_SYSTEM_NONPACKAGED_}"; d="${d%_DIRECTORY}"
+	case "$d" in ADDONS) d=add-ons ;; DEVELOP) d=develop ;; *) d=$(echo "$d" | tr A-Z a-z) ;; esac
+	echo "$S/non-packaged/$d" ;;
+B_USER_DIRECTORY) echo "$PROSE_SYSROOT/boot/home" ;;
+B_USER_CONFIG_DIRECTORY) echo "$H" ;;
+B_USER_NONPACKAGED_*) d="${1#B_USER_NONPACKAGED_}"; d="${d%_DIRECTORY}"
+	case "$d" in ADDONS) d=add-ons ;; DEVELOP) d=develop ;; *) d=$(echo "$d" | tr A-Z a-z) ;; esac
+	echo "$H/non-packaged/$d" ;;
+B_USER_*) d="${1#B_USER_}"; d="${d%_DIRECTORY}"
+	case "$d" in ADDONS) d=add-ons ;; *) d=$(echo "$d" | tr A-Z a-z) ;; esac
+	echo "$H/$d" ;;
+*) echo "finddir: unsupported constant $1" >&2; exit 1 ;;
+esac
+''')
+	wrapper(bindir / 'findpaths', r'''
+# findpaths for the build sysroot: only the system installation location
+: "${PROSE_SYSROOT:?}"
+S="$PROSE_SYSROOT/boot/system"
+while [ $# -gt 0 ]; do
+	case "$1" in -a|-r) shift 2 ;; -e|-p) shift ;; *) break ;; esac
+done
+d="${1#B_FIND_PATH_}"; d="${d%_DIRECTORY}"
+case "$d" in
+ADD_ONS) d=add-ons ;; APPS) d=apps ;; BIN) d=bin ;; BOOT) d=boot ;;
+CACHE) d=cache ;; DATA) d=data ;; DEVELOP) d=develop ;;
+DEVELOP_LIB) d=develop/lib ;; DOCUMENTATION) d=documentation ;;
+ETC) d=settings/etc ;; FONTS) d=data/fonts ;; HEADERS) d=develop/headers ;;
+LIB) d=lib ;; LOG) d=var/log ;; MEDIA_NODES) d=add-ons/media ;;
+PACKAGES) d=packages ;; PREFERENCES) d=preferences ;; SERVERS) d=servers ;;
+SETTINGS) d=settings ;; SOUNDS) d=data/sounds ;; SPOOL) d=var/spool ;;
+TRANSLATORS) d=add-ons/Translators ;; VAR) d=var ;; IMAGE_PATH) d="" ;;
+*) echo "findpaths: unsupported constant $1" >&2; exit 1 ;;
+esac
+echo "$S${d:+/$d}"
+''')
+	wrapper(bindir / 'linkcatkeys', r'''
+# The host build of linkcatkeys cannot write into a binary (-tr goes through
+# entry_ref APIs libbe_build lacks). For -tr, write a catalog file and embed
+# it with xres the way DefaultCatalog::WriteToResource does: type 'CADA',
+# id CatKey::HashFun(language) as int32, name = language.
+REAL=%(real)s
+XRES=%(xres)s
+target="" lang="" tr=0 args=()
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-tr) tr=1 ;;
+	-o) target="$2"; shift ;;
+	-l) lang="$2"; args+=(-l "$2"); shift ;;
+	*) args+=("$1") ;;
+	esac
+	shift
+done
+[ $tr = 1 ] || exec "$REAL" ${target:+-o "$target"} "${args[@]}"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/linkcatkeys.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+"$REAL" -o "$tmp/catalog" "${args[@]}" || exit 1
+h=0
+for ((i = 0; i < ${#lang}; i++)); do
+	printf -v c '%%d' "'${lang:i:1}"
+	(( c > 127 )) && (( c -= 256 ))
+	h=$(( (5 * h + c) & 0xffffffff ))
+done
+h=$(( (5 * h + 1) & 0xffffffff ))
+(( h >= 0x80000000 )) && (( h -= 0x100000000 ))
+# xres -o <executable> drops existing resources: carry them over
+"$XRES" -o "$tmp/old.rsrc" "$target"
+old=()
+[ -f "$tmp/old.rsrc" ] && old=("$tmp/old.rsrc")
+exec "$XRES" -o "$target" "${old[@]}" -a "CADA:$h:$lang" "$tmp/catalog"
+''' % {'real': host_tool('linkcatkeys'), 'xres': host_tool('xres')})
+	wrapper(bindir / 'mkdepend', r'''
+# makefile-engine dependency files: package builds are one-shot, an empty
+# dependency file is all make needs
+while [ $# -gt 0 ]; do
+	[ "$1" = -f ] && { : > "$2"; exit 0; }
+	shift
+done
+''')
+	wrapper(bindir / 'getarch', 'echo %s\n' % ARCH)
+	wrapper(bindir / 'setarch', r'''
+# single-architecture target: setarch <arch> [command...] just runs it
+shift
+[ $# -gt 0 ] && exec "$@"
+''')
+	# cmake toolchain file and autoconf site defaults
+	tc = ENV_DIR / 'cmake-toolchain.cmake'
+	write_file(tc, '''# generated by prosepkg bootstrap
+set(CMAKE_SYSTEM_NAME Haiku)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_SYSROOT "$ENV{PROSE_SYSROOT}")
+set(CMAKE_C_COMPILER "%(bin)s/%(t)s-gcc")
+set(CMAKE_CXX_COMPILER "%(bin)s/%(t)s-g++")
+set(CMAKE_AR "%(bin)s/%(t)s-ar" CACHE FILEPATH "")
+set(CMAKE_RANLIB "%(bin)s/%(t)s-ranlib" CACHE FILEPATH "")
+set(CMAKE_STRIP "%(bin)s/%(t)s-strip" CACHE FILEPATH "")
+set(CMAKE_OBJCOPY "%(bin)s/%(t)s-objcopy" CACHE FILEPATH "")
+set(CMAKE_FIND_ROOT_PATH "$ENV{PROSE_SYSROOT}/boot/system" "$ENV{PROSE_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+''' % {'bin': bindir, 't': TRIPLE})
+	write_file(ENV_DIR / 'config.site', '''# generated by prosepkg bootstrap
+# Haiku answers for configure tests that cannot run target code here.
+ac_cv_func_malloc_0_nonnull=${ac_cv_func_malloc_0_nonnull=yes}
+ac_cv_func_realloc_0_nonnull=${ac_cv_func_realloc_0_nonnull=yes}
+''')
+
+
+def check_toolchain():
+	"""Compile and link a Be API program against the base sysroot."""
+	tmp = CACHE / 'toolchain-check'
+	rmtree(tmp)
+	tmp.mkdir(parents=True)
+	(tmp / 'hello.cpp').write_text(
+		'#include <Application.h>\n#include <String.h>\n'
+		'int main() { BApplication app("application/x-vnd.prose-check");'
+		' BString s("ok"); return s.Length() == 2 ? 0 : 1; }\n')
+	env = build_env(BASE_SYSROOT, tmp)
+	run(['g++', '-O2', 'hello.cpp', '-o', 'hello', '-lbe'], cwd=tmp, env=env)
+	out = run([TOOLCHAIN / 'bin' / (TRIPLE + '-readelf'), '-d', tmp / 'hello'],
+		capture=True).stdout
+	if 'libbe.so' not in out:
+		raise BuildError('toolchain check: hello does not link libbe.so')
+	say('toolchain check passed (Be API program links for %s)' % ARCH)
+
+
+# -- recipes ------------------------------------------------------------------------
+
+
+def all_recipe_files():
+	"""{port name: [(version, path, category)]}; overlay recipes win."""
+	found = {}
+	for tree in (OVERLAY_DIR, HAIKUPORTS):
+		if not tree.is_dir():
+			continue
+		for recipe in tree.glob('*/*/*.recipe'):
+			m = re.match(r'^([^-]+)-(.+)\.recipe$', recipe.name)
+			if not m:
+				continue
+			name, version = m.group(1), m.group(2)
+			bucket = found.setdefault(name, [])
+			if any(v == version for v, _, _ in bucket):
+				continue
+			bucket.append((version, recipe, recipe.parent.parent.name))
+	return found
+
+
+def dir_variables(name, prefix):
+	values = {'prefix': prefix, 'sysconfDir': prefix + '/settings'}
+	for var, rel in RELATIVE_CONFIGURE_DIRS + RELATIVE_OTHER_DIRS:
+		values[var] = prefix + '/' + rel.format(name=name)
+	return values
+
+
+def shell_variables(port_name, version, revision, recipe, phase_prefix, extra=None):
+	"""The variables haikuporter predefines for recipes, prosepkg-style."""
+	runtime = dir_variables(port_name, '/boot/system')
+	phase = dir_variables(port_name, phase_prefix)
+	v = {
+		'portName': port_name, 'portBaseName': port_name,
+		'portVersion': version, 'portVersionedName': '%s-%s' % (port_name, version),
+		'portRevision': revision, 'portFullVersion': '%s-%s' % (version, revision),
+		'portRevisionedName': '%s-%s-%s' % (port_name, version, revision),
+		'portDir': str(recipe.parent), 'portBaseDir': str(recipe.parent),
+		'haikuVersion': 'r1~alpha1',
+		'buildArchitecture': ARCH, 'targetArchitecture': ARCH,
+		'effectiveTargetArchitecture': ARCH,
+		'effectiveTargetMachineTriple': TRIPLE,
+		'effectiveTargetMachineTripleAsName': TRIPLE.replace('-', '_'),
+		'targetMachineTriple': TRIPLE, 'targetMachineTripleAsName': TRIPLE.replace('-', '_'),
+		'buildMachineTriple': BUILD_TRIPLE, 'proseBuildTriple': BUILD_TRIPLE,
+		'isCrossRepository': 'false',
+		'secondaryArchSuffix': '', 'secondaryArchSubDir': '',
+		'jobs': str(JOBS), 'jobArgs': '-j%d' % JOBS,
+		'packagerName': 'Prose Package Builder', 'packagerEmail': 'packages@prose.local',
+		'SOURCE_DIR': '%s-%s' % (port_name, version),
+		'installDestDir': '',
+		'configureDirVariables': ' '.join(['prefix', 'sysconfDir']
+			+ [k for k, _ in RELATIVE_CONFIGURE_DIRS]),
+		'configureDirArgs': ' '.join('--%s=%s' % (k.lower(), runtime[k])
+			for k in ['prefix', 'sysconfDir'] + [k for k, _ in RELATIVE_CONFIGURE_DIRS]),
+		'cmakeDirArgs': ' '.join(['-DCMAKE_INSTALL_PREFIX=' + runtime['prefix'],
+			'-DCMAKE_INSTALL_SYSCONFDIR=' + runtime['sysconfDir']]
+			+ ['-DCMAKE_INSTALL_%s=%s' % (k.upper(), rel.format(name=port_name))
+				for k, rel in RELATIVE_CONFIGURE_DIRS]),
+	}
+	for var, rel in RELATIVE_CONFIGURE_DIRS + RELATIVE_OTHER_DIRS:
+		v['relative' + var[0].upper() + var[1:]] = rel.format(name=port_name)
+	v.update(phase)
+	for k, val in runtime.items():
+		v['prose_runtime_' + k] = val
+	if extra:
+		v.update(extra)
+	return v
+
+
+def shell_setters(variables):
+	return ''.join("%s='%s'\n" % (k, str(v).replace("'", "'\\''"))
+		for k, v in sorted(variables.items()))
+
+
+def overlay_snippet(recipe):
+	"""packages/builder/overlay/<category>/<port>/<recipe-stem>.prose.sh"""
+	category, port = recipe.parent.parent.name, recipe.parent.name
+	snippet = OVERLAY_DIR / category / port / (recipe.stem + '.prose.sh')
+	return snippet if snippet.is_file() else None
+
+
+def evaluate_recipe(recipe, name, version):
+	"""Source a recipe in parse mode and return its keys."""
+	variables = shell_variables(name, version, '$REVISION', recipe, '/boot/system')
+	script = shell_setters(variables) + 'declare -a PROSE_DEBUG_INFO_PATHS=()\n'
+	script += '. %s\n' % sh_quote(RUNTIME_SH)
+	script += '. %s >/dev/null\n' % sh_quote(recipe)
+	snippet = overlay_snippet(recipe)
+	if snippet:
+		script += '. %s >/dev/null\n' % sh_quote(snippet)
+	script += 'proseDumpRecipe\n'
+	proc = subprocess.run([BASH, '-c', script], capture_output=True,
+		env={'PATH': ':'.join(HOST_PATH), 'HOME': os.environ.get('HOME', '/tmp')})
+	if proc.returncode != 0:
+		raise BuildError('recipe %s does not evaluate: %s' % (recipe,
+			proc.stderr.decode(errors='replace').strip()[-400:]))
+	parts = proc.stdout.decode(errors='replace').split('\0')
+	keys = {}
+	for i in range(0, len(parts) - 1, 2):
+		keys[parts[i]] = parts[i + 1]
+	# the revision is known now: resolve the placeholders
+	revision = keys.get('REVISION', '1')
+	for k, v in keys.items():
+		keys[k] = v.replace('$REVISION', revision)
+	return keys
+
+
+def sh_quote(s):
+	return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def arch_status(keys, suffix=''):
+	"""'ok', 'untested' or 'broken' for arm64 per ARCHITECTURES."""
+	archs = (keys.get('ARCHITECTURES' + suffix) or keys.get('ARCHITECTURES') or '').split()
+	if 'any' in archs:
+		return 'any'
+	if '!' + ARCH in archs:
+		return 'broken'
+	if ARCH in archs or 'all' in archs:
+		return 'ok'
+	if '?' + ARCH in archs or '?all' in archs:
+		return 'untested'
+	if '!all' in archs:
+		return 'broken'
+	return 'untested'
+
+
+class Port:
+	def __init__(self, name, version, recipe, category):
+		self.name = name
+		self.version = version
+		self.recipe = recipe
+		self.category = category
+		self.keys = evaluate_recipe(recipe, name, version)
+		self.revision = self.keys.get('REVISION', '1')
+
+	@property
+	def full_version(self):
+		return '%s-%s' % (self.version, self.revision)
+
+	def packages(self):
+		"""[(suffix, package name)] — main package first, no debuginfo."""
+		result = [('', self.keys.get('PACKAGE_NAME') or self.name)]
+		for key in sorted(self.keys):
+			m = re.match(r'^PROVIDES_(\w+)$', key)
+			if m and m.group(1) != 'debuginfo':
+				suffix = m.group(1)
+				result.append((suffix, self.keys.get('PACKAGE_NAME_' + suffix)
+					or '%s_%s' % (self.name, suffix)))
+		return result
+
+	def key(self, name, suffix=''):
+		if suffix:
+			return self.keys.get('%s_%s' % (name, suffix))
+		return self.keys.get(name)
+
+	def hpkg_name(self, package, suffix=''):
+		arch = 'any' if arch_status(self.keys, '_' + suffix if suffix else '') == 'any' else ARCH
+		version = self.key('PACKAGE_VERSION', suffix) or self.version
+		return '%s-%s-%s-%s.hpkg' % (package, version, self.revision, arch)
+
+
+# -- the provides index ------------------------------------------------------------
+
+
+def recipe_index(refresh=False):
+	"""{provided name: [(port, version, package suffix)]} over all recipes,
+	cached per recipe mtime."""
+	cache_file = CACHE / 'recipes.json'
+	cache = {} if refresh else load_json(cache_file, {})
+	recipes = all_recipe_files()
+	jobs = []
+	for name, versions in recipes.items():
+		for version, path, category in versions:
+			stamp = '%s:%d' % (path, path.stat().st_mtime_ns)
+			snippet = overlay_snippet(path)
+			if snippet:
+				stamp += ':%d' % snippet.stat().st_mtime_ns
+			if cache.get(str(path), {}).get('stamp') != stamp:
+				jobs.append((name, version, path, stamp))
+
+	def evaluate(job):
+		name, version, path, stamp = job
+		try:
+			keys = evaluate_recipe(path, name, version)
+			return str(path), {'stamp': stamp, 'keys': {k: v for k, v in keys.items()
+				if k.startswith(('PROVIDES', 'ARCHITECTURES', 'PACKAGE_NAME', 'REVISION'))}}
+		except BuildError as e:
+			return str(path), {'stamp': stamp, 'error': str(e)}
+
+	if jobs:
+		say('evaluating %d recipes ...' % len(jobs))
+		with ThreadPoolExecutor(JOBS) as pool:
+			for path, entry in pool.map(evaluate, jobs):
+				cache[path] = entry
+		live = {str(p) for versions in recipes.values() for _, p, _ in versions}
+		cache = {k: v for k, v in cache.items() if k in live}
+		save_json(cache_file, cache)
+
+	index = {}
+	for name, versions in recipes.items():
+		for version, path, category in versions:
+			keys = cache.get(str(path), {}).get('keys')
+			if not keys:
+				continue
+			for key, value in keys.items():
+				m = re.match(r'^PROVIDES(?:_(\w+))?$', key)
+				if not m or m.group(1) == 'debuginfo':
+					continue
+				for e in entries(value):
+					index.setdefault(entry_name(e), []).append(
+						(name, version, m.group(1) or ''))
+	return recipes, index
+
+
+def choose_provider(candidates, recipes):
+	"""Prefer ports that are not cross/bootstrap variants, then the newest
+	version; ties go to the alphabetically first port."""
+	best = {}
+	for name, version, suffix in candidates:
+		if '_cross_' in name or name.endswith('_bootstrap'):
+			continue
+		cur = best.get(name)
+		if cur is None or natural_key(version) > natural_key(cur[0]):
+			best[name] = (version, suffix)
+	if not best:
+		return None
+	name = sorted(best)[0]
+	return name, best[name][0], best[name][1]
+
+
+# -- building -----------------------------------------------------------------------
+
+
+class Builder:
+	def __init__(self, args):
+		self.args = args
+		self.recipes, self.index = recipe_index()
+		self.base_provides = load_json(BASE / 'provides.json', {})
+		self.results = load_json(RESULTS, {})
+		self.building = []
+
+	# -- lookup
+
+	def find_port(self, spec):
+		"""'name' or 'name-version' -> Port"""
+		name, _, version = spec.partition('-')
+		versions = self.recipes.get(name)
+		if not versions:
+			raise BuildError('no recipe for %s' % spec)
+		if version:
+			matches = [v for v in versions if v[0] == version]
+			if not matches:
+				raise BuildError('no recipe %s-%s' % (name, version))
+			version, path, category = matches[0]
+		else:
+			ok = [v for v in versions if arch_status(self._cached_keys(v[1])) != 'broken']
+			version, path, category = max(ok or versions, key=lambda v: natural_key(v[0]))
+		return Port(name, version, path, category)
+
+	def _cached_keys(self, path):
+		if not hasattr(self, '_recipe_cache'):
+			self._recipe_cache = load_json(CACHE / 'recipes.json', {})
+		return self._recipe_cache.get(str(path), {}).get('keys', {})
+
+	def provider_of(self, entry):
+		"""(port name, version, suffix) providing an entry, or None if the
+		base system provides it."""
+		name = entry_name(entry)
+		if name in self.base_provides:
+			return None
+		candidates = self.index.get(name)
+		if not candidates:
+			raise BuildError('nothing provides %s' % name)
+		return choose_provider(candidates, self.recipes) or candidates[0]
+
+	# -- the build
+
+	def build(self, spec, force=False):
+		port = self.find_port(spec)
+		status = self.results.get(port.name, {})
+		built = all((REPO / port.hpkg_name(pkg, sfx)).exists() for sfx, pkg in port.packages())
+		if built and status.get('version') == port.full_version and not force:
+			return port
+		if port.name in self.building:
+			raise BuildError('dependency cycle: %s' % ' -> '.join(self.building + [port.name]))
+		self.building.append(port.name)
+		try:
+			self._build(port)
+		finally:
+			self.building.pop()
+		return port
+
+	def _build(self, port):
+		say('building %s-%s (%s)' % (port.name, port.full_version, port.recipe))
+		archs = arch_status(port.keys)
+		if archs == 'broken' and not self.args.force_arch:
+			raise BuildError('%s is marked broken for %s (ARCHITECTURES)' % (port.name, ARCH))
+		work = WORK / port.name
+		rmtree(work)
+		work.mkdir(parents=True)
+		LOGS.mkdir(exist_ok=True)
+		log_path = LOGS / ('%s.log' % port.name)
+		started = time.time()
+		result = {'version': port.full_version, 'recipe': str(port.recipe),
+			'arch_status': archs, 'log': str(log_path)}
+		with open(log_path, 'w') as log:
+			try:
+				self._prepare_sysroot(port, work, log)
+				sources = self._fetch_and_unpack(port, work, log)
+				self._run_phase(port, work, sources, 'PATCH', log)
+				self._run_phase(port, work, sources, 'BUILD', log)
+				self._run_phase(port, work, sources, 'INSTALL', log)
+				hpkgs = self._package(port, work, log)
+			except BuildError as e:
+				log.write('\nFAILED: %s\n' % e)
+				result.update(status='failed', error=str(e),
+					seconds=round(time.time() - started))
+				self.results[port.name] = result
+				save_json(RESULTS, self.results)
+				raise BuildError('%s failed: %s (log: %s)' % (port.name, e, log_path))
+		result.update(status='built', packages=hpkgs, seconds=round(time.time() - started))
+		self.results[port.name] = result
+		save_json(RESULTS, self.results)
+		if not self.args.keep_work:
+			rmtree(work)
+		say('built %s: %s' % (port.name, ', '.join(hpkgs)))
+
+	def _prepare_sysroot(self, port, work, log):
+		"""Clone the base sysroot, then activate the build requirements."""
+		sysroot = work / 'sysroot'
+		clone_tree(BASE_SYSROOT, sysroot)
+		prerequires = entries(port.keys.get('BUILD_PREREQUIRES'))
+		missing = [e for e in prerequires if entry_name(e).startswith('cmd:')
+			and not self._host_command(entry_name(e)[4:])]
+		if missing:
+			log.write('note: host commands not found: %s\n' % ', '.join(missing))
+		todo = list(entries(port.keys.get('BUILD_REQUIRES')))
+		todo += [e for e in prerequires if not entry_name(e).startswith('cmd:')]
+		activated = set()
+		while todo:
+			entry = todo.pop(0)
+			provider = self.provider_of(entry)
+			if provider is None:
+				continue
+			pname, pversion, psuffix = provider
+			dep = self.build('%s-%s' % (pname, pversion))
+			package = dict(dep.packages()).get(psuffix)
+			if package is None:
+				raise BuildError('%s: %s provides %s via an unbuilt package'
+					% (port.name, pname, entry))
+			hpkg = REPO / dep.hpkg_name(package, psuffix)
+			if hpkg.name in activated:
+				continue
+			activated.add(hpkg.name)
+			log.write('activating %s for %s\n' % (hpkg.name, entry))
+			run([host_tool('package'), 'extract', '-C', sysroot / 'boot' / 'system', hpkg],
+				log=log)
+			(sysroot / 'boot' / 'system' / '.PackageInfo').unlink(missing_ok=True)
+			# runtime requirements of what we just activated
+			todo += entries(dep.key('REQUIRES', psuffix))
+
+	def _host_command(self, name):
+		path = ':'.join([str(ENV_DIR / 'bin'), str(HOSTTOOLS / 'bin')] + HOST_PATH)
+		return shutil.which(name.replace('_', '-'), path=path) or shutil.which(name, path=path)
+
+	def _fetch_and_unpack(self, port, work, log):
+		"""Download, verify, unpack and patch every source; {index: dir}."""
+		sources = {}
+		indices = sorted({m.group(1) or '1' for k in port.keys
+			for m in [re.match(r'^SOURCE_URI(?:_(\d+))?$', k)] if m}, key=int)
+		for index in indices:
+			sfx = '' if index == '1' else '_' + index
+			uris = port.keys.get('SOURCE_URI' + sfx, '').split()
+			if not uris:
+				continue
+			checksum = port.keys.get('CHECKSUM_SHA256' + sfx, '').strip()
+			filename = port.keys.get('SOURCE_FILENAME' + sfx, '').strip()
+			# SOURCE_DIR defaults to <name>-<version> (set before parsing);
+			# additional sources unpack at their top level unless told otherwise
+			source_dir = port.keys.get('SOURCE_DIR' + sfx, '')
+			base = work / ('sources' if index == '1' else 'sources-' + index)
+			base.mkdir()
+			self._unpack(uris, checksum, filename, source_dir, base, log)
+			sdir = base / source_dir.split('/')[0] if source_dir else base
+			if not sdir.is_dir():
+				raise BuildError('source dir %s missing after unpacking (SOURCE_DIR?)'
+					% source_dir)
+			sources[index] = sdir
+			patches = port.keys.get('PATCHES' + sfx, '').split()
+			if patches:
+				self._apply_patches(port, sdir, patches, log)
+		return sources
+
+	def _unpack(self, uris, checksum, filename, source_dir, base, log):
+		uri = uris[0]
+		if uri.startswith('git+') or uri.startswith('git://'):
+			url, _, rev = uri[4 if uri.startswith('git+') else 0:].partition('#')
+			target = base / (source_dir.split('/')[0] or 'git')
+			run(['git', 'clone', '--quiet', url, target], log=log)
+			if rev:
+				run(['git', '-C', target, 'checkout', '--quiet', rev], log=log)
+			return
+		noarchive = '#noarchive' in uri
+		urls = [u.split('#')[0] for u in uris]
+		name = filename or urls[0].rstrip('/').rsplit('/', 1)[-1]
+		cached = DOWNLOADS / name
+		if not cached.exists() or (checksum and sha256(cached) != checksum):
+			for url in urls:
+				try:
+					log.write('downloading %s\n' % url)
+					tmp = cached.with_suffix(cached.suffix + '.part')
+					req = urllib.request.Request(url, headers={'User-Agent': 'prosepkg'})
+					with urllib.request.urlopen(req, timeout=120) as r, open(tmp, 'wb') as f:
+						shutil.copyfileobj(r, f)
+					os.replace(tmp, cached)
+					break
+				except Exception as e:  # try the next mirror
+					log.write('  failed: %s\n' % e)
+			else:
+				raise BuildError('cannot download %s' % name)
+		if checksum and sha256(cached) != checksum:
+			raise BuildError('checksum mismatch for %s' % name)
+		if not checksum:
+			log.write('warning: no CHECKSUM_SHA256 for %s\n' % name)
+		if noarchive:
+			shutil.copy2(cached, base / name)
+			return
+		sub = source_dir.split('/')[0] if source_dir else None
+		if tarfile.is_tarfile(cached):
+			with tarfile.open(cached) as t:
+				members = [m for m in t.getmembers()
+					if not sub or m.name == sub or m.name.startswith(sub + '/')
+					or m.name.startswith('./' + sub + '/')]
+				t.extractall(base, members=members, filter='tar')
+		elif zipfile.is_zipfile(cached):
+			with zipfile.ZipFile(cached) as z:
+				z.extractall(base)
+				for info in z.infolist():  # zipfile drops the x bits
+					mode = info.external_attr >> 16
+					if mode:
+						os.chmod(base / info.filename, mode & 0o777)
+		else:
+			raise BuildError('unknown archive format: %s' % name)
+
+	def _apply_patches(self, port, sdir, patches, log):
+		env = dict(os.environ, GIT_COMMITTER_NAME='prosepkg',
+			GIT_COMMITTER_EMAIL='packages@prose.local', GIT_AUTHOR_NAME='prosepkg',
+			GIT_AUTHOR_EMAIL='packages@prose.local')
+		if not (sdir / '.git').exists():
+			run(['git', 'init', '-q'], cwd=sdir, log=log)
+			run(['git', 'add', '-A', '-f', '.'], cwd=sdir, log=log)
+			run(['git', 'commit', '-q', '--no-verify', '-m', 'import'], cwd=sdir, env=env, log=log)
+		for patch in patches:
+			path = port.recipe.parent / 'patches' / patch
+			if not path.exists():
+				raise BuildError('patch %s not found' % path)
+			if patch.endswith('.patchset'):
+				run(['git', 'am', '--ignore-whitespace', '-3', '--keep-cr', path],
+					cwd=sdir, env=env, log=log)
+			else:
+				run(['git', 'apply', '--ignore-whitespace', '-p1', '--index', path],
+					cwd=sdir, log=log)
+				run(['git', 'commit', '-q', '--no-verify', '-m', 'patch ' + patch],
+					cwd=sdir, env=env, log=log)
+
+	def _run_phase(self, port, work, sources, phase, log):
+		if not port.keys.get('PHASE_' + phase):
+			return
+		install = phase == 'INSTALL'
+		destdir = work / 'destdir'
+		prefix = str(destdir) + '/boot/system' if install else '/boot/system'
+		extra = {'proseInInstall': '1' if install else '0',
+			'proseSubpackagesDir': str(work / 'sub'),
+			'portPackageLinksDir': str(work / 'package-links' / port.name),
+			'workDir': str(work)}
+		for index, sdir in sources.items():
+			extra['sourceDir' if index == '1' else 'sourceDir' + index] = str(sdir)
+		variables = shell_variables(port.name, port.version, port.revision, port.recipe,
+			prefix, extra)
+		links = work / 'package-links' / port.name
+		links.mkdir(parents=True, exist_ok=True)
+		if not (links / '.self').exists():
+			(destdir / 'boot' / 'system').mkdir(parents=True, exist_ok=True)
+			os.symlink(destdir / 'boot' / 'system', links / '.self')
+		script = '#!%s\nset -e\n' % BASH
+		script += shell_setters(variables)
+		script += 'declare -a PROSE_DEBUG_INFO_PATHS=()\n'
+		script += '. %s\n' % sh_quote(RUNTIME_SH)
+		script += 'PATCH() { true; }\nBUILD() { true; }\nINSTALL() { true; }\nTEST() { true; }\n'
+		script += 'cd %s\n' % sh_quote(sources.get('1', work))
+		script += '. %s >/dev/null\n' % sh_quote(port.recipe)
+		snippet = overlay_snippet(port.recipe)
+		if snippet:
+			script += '. %s >/dev/null\n' % sh_quote(snippet)
+		script += '%s\n' % phase
+		if install:
+			script += 'proseStripDebugInfos\n'
+		path = work / ('phase-%s.sh' % phase)
+		write_file(path, script, 0o755)
+		env = build_env(work / 'sysroot', work)
+		if install:
+			env['DESTDIR'] = str(destdir)
+		log.write('\n==== %s ====\n' % phase)
+		log.flush()
+		proc = subprocess.run([BASH, path], cwd=sources.get('1', work), env=env,
+			stdout=log, stderr=subprocess.STDOUT)
+		if proc.returncode != 0:
+			raise BuildError('%s phase failed (exit %d)' % (phase, proc.returncode))
+		if install:
+			self._normalize_destdir(destdir, log)
+
+	def _normalize_destdir(self, destdir, log):
+		"""`make install PREFIX=$prefix` with DESTDIR also exported lands in
+		<destdir>/<destdir>/...: fold that back."""
+		doubled = destdir / str(destdir).lstrip('/')
+		if doubled.exists():
+			log.write('note: folding doubled DESTDIR prefix back\n')
+			run(['/bin/cp', '-R', str(doubled) + '/.', destdir], log=log)
+			rmtree(destdir / str(destdir).lstrip('/').split('/')[0])
+
+	def _package(self, port, work, log):
+		hpkgs = []
+		REPO.mkdir(exist_ok=True)
+		for suffix, package in port.packages():
+			root = (work / 'destdir' if not suffix else work / 'sub' / suffix) / 'boot' / 'system'
+			root.mkdir(parents=True, exist_ok=True)
+			if not any(root.iterdir()):
+				log.write('warning: package %s is empty\n' % package)
+			licenses = port.recipe.parent / 'licenses'
+			if licenses.is_dir():
+				shutil.copytree(licenses, root / 'data' / 'licenses', dirs_exist_ok=True)
+			write_file(root / '.PackageInfo', self._package_info(port, suffix, package))
+			# attributes (types, app signatures, icons) from the resources
+			mimedb = root / 'data' / 'mime_db'
+			mimedb.mkdir(parents=True, exist_ok=True)
+			run([host_tool('mimeset'), '--all', '--mimedb', 'data/mime_db',
+				'--mimedb', BASE / 'mime_db', '.'], cwd=root, log=log)
+			if not any(mimedb.iterdir()):
+				mimedb.rmdir()
+				if not any((root / 'data').iterdir()):
+					(root / 'data').rmdir()
+			else:
+				# mimeset records the app's build-host path as its "preferred
+				# path"; the registrar finds apps by signature without it
+				for entry in mimedb.rglob('*'):
+					subprocess.run(['/usr/bin/xattr', '-d', 'user.haiku.META:PPATH',
+						str(entry)], capture_output=True)
+			out = REPO / port.hpkg_name(package, suffix)
+			out.unlink(missing_ok=True)
+			run([host_tool('package'), 'create', out], cwd=root, log=log)
+			hpkgs.append(out.name)
+		return hpkgs
+
+	def _package_info(self, port, suffix, package):
+		k = lambda name: port.key(name, suffix) if suffix else port.key(name)
+		summary = k('SUMMARY') or port.key('SUMMARY') or package
+		description = k('DESCRIPTION') or port.key('DESCRIPTION') or summary
+		version = (k('PACKAGE_VERSION') or port.version) + '-' + port.revision
+		arch = 'any' if arch_status(port.keys, '_' + suffix if suffix else '') == 'any' else ARCH
+		esc = lambda s: s.replace('\\', '\\\\').replace('"', '\\"')
+		out = ['name\t\t\t%s' % package, 'version\t\t\t%s' % version,
+			'architecture\t\t%s' % arch,
+			'summary\t\t\t"%s"' % esc(summary.strip()),
+			'description\t\t"%s"' % esc(description.strip()),
+			'packager\t\t"%s"' % PACKAGER, 'vendor\t\t\t"%s"' % VENDOR]
+
+		def block(keyword, items, quote=False):
+			if items:
+				out.append(keyword + ' {')
+				for item in items:
+					out.append('\t"%s"' % esc(item) if quote else '\t' + item)
+				out.append('}')
+
+		block('licenses', entries(port.key('LICENSE')), quote=True)
+		block('copyrights', entries(port.key('COPYRIGHT')), quote=True)
+		block('provides', entries(k('PROVIDES')))
+		block('requires', entries(k('REQUIRES')))
+		for key, keyword in (('SUPPLEMENTS', 'supplements'), ('CONFLICTS', 'conflicts'),
+				('FRESHENS', 'freshens'), ('REPLACES', 'replaces')):
+			block(keyword, entries(k(key)))
+		block('urls', entries(port.key('HOMEPAGE')), quote=True)
+		for key, keyword in (('GLOBAL_WRITABLE_FILES', 'global-writable-files'),
+				('USER_SETTINGS_FILES', 'user-settings-files'),
+				('POST_INSTALL_SCRIPTS', 'post-install-scripts'),
+				('PRE_UNINSTALL_SCRIPTS', 'pre-uninstall-scripts')):
+			block(keyword, [quote_paths(e) for e in entries(k(key))])
+		block('users', entries(k('PACKAGE_USERS')))
+		block('groups', entries(k('PACKAGE_GROUPS')))
+		urls = [u.split('#')[0] for i in sorted(port.keys) if re.match(r'^SOURCE_URI(_\d+)?$', i)
+			for u in port.keys[i].split()[:1] if not u.startswith('file://')]
+		block('source-urls', urls, quote=True)
+		return '\n'.join(out) + '\n'
+
+
+def quote_paths(item):
+	parts = re.findall(r'"[^"]*"|\S+', item)
+	return ' '.join('"%s"' % p if not p.startswith('"') and '/' in p else p for p in parts)
+
+
+def build_env(sysroot, work):
+	"""A clean environment: the build must not see the host's CC, CFLAGS, ..."""
+	tmp = Path(work) / 'tmp'
+	tmp.mkdir(parents=True, exist_ok=True)
+	mimedb = Path(work) / 'mime_db'
+	mimedb.mkdir(parents=True, exist_ok=True)
+	env = {
+		'PATH': ':'.join([str(ENV_DIR / 'bin'), str(HOSTTOOLS / 'bin')] + HOST_PATH),
+		'HOME': os.environ.get('HOME', '/tmp'),
+		'USER': os.environ.get('USER', 'prose'),
+		'TMPDIR': str(tmp),
+		'LANG': 'en_US.UTF-8',
+		'PROSE_SYSROOT': str(sysroot),
+		'PROSE_MIMEDB_WORK': str(mimedb),
+		'PROSE_MIMEDB_SYSTEM': str(BASE / 'mime_db'),
+		'PROSE_CMAKE_TOOLCHAIN': str(ENV_DIR / 'cmake-toolchain.cmake'),
+		'PROSE_MESON_CROSS': str(Path(work) / 'meson-cross.ini'),
+		'CONFIG_SITE': str(ENV_DIR / 'config.site'),
+		'CC_FOR_BUILD': '/usr/bin/clang', 'CXX_FOR_BUILD': '/usr/bin/clang++',
+		'BUILD_CC': '/usr/bin/clang', 'HOSTCC': '/usr/bin/clang',
+	}
+	bindir = ENV_DIR / 'bin'
+	write_file(Path(work) / 'meson-cross.ini', '''[binaries]
+c = '%(b)s/%(t)s-gcc'
+cpp = '%(b)s/%(t)s-g++'
+ar = '%(b)s/%(t)s-ar'
+strip = '%(b)s/%(t)s-strip'
+pkg-config = '%(b)s/pkg-config'
+
+[properties]
+sys_root = '%(s)s'
+
+[host_machine]
+system = 'haiku'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+''' % {'b': bindir, 't': TRIPLE, 's': sysroot})
+	return env
+
+
+# -- commands -----------------------------------------------------------------------
+
+
+def cmd_build(args):
+	builder = Builder(args)
+	failed = []
+	for spec in args.ports:
+		try:
+			builder.build(spec, force=args.force)
+		except BuildError as e:
+			say('ERROR:', e)
+			failed.append(spec)
+			if not args.keep_going:
+				break
+	write_report(builder.results)
+	if failed:
+		say('failed:', ' '.join(failed))
+		sys.exit(1)
+
+
+def cmd_info(args):
+	builder = Builder(args)
+	for spec in args.ports:
+		port = builder.find_port(spec)
+		print('%s-%s  %s  [%s]' % (port.name, port.full_version, port.recipe,
+			arch_status(port.keys)))
+		for suffix, package in port.packages():
+			print('  package', package, '->', port.hpkg_name(package, suffix))
+		for e in entries(port.keys.get('BUILD_REQUIRES')):
+			try:
+				p = builder.provider_of(e)
+			except BuildError as err:
+				p = str(err)
+			print('  build requires %-40s %s' % (e, 'base' if p is None else p))
+
+
+def cmd_index(args):
+	recipes, index = recipe_index(refresh=args.refresh)
+	print('%d ports, %d provided names' % (len(recipes), len(index)))
+
+
+def write_report(results):
+	lines = ['# prosepkg build results', '',
+		'Generated by `prosepkg build`; one row per port, newest attempt.', '',
+		'| port | version | result | packages / error |', '|---|---|---|---|']
+	for name in sorted(results):
+		r = results[name]
+		what = ', '.join(r.get('packages', [])) if r.get('status') == 'built' \
+			else (r.get('error') or '')[:160].replace('|', '/')
+		lines.append('| %s | %s | %s | %s |' % (name, r.get('version', ''),
+			r.get('status', ''), what))
+	write_file(BUILDER_DIR.parent / 'RESULTS.md', '\n'.join(lines) + '\n')
+
+
+def main():
+	p = argparse.ArgumentParser(prog='prosepkg', description=__doc__.split('\n')[0])
+	sub = p.add_subparsers(dest='command', required=True)
+	b = sub.add_parser('bootstrap', help='copy toolchain, host tools and base packages; generate the environment')
+	b.add_argument('--refresh', action='store_true', help='redo every step')
+	b.set_defaults(func=bootstrap)
+	b = sub.add_parser('build', help='build ports (and their build requirements)')
+	b.add_argument('ports', nargs='+')
+	b.add_argument('--force', action='store_true', help='rebuild even if packaged')
+	b.add_argument('--force-arch', action='store_true', help='ignore ARCHITECTURES')
+	b.add_argument('--keep-going', '-k', action='store_true')
+	b.add_argument('--keep-work', action='store_true', help='keep the work dir of successful builds')
+	b.set_defaults(func=cmd_build)
+	b = sub.add_parser('info', help='show how a port resolves')
+	b.add_argument('ports', nargs='+')
+	b.add_argument('--force-arch', action='store_true')
+	b.add_argument('--keep-work', action='store_true')
+	b.set_defaults(func=cmd_info)
+	b = sub.add_parser('index', help='(re)evaluate all recipes')
+	b.add_argument('--refresh', action='store_true')
+	b.set_defaults(func=cmd_index)
+	args = p.parse_args()
+	try:
+		args.func(args)
+	except BuildError as e:
+		say('ERROR:', e)
+		sys.exit(1)
+
+
+if __name__ == '__main__':
+	main()
