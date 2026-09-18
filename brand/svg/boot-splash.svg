@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 768">
+  <rect width="1024" height="768" fill="#1B1917"/>
+  <g transform="translate(424,128) scale(0.7333333333333333)" opacity="1.0">
+  <defs><clipPath id="leftHalf"><rect x="0" y="0" width="146.5" height="240"/></clipPath></defs>
+  <g clip-path="url(#leftHalf)">
+    <path fill-rule="evenodd" fill="#F5EFE3"
+          d="M146,107 m-57,0 a57,57 0 1,0 114,0 a57,57 0 1,0 -114,0
+             M146,107 m-27,0 a27,27 0 1,0 54,0 a27,27 0 1,0 -54,0"/>
+  </g>
+  <rect x="118" y="50" width="28" height="170" rx="14" fill="#F5EFE3"/>
+</g>
+  <text x="512" y="430" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="96" font-weight="700" fill="#F5EFE3">Prose
+    <tspan x="512" dy="74.88" font-size="23.04" letter-spacing="7.199999999999999" fill="#D6482B">K R O N K I T E</tspan></text>
+  <text x="512" y="610" text-anchor="middle" font-family="Georgia, serif"
+        font-size="30" fill="#F5EFE3" opacity="0.55">hrev60122 &#183; arm64</text>
+  <text x="512" y="700" text-anchor="middle" font-family="Georgia, serif"
+        font-style="italic" font-size="26" fill="#F5EFE3" opacity="0.45"
+        >&#8230;and that&#8217;s the way it is.</text>
+</svg>

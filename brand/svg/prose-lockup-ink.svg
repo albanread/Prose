@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 320">
+  <g transform="translate(40,40) scale(1.0)" opacity="1.0">
+  <defs><clipPath id="leftHalf"><rect x="0" y="0" width="146.5" height="240"/></clipPath></defs>
+  <g clip-path="url(#leftHalf)">
+    <path fill-rule="evenodd" fill="#1B1917"
+          d="M146,107 m-57,0 a57,57 0 1,0 114,0 a57,57 0 1,0 -114,0
+             M146,107 m-27,0 a27,27 0 1,0 54,0 a27,27 0 1,0 -54,0"/>
+  </g>
+  <rect x="118" y="50" width="28" height="170" rx="14" fill="#1B1917"/>
+</g>
+  <text x="330" y="190" font-family="Georgia, 'Times New Roman', serif" font-size="130" font-weight="700" fill="#1B1917">Prose
+    <tspan x="330" dy="101.4" font-size="31.2" letter-spacing="9.75" fill="#D6482B">T H E   K R O N K I T E   K E R N E L</tspan></text>
+</svg>

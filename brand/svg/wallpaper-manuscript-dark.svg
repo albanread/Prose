@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3840 2160">
+  <rect width="3840" height="2160" fill="#15130F"/>
+  <g><line x1="0" y1="220" x2="3840" y2="220" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="278" x2="3840" y2="278" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="336" x2="3840" y2="336" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="394" x2="3840" y2="394" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="452" x2="3840" y2="452" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="510" x2="3840" y2="510" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="568" x2="3840" y2="568" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="626" x2="3840" y2="626" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="684" x2="3840" y2="684" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="742" x2="3840" y2="742" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="800" x2="3840" y2="800" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="858" x2="3840" y2="858" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="916" x2="3840" y2="916" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="974" x2="3840" y2="974" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1032" x2="3840" y2="1032" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1090" x2="3840" y2="1090" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1148" x2="3840" y2="1148" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1206" x2="3840" y2="1206" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1264" x2="3840" y2="1264" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1322" x2="3840" y2="1322" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1380" x2="3840" y2="1380" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1438" x2="3840" y2="1438" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1496" x2="3840" y2="1496" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1554" x2="3840" y2="1554" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1612" x2="3840" y2="1612" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1670" x2="3840" y2="1670" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1728" x2="3840" y2="1728" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1786" x2="3840" y2="1786" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1844" x2="3840" y2="1844" stroke="rgba(245,239,227,0.07)" stroke-width="2"/><line x1="0" y1="1902" x2="3840" y2="1902" stroke="rgba(245,239,227,0.07)" stroke-width="2"/></g>
+  <g transform="translate(2230,420) scale(5.375)" opacity="0.055">
+  <defs><clipPath id="leftHalf"><rect x="0" y="0" width="146.5" height="240"/></clipPath></defs>
+  <g clip-path="url(#leftHalf)">
+    <path fill-rule="evenodd" fill="#F5EFE3"
+          d="M146,107 m-57,0 a57,57 0 1,0 114,0 a57,57 0 1,0 -114,0
+             M146,107 m-27,0 a27,27 0 1,0 54,0 a27,27 0 1,0 -54,0"/>
+  </g>
+  <rect x="118" y="50" width="28" height="170" rx="14" fill="#F5EFE3"/>
+</g>
+  
+  <path d="M 620 1480 C 640 1330, 1180 1320, 1210 1470 C 1235 1600, 700 1640, 640 1560"
+        fill="none" stroke="#D6482B" stroke-width="14" stroke-linecap="round"/>
+  <path d="M 1310 1580 C 1420 1500, 1560 1500, 1650 1560" fill="none"
+        stroke="#D6482B" stroke-width="14" stroke-linecap="round"/>
+  <text x="240" y="1930" font-family="Georgia, serif" font-size="74" fill="#F5EFE3"
+        opacity="0.9">Prose&#182;<tspan font-size="52" opacity="0.6"
+        >   ·   the Kronkite kernel</tspan></text>
+  <text x="3560" y="330" font-family="Georgia, serif" font-size="88"
+        fill="#F5EFE3" opacity="0.5">&#8252;</text>
+</svg>
