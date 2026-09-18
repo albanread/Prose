@@ -1,0 +1,679 @@
+From 87dc845f9fe68665218caaf96cfaf762d32414d7 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 22:17:00 +0100
+Subject: [PATCH] HostFS: fixes from review -- no panic, no lost or resurrected
+ data
+
+- A file that changed on the host is no longer invalidated from lookups
+  and directory reads (whose vnode may be dying: the file cache could be
+  freed under us). They only mark the node stale; open, read and stat,
+  which hold the vnode, drop the pages. When pages are mapped -- a program
+  run from the share and rebuilt on the Mac -- file_cache_disable() fails
+  and the node stays stale; this used to panic on the unbalanced
+  file_cache_enable(). The refresh reads the host's size after its own
+  write-back, and holds a new refreshLock throughout, so no space is
+  reserved or truncated meanwhile.
+- A per-node size lock: write-back holds it shared, size changes
+  exclusively. Appends and growth reserve their range under it and only
+  ever grow the size, so two writers extending a file no longer shrink
+  each other's range (lost appends). Truncation asks the host first and
+  then shrinks the cache, so a failed request loses nothing and no write
+  from before the truncation reaches the host after it; negative sizes are
+  refused.
+- close() re-stamps the host's attributes only for the last writer and
+  only if the size matches; otherwise the file is stale (a host change
+  during a write session was absorbed before).
+- get_vnode_name() copies the name under the volume lock; a rename onto
+  the same node (a case-only rename on APFS) goes to the host instead of
+  returning early; directory entries whose names Haiku cannot hold are
+  skipped (their lookups forgotten) instead of ending the listing; a late
+  failure in create() releases the handle and removes the file; reclaimed
+  nodes release a handle they still hold; get_vnode() no longer looks up
+  node IDs whose lookups were already returned; rename_attr() onto itself
+  is a no-op.
+- virtio_fs: any address that is not a kernel address goes through
+  user_memcpy() (a NULL ioctl buffer faulted the kernel); a request whose
+  completion is late drains its queue itself every 20 ms -- the bus
+  manager re-enables a queue's interrupt without looking at the ring again,
+  so a completion can come without one.
+
+Verified: private_workspace/hostfs-hard.sh (running program rewritten on
+the Mac, two appenders, truncate after a big write) three times, and
+hostfs-test.sh.
+---
+ .../disk/virtual/virtio_fs/virtio_fs.cpp      |  27 +-
+ .../kernel/file_systems/hostfs/Volume.cpp     |   9 +
+ .../kernel/file_systems/hostfs/attributes.cpp |   8 +-
+ .../kernel/file_systems/hostfs/hostfs.h       |  14 +-
+ .../file_systems/hostfs/kernel_interface.cpp  | 262 ++++++++++++------
+ 5 files changed, 222 insertions(+), 98 deletions(-)
+
+diff --git a/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp b/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp
+index b8f4b3b6e7..ff3162e3b0 100644
+--- a/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp
++++ b/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp
+@@ -147,12 +147,16 @@ virtio_fs_request_callback(void* driverCookie, void* cookie)
+ }
+ 
+ 
++/*!	Copies between kernel buffers and the caller's: anything that is not a
++	kernel address (user memory, or garbage such as NULL from an ioctl) goes
++	through user_memcpy(), which fails cleanly instead of faulting.
++*/
+ static status_t
+ copy_between(void* to, const void* from, size_t size)
+ {
+ 	if (size == 0)
+ 		return B_OK;
+-	if (IS_USER_ADDRESS(to) || IS_USER_ADDRESS(from))
++	if (!IS_KERNEL_ADDRESS(to) || !IS_KERNEL_ADDRESS(from))
+ 		return user_memcpy(to, from, size);
+ 	memcpy(to, from, size);
+ 	return B_OK;
+@@ -201,7 +205,7 @@ virtio_fs_do_request(void* cookie, virtio_fs_request* request)
+ 	const bool hiprio = request->out == NULL;
+ 
+ 	// headers live in the kernel; only the payloads may be in the calling team
+-	if (IS_USER_ADDRESS(request->in) || (!hiprio && IS_USER_ADDRESS(request->out)))
++	if (!IS_KERNEL_ADDRESS(request->in) || (!hiprio && !IS_KERNEL_ADDRESS(request->out)))
+ 		return B_BAD_ADDRESS;
+ 	if (request->in_size < sizeof(fuse_in_prefix) || request->in_size > SLOT_IN_SIZE
+ 		|| request->in_data_size > SLOT_DATA_SIZE
+@@ -261,14 +265,23 @@ virtio_fs_do_request(void* cookie, virtio_fs_request* request)
+ 
+ 	// The device owns the slot's buffers until it completes the request, so
+ 	// the wait is not interruptible. A slow host is reported, not abandoned.
+-	bigtime_t start = system_time();
+-	while (entry.Wait(B_RELATIVE_TIMEOUT, 10000000) == B_TIMED_OUT
++	// The bus manager re-enables the queue's interrupt without looking at the
++	// ring again, so a completion can arrive without one: a wait that takes
++	// long drains the queue itself.
++	const bigtime_t start = system_time();
++	bigtime_t nextReport = start + 10000000;
++	virtio_queue queue = hiprio ? info->hiprioQueue : info->requestQueue;
++	while (entry.Wait(B_RELATIVE_TIMEOUT, 20000) == B_TIMED_OUT
+ 		&& atomic_get(&slot->completed) == 0) {
+-		ERROR("opcode %" B_PRIu32 " unique %" B_PRIu64 " still waiting after %" B_PRId64
+-			" s\n", opcode, unique, (system_time() - start) / 1000000);
+ 		slot->completion.Add(&entry);
++		virtio_fs_queue_callback(info, queue);
+ 		if (atomic_get(&slot->completed) != 0)
+ 			break;
++		if (system_time() >= nextReport) {
++			ERROR("opcode %" B_PRIu32 " unique %" B_PRIu64 " still waiting after %" B_PRId64
++				" s\n", opcode, unique, (system_time() - start) / 1000000);
++			nextReport += 10000000;
++		}
+ 	}
+ 	atomic_add(&info->requests, 1);
+ 
+@@ -621,7 +634,7 @@ virtio_fs_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 			return B_OK;
+ 
+ 		case B_GET_ICON_NAME:
+-			if (IS_USER_ADDRESS(buffer))
++			if (!IS_KERNEL_ADDRESS(buffer))
+ 				return user_strlcpy((char*)buffer, "devices/drive-harddisk", B_FILE_NAME_LENGTH);
+ 			strlcpy((char*)buffer, "devices/drive-harddisk", B_FILE_NAME_LENGTH);
+ 			return B_OK;
+diff --git a/src/add-ons/kernel/file_systems/hostfs/Volume.cpp b/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
+index d351c9de53..e59b4e6b3a 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
++++ b/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
+@@ -129,6 +129,7 @@ Node::Node(Volume* volume, uint64 nodeid, const fuse_attr& attr)
+ 	attr(attr),
+ 	attrTime(system_time()),
+ 	size(attr.size),
++	stale(false),
+ 	stampMtime(attr.mtime),
+ 	stampMtimeNsec(attr.mtimensec),
+ 	stampSize(attr.size),
+@@ -140,6 +141,8 @@ Node::Node(Volume* volume, uint64 nodeid, const fuse_attr& attr)
+ 	fhUsers(0),
+ 	staleFhCount(0)
+ {
++	mutex_init(&refreshLock, "hostfs node refresh");
++	rw_lock_init(&sizeLock, "hostfs node size");
+ 	mutex_init(&lock, "hostfs node");
+ }
+ 
+@@ -147,6 +150,8 @@ Node::Node(Volume* volume, uint64 nodeid, const fuse_attr& attr)
+ Node::~Node()
+ {
+ 	mutex_destroy(&lock);
++	rw_lock_destroy(&sizeLock);
++	mutex_destroy(&refreshLock);
+ 	free(name);
+ }
+ 
+@@ -703,6 +708,10 @@ Volume::_Reclaim(Node* reclaimList)
+ 	while (reclaimList != NULL) {
+ 		Node* node = reclaimList;
+ 		reclaimList = node->hashLink;
++		if (node->fhMode != -1) {
++			// nothing uses the node, so no request is using its handle
++			Release(node->nodeid, false, node->fh);
++		}
+ 		if (node->lookups > 0)
+ 			Forget(node->nodeid, node->lookups);
+ 		delete node;
+diff --git a/src/add-ons/kernel/file_systems/hostfs/attributes.cpp b/src/add-ons/kernel/file_systems/hostfs/attributes.cpp
+index 8862293eba..8c06d095e7 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/attributes.cpp
++++ b/src/add-ons/kernel/file_systems/hostfs/attributes.cpp
+@@ -73,10 +73,12 @@ get_node(fs_vnode* vnode)
+ }
+ 
+ 
++// Anything that is not a kernel address (user memory, or garbage such as
++// NULL) goes through user_memcpy(), which fails cleanly instead of faulting.
+ static status_t
+ copy_out(void* to, const void* from, size_t size)
+ {
+-	if (IS_USER_ADDRESS(to))
++	if (!IS_KERNEL_ADDRESS(to))
+ 		return user_memcpy(to, from, size);
+ 	memcpy(to, from, size);
+ 	return B_OK;
+@@ -86,7 +88,7 @@ copy_out(void* to, const void* from, size_t size)
+ static status_t
+ copy_in(void* to, const void* from, size_t size)
+ {
+-	if (IS_USER_ADDRESS(from))
++	if (!IS_KERNEL_ADDRESS(from))
+ 		return user_memcpy(to, from, size);
+ 	memcpy(to, from, size);
+ 	return B_OK;
+@@ -710,6 +712,8 @@ hostfs_rename_attr(fs_volume* _volume, fs_vnode* _fromNode, const char* fromName
+ 		return B_READ_ONLY_DEVICE;
+ 	if (!volume->SupportsXattrs())
+ 		return B_NOT_SUPPORTED;
++	if (fromNode == toNode && strcmp(fromName, toName) == 0)
++		return B_OK;
+ 
+ 	uint32 type;
+ 	uint8* data;
+diff --git a/src/add-ons/kernel/file_systems/hostfs/hostfs.h b/src/add-ons/kernel/file_systems/hostfs/hostfs.h
+index 7ba3b355b6..4e2b491955 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/hostfs.h
++++ b/src/add-ons/kernel/file_systems/hostfs/hostfs.h
+@@ -90,11 +90,23 @@ struct Node {
+ 			bool				idle;		// in the idle list
+ 			DoublyLinkedListLink<Node> idleLink;
+ 
++	// Dropping a stale cache holds this throughout; reserving space (write)
++	// and truncating take it first, so no size change starts meanwhile.
++	// Page I/O never takes it. Taken before sizeLock.
++			mutex				refreshLock;
++	// Size changes (truncation, growth, dropping a stale cache) hold this
++	// exclusively; page write-back holds it shared, so no write can reach the
++	// host while its size changes. Taken before lock.
++			rw_lock				sizeLock;
++
+ 	// guarded by lock
+ 			mutex				lock;
+ 			fuse_attr			attr;
+ 			bigtime_t			attrTime;
+-			off_t				size;		// the file cache's idea of the size
++			off_t				size;		// the file cache's idea of the size;
++											// changes need sizeLock as well
++			bool				stale;		// changed on the host; the cached
++											// pages must go
+ 			uint64				stampMtime;	// the host attributes the cached
+ 			uint32				stampMtimeNsec;	// pages belong to
+ 			uint64				stampSize;
+diff --git a/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp b/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp
+index 389ee63214..696b322196 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp
++++ b/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp
+@@ -62,34 +62,29 @@ is_writable(int openMode)
+ 
+ 
+ /*!	Takes attributes the host just sent. Must be called with the node lock
+-	held. Returns whether the file changed on the host since its pages were
+-	cached; the caller then drops them with invalidate_cache(), without the
+-	lock.
++	held. If the file changed on the host since its pages were cached (and no
++	one here is writing it), the node is marked stale; node_refresh_cache()
++	drops the pages later, from a hook that holds the vnode.
+ */
+-static bool
+-node_take_attr(Node* node, const fuse_attr& attr, off_t* _size)
++static void
++node_take_attr(Node* node, const fuse_attr& attr)
+ {
+ 	node->attr = attr;
+ 	node->attrTime = system_time();
+ 	if (!node->IsFile() || node->writers > 0) {
+ 		// open writers own the file's size until they close it
+-		return false;
++		return;
+ 	}
+ 	if (attr.mtime == node->stampMtime && attr.mtimensec == node->stampMtimeNsec
+ 		&& attr.size == node->stampSize) {
+-		return false;
++		return;
+ 	}
+-	node->stampMtime = attr.mtime;
+-	node->stampMtimeNsec = attr.mtimensec;
+-	node->stampSize = attr.size;
+-	node->size = attr.size;
+-	*_size = attr.size;
+-	return true;
++	node->stale = true;
+ }
+ 
+ 
+ /*!	The cached attributes describe the file as it is now (we just changed it
+-	ourselves): the cached pages still belong to it.
++	ourselves): the cached pages still belong to it. Node lock held.
+ */
+ static void
+ node_set_stamp(Node* node, const fuse_attr& attr)
+@@ -99,19 +94,68 @@ node_set_stamp(Node* node, const fuse_attr& attr)
+ 	node->stampMtime = attr.mtime;
+ 	node->stampMtimeNsec = attr.mtimensec;
+ 	node->stampSize = attr.size;
++	node->stale = false;
+ }
+ 
+ 
++/*!	Drops the cached pages of a file that changed on the host. Only call it
++	from a hook on the node's own vnode: its file cache must stay alive.
++	Only while no one here has the file open for writing: local writers own
++	the file until they close it. Pages that are mapped cannot be dropped (a
++	running program from the host, rebuilt there); the node then stays stale
++	and a later call tries again.
++*/
+ static void
+-invalidate_cache(Volume* volume, Node* node, off_t size)
++node_refresh_cache(Volume* volume, Node* node)
+ {
+-	TRACE("node %" B_PRIu64 " changed on the host, dropping its cache (size %" B_PRIdOFF
+-		")\n", node->nodeid, size);
++	{
++		MutexLocker locker(node->lock);
++		if (!node->stale || node->writers > 0)
++			return;
++	}
++
++	// No space is reserved and nothing truncated while the pages go: a writer
++	// that opens meanwhile waits in write() until this is done.
++	MutexLocker refreshLocker(node->refreshLock);
++	{
++		MutexLocker locker(node->lock);
++		if (!node->stale || node->writers > 0)
++			return;
++	}
++
+ 	if (node->fileCache != NULL) {
+-		file_cache_disable(node->fileCache);
+-		file_cache_set_size(node->fileCache, size);
+-		file_cache_enable(node->fileCache);
++		// writes back what is dirty (page I/O takes only the size lock,
++		// shared), then evicts every page
++		status_t status = file_cache_disable(node->fileCache);
++		if (status != B_OK) {
++			TRACE("node %" B_PRIu64 " changed on the host but its pages are in use (%s)\n",
++				node->nodeid, strerror(status));
++			return;
++		}
++	}
++
++	// the host's size now, after that write-back
++	fuse_attr attr;
++	status_t status = volume->GetAttr(node->nodeid, &attr);
++
++	off_t size;
++	{
++		WriteLocker sizeLocker(node->sizeLock);
++		{
++			MutexLocker locker(node->lock);
++			if (status == B_OK)
++				node_set_stamp(node, attr);
++			size = node->attr.size;
++			node->size = size;
++		}
++		if (node->fileCache != NULL)
++			file_cache_set_size(node->fileCache, size);
+ 	}
++	if (node->fileCache != NULL)
++		file_cache_enable(node->fileCache);
++
++	TRACE("node %" B_PRIu64 " changed on the host, cache dropped (size %" B_PRIdOFF ")\n",
++		node->nodeid, size);
+ 	notify_stat_changed(volume->ID(), volume->ParentOf(node), node->nodeid,
+ 		B_STAT_SIZE | B_STAT_MODIFICATION_TIME);
+ }
+@@ -134,37 +178,37 @@ node_removed(Volume* volume, Node* node)
+ }
+ 
+ 
++/*!	New attributes from a lookup or a directory read. Safe for any node: it
++	only records them (see node_take_attr()).
++*/
+ static void
+ node_update(Volume* volume, Node* node, const fuse_attr& attr)
+ {
+-	off_t size;
+-	bool invalidate;
+-	{
+-		MutexLocker locker(node->lock);
+-		invalidate = node_take_attr(node, attr, &size);
+-	}
+-	if (invalidate)
+-		invalidate_cache(volume, node, size);
++	MutexLocker locker(node->lock);
++	node_take_attr(node, attr);
+ }
+ 
+ 
+ /*!	Asks the host for the node's attributes when the cached ones are older
+-	than HOSTFS_ATTR_TIMEOUT, or always if \a force.
++	than HOSTFS_ATTR_TIMEOUT, or always if \a force, and drops the file's
++	cached pages if it changed. For hooks on the node's own vnode only.
+ */
+ static status_t
+ node_revalidate(Volume* volume, Node* node, bool force)
+ {
+-	if (!force) {
++	bool fresh;
++	{
+ 		MutexLocker locker(node->lock);
+-		if (system_time() - node->attrTime < HOSTFS_ATTR_TIMEOUT)
+-			return B_OK;
++		fresh = !force && system_time() - node->attrTime < HOSTFS_ATTR_TIMEOUT;
+ 	}
+-
+-	fuse_attr attr;
+-	status_t status = volume->GetAttr(node->nodeid, &attr);
+-	if (status != B_OK)
+-		return status;
+-	node_update(volume, node, attr);
++	if (!fresh) {
++		fuse_attr attr;
++		status_t status = volume->GetAttr(node->nodeid, &attr);
++		if (status != B_OK)
++			return status;
++		node_update(volume, node, attr);
++	}
++	node_refresh_cache(volume, node);
+ 	return B_OK;
+ }
+ 
+@@ -245,18 +289,19 @@ node_put_fh(Volume* volume, Node* node)
+ }
+ 
+ 
++/*!	Truncates or extends the file on the host, then the cache. Holding the
++	size lock keeps page write-back away meanwhile: nothing written before the
++	truncation can land after it, and a failed request leaves the cache as it
++	was.
++*/
+ static status_t
+ node_set_size(Volume* volume, Node* node, off_t size)
+ {
+-	off_t oldSize;
+-	{
+-		MutexLocker locker(node->lock);
+-		oldSize = node->size;
+-	}
+-	// shrink the cache first, so that no page beyond the new end is written
+-	// back afterwards
+-	if (size < oldSize && node->fileCache != NULL)
+-		file_cache_set_size(node->fileCache, size);
++	if (size < 0)
++		return B_BAD_VALUE;
++
++	MutexLocker refreshLocker(node->refreshLock);
++	WriteLocker sizeLocker(node->sizeLock);
+ 
+ 	fuse_setattr_in in = {};
+ 	in.valid = FATTR_SIZE;
+@@ -264,19 +309,19 @@ node_set_size(Volume* volume, Node* node, off_t size)
+ 	fuse_attr_out out;
+ 	status_t status = volume->Request(FUSE_SETATTR, node->nodeid, &in, sizeof(in), NULL,
+ 		NULL, NULL, 0, &out, sizeof(out));
+-	if (status != B_OK) {
+-		if (size < oldSize && node->fileCache != NULL)
+-			file_cache_set_size(node->fileCache, oldSize);
++	if (status != B_OK)
+ 		return status;
+-	}
+ 
+ 	{
+ 		MutexLocker locker(node->lock);
+ 		node->size = size;
+ 		node_set_stamp(node, out.attr);
+ 	}
+-	if (size > oldSize && node->fileCache != NULL)
++	// Dirty pages past the new end are dropped, not written; pages being
++	// written back right now wait for the size lock and then see the new size.
++	if (node->fileCache != NULL)
+ 		file_cache_set_size(node->fileCache, size);
++	sizeLocker.Unlock();
+ 
+ 	notify_stat_changed(volume->ID(), volume->ParentOf(node), node->nodeid,
+ 		B_STAT_SIZE | B_STAT_MODIFICATION_TIME);
+@@ -436,23 +481,11 @@ hostfs_get_vnode(fs_volume* _volume, ino_t id, fs_vnode* _node, int* _type,
+ {
+ 	Volume* volume = get_volume(_volume);
+ 
++	// Only node IDs the host has handed out and not been told to forget are
++	// valid; anything else (an old node_ref) is gone.
+ 	Node* node = volume->AcquireNode(id);
+-	if (node == NULL) {
+-		// Not in the table (asked for by ID, e.g. a node_ref): the host may
+-		// still know it.
+-		if ((volume->InitFlags() & FUSE_EXPORT_SUPPORT) == 0)
+-			return B_ENTRY_NOT_FOUND;
+-		fuse_entry_out entry;
+-		if (volume->Lookup(id, ".", &entry) != B_OK)
+-			return B_ENTRY_NOT_FOUND;
+-		if (entry.nodeid != (uint64)id) {
+-			volume->Forget(entry.nodeid, 1);
+-			return B_ENTRY_NOT_FOUND;
+-		}
+-		node = volume->AcquireEntry(entry, 0, NULL);
+-		if (node == NULL)
+-			return B_NO_MEMORY;
+-	}
++	if (node == NULL)
++		return B_ENTRY_NOT_FOUND;
+ 
+ 	if (node->IsFile() && node->fileCache == NULL) {
+ 		off_t size;
+@@ -520,11 +553,12 @@ static status_t
+ hostfs_get_vnode_name(fs_volume* _volume, fs_vnode* _node, char* buffer,
+ 	size_t bufferSize)
+ {
++	Volume* volume = get_volume(_volume);
+ 	Node* node = get_node(_node);
+-	if (node->name == NULL)
++	char name[B_FILE_NAME_LENGTH];
++	if (!volume->GetName(node, name, sizeof(name)))
+ 		return B_ENTRY_NOT_FOUND;
+-	// the name only changes under the volume lock, but a stale copy is fine
+-	if (strlcpy(buffer, node->name, bufferSize) >= bufferSize)
++	if (strlcpy(buffer, name, bufferSize) >= bufferSize)
+ 		return B_BUFFER_OVERFLOW;
+ 	return B_OK;
+ }
+@@ -636,7 +670,9 @@ hostfs_write_pages(fs_volume* _volume, fs_vnode* _node, void* _cookie, off_t pos
+ 	if (volume->IsReadOnly())
+ 		return B_READ_ONLY_DEVICE;
+ 
+-	// whole pages come in; only what is inside the file goes out
++	// Whole pages come in; only what is inside the file goes out. The size
++	// lock keeps the size from changing (truncation) until the data is out.
++	ReadLocker sizeLocker(node->sizeLock);
+ 	off_t size;
+ 	{
+ 		MutexLocker locker(node->lock);
+@@ -733,7 +769,7 @@ hostfs_read_symlink(fs_volume* _volume, fs_vnode* _node, char* buffer,
+ 		return status;
+ 
+ 	size_t toCopy = min_c(length, *_bufferSize);
+-	if (IS_USER_ADDRESS(buffer)) {
++	if (!IS_KERNEL_ADDRESS(buffer)) {
+ 		if (user_memcpy(buffer, target, toCopy) != B_OK)
+ 			return B_BAD_ADDRESS;
+ 	} else
+@@ -872,10 +908,11 @@ hostfs_rename(fs_volume* _volume, fs_vnode* _fromDir, const char* fromName,
+ 	if (volume->Lookup(toDir->nodeid, toName, &replacedEntry) == B_OK) {
+ 		replaced = volume->AcquireEntry(replacedEntry, toDir->nodeid, toName);
+ 		if (replaced == node) {
+-			// both names are the same node: nothing to do
++			// The target is this node: another hard link, or the same entry
++			// under a name that differs only in case or normalization (APFS).
++			// The host knows which; nothing is replaced either way.
+ 			volume->Unpend(replaced);
+-			volume->Unpend(node);
+-			return B_OK;
++			replaced = NULL;
+ 		}
+ 	}
+ 
+@@ -1073,12 +1110,23 @@ hostfs_create(fs_volume* _volume, fs_vnode* _dir, const char* name, int openMode
+ 	void* privateNode;
+ 	status = get_vnode(volume->FSVolume(), node->nodeid, &privateNode);
+ 	if (status != B_OK) {
++		// give the handle back and take the new file away again
++		uint64 fh = 0;
++		bool release = false;
+ 		{
+ 			MutexLocker locker(node->lock);
+ 			node->opens--;
+ 			if (is_writable(openMode))
+ 				node->writers--;
++			if (node->opens == 0 && node->fhUsers == 0 && node->fhMode != -1) {
++				fh = node->fh;
++				node->fhMode = -1;
++				release = true;
++			}
+ 		}
++		if (release)
++			volume->Release(node->nodeid, false, fh);
++		volume->Request(FUSE_UNLINK, dir->nodeid, NULL, 0, name, NULL, NULL, 0, NULL, 0);
+ 		volume->Unpend(node);
+ 		return status;
+ 	}
+@@ -1184,12 +1232,23 @@ hostfs_close(fs_volume* _volume, fs_vnode* _node, void* _cookie)
+ 		node_put_fh(volume, node);
+ 	}
+ 
+-	// the write-back moved the host's modification time: the cached pages
+-	// still belong to the file
++	// The write-back moved the host's modification time, so the cached pages
++	// still belong to the file -- unless its size says someone on the host
++	// changed it meanwhile: then it is stale, and the next open drops them.
++	// Only the last writer can tell: while others still write here, the
++	// host's size lags behind theirs.
+ 	fuse_attr attr;
+ 	if (volume->GetAttr(node->nodeid, &attr) == B_OK) {
+ 		MutexLocker locker(node->lock);
+-		node_set_stamp(node, attr);
++		if (node->writers == 1) {
++			if ((off_t)attr.size == node->size)
++				node_set_stamp(node, attr);
++			else {
++				node->attr = attr;
++				node->attrTime = system_time();
++				node->stale = true;
++			}
++		}
+ 	}
+ 
+ 	notify_stat_changed(volume->ID(), volume->ParentOf(node), node->nodeid,
+@@ -1268,20 +1327,30 @@ hostfs_write(fs_volume* _volume, fs_vnode* _node, void* _cookie, off_t pos,
+ 	if (*_length == 0)
+ 		return B_OK;
+ 
++	// Reserve the range: appends and growth are serialized with every other
++	// size change, and the size only ever grows here.
+ 	off_t end;
+ 	bool grow = false;
+ 	{
+-		MutexLocker locker(node->lock);
++		MutexLocker refreshLocker(node->refreshLock);
++		WriteLocker sizeLocker(node->sizeLock);
++		off_t size;
++		{
++			MutexLocker locker(node->lock);
++			size = node->size;
++		}
+ 		if ((cookie->openMode & O_APPEND) != 0)
+-			pos = node->size;
++			pos = size;
+ 		end = pos + *_length;
+-		if (end > node->size) {
+-			node->size = end;
++		if (end > size) {
++			{
++				MutexLocker locker(node->lock);
++				node->size = end;
++			}
++			file_cache_set_size(node->fileCache, end);
+ 			grow = true;
+ 		}
+ 	}
+-	if (grow)
+-		file_cache_set_size(node->fileCache, end);
+ 
+ 	status_t status = file_cache_write(node->fileCache, cookie, pos, buffer, _length);
+ 
+@@ -1403,10 +1472,8 @@ for_each_dir_record(const uint8* buffer, size_t length, size_t& position, bool p
+ 				return false;
+ 			recordSize = FUSE_DIRENT_SIZE(entry);
+ 		}
+-		if (position + recordSize > length || entry->namelen == 0
+-			|| entry->namelen >= B_FILE_NAME_LENGTH) {
++		if (position + recordSize > length)
+ 			return false;
+-		}
+ 		if (!callback(entry, lookup, recordSize))
+ 			return true;
+ 		position += recordSize;
+@@ -1415,6 +1482,16 @@ for_each_dir_record(const uint8* buffer, size_t length, size_t& position, bool p
+ }
+ 
+ 
++/*!	Names Haiku cannot hold (APFS allows 255 bytes, so this should not
++	happen) are skipped, not fatal.
++*/
++static inline bool
++is_usable_name(const fuse_dirent* entry)
++{
++	return entry->namelen > 0 && entry->namelen < B_FILE_NAME_LENGTH;
++}
++
++
+ static inline bool
+ is_dot_or_dotdot(const fuse_dirent* entry)
+ {
+@@ -1461,6 +1538,11 @@ dir_fetch(Volume* volume, Node* dir, DirCookie* cookie)
+ 			[&](const fuse_dirent* entry, const fuse_entry_out* lookup, size_t) {
+ 				if (lookup == NULL || is_dot_or_dotdot(entry))
+ 					return true;
++				if (!is_usable_name(entry)) {
++					// never shown, so give the host its lookup back now
++					volume->Forget(lookup->nodeid, 1);
++					return true;
++				}
+ 				char name[B_FILE_NAME_LENGTH];
+ 				memcpy(name, entry->name, entry->namelen);
+ 				name[entry->namelen] = '\0';
+@@ -1509,6 +1591,10 @@ hostfs_read_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie,
+ 			[&](const fuse_dirent* entry, const fuse_entry_out* lookup, size_t) {
+ 				if (count >= maxCount)
+ 					return false;
++				if (!is_usable_name(entry)) {
++					cookie->offset = entry->off;
++					return true;
++				}
+ 				const size_t recordLength = ROUNDUP(offsetof(struct dirent, d_name)
+ 					+ entry->namelen + 1, 8);
+ 				if (recordLength > space) {
+-- 
+2.54.0 (Apple Git-157)
+
