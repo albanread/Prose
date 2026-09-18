@@ -86,13 +86,14 @@ def main() -> None:
         "# Prose packages — catalog of Haiku-native software",
         "",
         "The [HaikuArchives](https://github.com/haikuarchives) collection"
-        " (auto-indexed via `make_catalog.py`; 285 repos as of 2026-09-18).",
+        f" (auto-indexed via `make_catalog.py`: {len(repos)} repos in `data/`,"
+        f" {sum(len(v) for k, v in cats.items() if k != 'foreign')} listed here).",
         "Criteria: native Be/Haiku API C++ only — no GTK/Qt/wx ports.",
         "Codecs and POSIX/shell software are in scope.",
         "",
         "Batch 1 = curated first wave to clone, cross-build (arm64) and"
-        " install into the Prose image. Build/install pipeline:"
-        " `scripts/pkg-build.sh`, `scripts/pkg-install.sh` (see §Pipeline).",
+        " install into the Prose image. Most have haikuports recipes, which"
+        " `scripts/prosepkg build <port>` builds (see README.md).",
         "",
     ]
     for cat in ["editors-and-ides", "graphics-and-media", "utilities",
