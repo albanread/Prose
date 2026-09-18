@@ -10,3 +10,9 @@ src
 build/
 work/
 __pycache__/
+
+# Prose packages: heavy trees live on the case-sensitive volume
+packages/src
+packages/sysroot-arm64
+packages/out
+packages/bin
