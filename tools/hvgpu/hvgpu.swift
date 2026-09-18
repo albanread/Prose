@@ -26,7 +26,8 @@ setvbuf(stdout, nil, _IONBF, 0)
 
 let args = CommandLine.arguments
 func option(_ name: String) -> String? {
-    guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
+    // The last occurrence wins, so wrappers can put defaults first.
+    guard let i = args.lastIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
 guard args.count >= 2, !args[1].hasPrefix("--") else {
