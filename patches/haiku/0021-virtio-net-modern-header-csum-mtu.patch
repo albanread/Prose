@@ -1,0 +1,239 @@
+From d0c6da6caaf8eac8c6245cb24778d5ac1ca4e065 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 17:26:25 +0100
+Subject: [PATCH] virtio_net: work on modern devices (12-byte header, CSUM),
+ MTU frame size
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Networking under Virtualization.framework never got a DHCP lease. Two
+causes, both also latent on QEMU now that transitional devices are
+driven through the modern interface:
+
+1. The driver used the 10-byte legacy virtio_net_hdr for every RX and TX
+   descriptor. With VIRTIO_F_VERSION_1 negotiated the header is
+   virtio_net_hdr_v1 — num_buffers is always present — so received frames
+   started 2 bytes late and transmitted frames lost their first 2 bytes.
+   The header size now follows the negotiated features.
+
+2. Apple's virtio-net refuses FEATURES_OK for any set that lacks
+   VIRTIO_NET_F_CSUM, and the driver ignored negotiate_features()'s error
+   and carried on with no features at all: a device left in the FAILED
+   state, no MAC (ifconfig showed "Address: none"), no MTU. The driver now
+   asks for CSUM (it never sends partial checksums, so nothing changes on
+   the wire), checks the result, and the bus manager logs a rejection and
+   retries with everything the device offers, then the bare transport,
+   resetting the device between attempts.
+
+Also: the device MTU was stored as the frame size, so a 1500-byte MTU
+showed as 1486 in ifconfig; the Ethernet header is added back.
+
+Verified on VZ (NAT): DHCP lease in the first second, gateway 0.2 ms,
+1.1.1.1 ~29 ms, DNS, 1400-byte pings, MTU 1500, 0 % loss.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../bus_managers/virtio/VirtioDevice.cpp      | 58 +++++++++++++------
+ .../network/ether/virtio/virtio_net.cpp       | 43 ++++++++++----
+ 2 files changed, 72 insertions(+), 29 deletions(-)
+
+diff --git a/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp b/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
+index 975614859c..a87cec3386 100644
+--- a/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
++++ b/src/add-ons/kernel/bus_managers/virtio/VirtioDevice.cpp
+@@ -123,33 +123,57 @@ VirtioDevice::NegotiateFeatures(uint64 supported, uint64* negotiated,
+ 		supported &= ~VIRTIO_FEATURE_NOTIFY_ON_EMPTY;
+ 	}
+ 
++	const uint64 hostFeatures = fFeatures;
+ 	fFeatures &= supported;
+ 
+ 	// filter our own features
+-	fFeatures &= (VIRTIO_FEATURE_TRANSPORT_MASK
++	const uint64 knownMask = VIRTIO_FEATURE_TRANSPORT_MASK
+ 		| VIRTIO_FEATURE_RING_INDIRECT_DESC | VIRTIO_FEATURE_RING_EVENT_IDX
+-		| VIRTIO_FEATURE_VERSION_1);
++		| VIRTIO_FEATURE_VERSION_1;
++	fFeatures &= knownMask;
+ 
+ 	_DumpFeatures("negotiated features", fFeatures, get_feature_name);
+ 
+-	status = fController->write_guest_features(fCookie, fFeatures);
+-	if (status != B_OK)
+-		return status;
+-
+-	if (fVirtio1) {
+-		fController->set_status(fCookie, VIRTIO_CONFIG_STATUS_FEATURES_OK);
+-		if ((fController->get_status(fCookie) & VIRTIO_CONFIG_STATUS_FEATURES_OK) == 0) {
+-			fController->set_status(fCookie, VIRTIO_CONFIG_STATUS_FAILED);
+-			return B_BAD_VALUE;
++	if (!fVirtio1)
++		return fController->write_guest_features(fCookie, fFeatures);
++
++	// A modern device may refuse a subset (Apple's Virtualization.framework
++	// virtio-net refuses any set without VIRTIO_NET_F_CSUM). Rather than fail
++	// outright, retry with everything the device offers that we understand,
++	// then with the bare transport, resetting the device between attempts,
++	// and say so: the driver sees what it actually got.
++	const uint64 candidates[] = {
++		fFeatures,
++		hostFeatures & knownMask,
++		VIRTIO_FEATURE_VERSION_1,
++	};
++	for (uint32 i = 0; i < B_COUNT_OF(candidates); i++) {
++		uint64 features = candidates[i];
++		if (i > 0 && features == candidates[i - 1])
++			continue;
++		if (i > 0) {
++			fController->set_status(fCookie, VIRTIO_CONFIG_STATUS_RESET);
++			fController->set_status(fCookie, VIRTIO_CONFIG_STATUS_ACK);
++			fController->set_status(fCookie, VIRTIO_CONFIG_STATUS_DRIVER);
+ 		}
+-		if ((fFeatures & VIRTIO_FEATURE_VERSION_1) == 0) {
+-			fController->set_status(fCookie, VIRTIO_CONFIG_STATUS_FAILED);
+-			return B_BAD_VALUE;
++		status = fController->write_guest_features(fCookie, features);
++		if (status != B_OK)
++			return status;
++		fController->set_status(fCookie, VIRTIO_CONFIG_STATUS_FEATURES_OK);
++		uint8 deviceStatus = fController->get_status(fCookie);
++		if ((deviceStatus & VIRTIO_CONFIG_STATUS_FEATURES_OK) != 0) {
++			if (features != fFeatures) {
++				fFeatures = features;
++				_DumpFeatures("features accepted on retry", fFeatures, get_feature_name);
++			}
++			*negotiated = fFeatures;
++			return B_OK;
+ 		}
++		dprintf("virtio: the device rejected features %#" B_PRIx64 " (status %#x)\n", features,
++			deviceStatus);
+ 	}
+-	*negotiated = fFeatures;
+-
+-	return B_OK;
++	fController->set_status(fCookie, VIRTIO_CONFIG_STATUS_FAILED);
++	return B_BAD_VALUE;
+ }
+ 
+ 
+diff --git a/src/add-ons/kernel/drivers/network/ether/virtio/virtio_net.cpp b/src/add-ons/kernel/drivers/network/ether/virtio/virtio_net.cpp
+index a647faf048..f57ec52866 100644
+--- a/src/add-ons/kernel/drivers/network/ether/virtio/virtio_net.cpp
++++ b/src/add-ons/kernel/drivers/network/ether/virtio/virtio_net.cpp
+@@ -64,6 +64,7 @@ typedef struct {
+ 	virtio_device_interface*	virtio;
+ 
+ 	uint64 					features;
++	size_t					hdrSize;	// 10 bytes (legacy) or 12 (VERSION_1 / MRG_RXBUF)
+ 
+ 	uint32					pairsCount;
+ 
+@@ -207,7 +208,7 @@ virtio_net_rx_enqueue_buf(virtio_net_driver_info* info, BufInfo* buf)
+ 	entries[0] = buf->hdrEntry;
+ 	entries[1] = buf->entry;
+ 
+-	memset(buf->hdr, 0, sizeof(struct virtio_net_hdr));
++	memset(buf->hdr, 0, info->hdrSize);
+ 
+ 	// queue the rx buffer
+ 	status_t status = info->virtio->queue_request_v(info->rxQueues[0],
+@@ -294,11 +295,28 @@ virtio_net_init_device(void* _info, void** _cookie)
+ 		(void**)&info->virtio_device);
+ 	sDeviceManager->put_node(parent);
+ 
+-	info->virtio->negotiate_features(info->virtio_device,
++	// VIRTIO_NET_F_CSUM only allows us to hand the device packets with a partial
++	// checksum (we never do: the header's flags stay 0), but Apple's
++	// Virtualization.framework virtio-net refuses FEATURES_OK without it.
++	status_t status = info->virtio->negotiate_features(info->virtio_device,
+ 		VIRTIO_NET_F_STATUS | VIRTIO_NET_F_MAC | VIRTIO_NET_F_MTU
+ 			| VIRTIO_NET_F_CTRL_VQ | VIRTIO_NET_F_CTRL_RX | VIRTIO_NET_F_GUEST_CSUM
+-			/* | VIRTIO_NET_F_MQ */,
++			| VIRTIO_NET_F_CSUM /* | VIRTIO_NET_F_MQ */,
+ 		&info->features, &get_feature_name);
++	if (status != B_OK) {
++		// Carrying on with no features means a device in the FAILED state and
++		// a MAC of zeros: nothing would ever go through.
++		ERROR("feature negotiation failed: %s\n", strerror(status));
++		return status;
++	}
++
++	// With VIRTIO_F_VERSION_1 (or MRG_RXBUF) the header is virtio_net_hdr_v1:
++	// num_buffers is always present, so every frame is 12 bytes in, not 10.
++	// Using the legacy size on a modern device misframes both directions.
++	info->hdrSize = (info->features & (VIRTIO_FEATURE_VERSION_1 | VIRTIO_NET_F_MRG_RXBUF)) != 0
++		? sizeof(struct virtio_net_hdr_v1) : sizeof(struct virtio_net_hdr);
++	dprintf("virtio_net: %s transport, %" B_PRIuSIZE "-byte packet header\n",
++		(info->features & VIRTIO_FEATURE_VERSION_1) != 0 ? "modern" : "legacy", info->hdrSize);
+ 
+ 	if ((info->features & VIRTIO_NET_F_MQ) != 0
+ 			&& (info->features & VIRTIO_NET_F_CTRL_VQ) != 0
+@@ -320,7 +338,7 @@ virtio_net_init_device(void* _info, void** _cookie)
+ 	if ((info->features & VIRTIO_NET_F_CTRL_VQ) != 0)
+ 		queueCount++;
+ 	::virtio_queue virtioQueues[queueCount];
+-	status_t status = info->virtio->alloc_queues(info->virtio_device, queueCount,
++	status = info->virtio->alloc_queues(info->virtio_device, queueCount,
+ 		virtioQueues, NULL);
+ 	if (status != B_OK) {
+ 		ERROR("queue allocation failed (%s)\n", strerror(status));
+@@ -385,7 +403,7 @@ virtio_net_init_device(void* _info, void** _cookie)
+ 		if (status != B_OK)
+ 			goto err4;
+ 
+-		status = get_memory_map(buf->hdr, sizeof(struct virtio_net_hdr),
++		status = get_memory_map(buf->hdr, info->hdrSize,
+ 			&buf->hdrEntry, 1);
+ 		if (status != B_OK)
+ 			goto err4;
+@@ -419,7 +437,7 @@ virtio_net_init_device(void* _info, void** _cookie)
+ 		if (status != B_OK)
+ 			goto err6;
+ 
+-		status = get_memory_map(buf->hdr, sizeof(struct virtio_net_hdr),
++		status = get_memory_map(buf->hdr, info->hdrSize,
+ 			&buf->hdrEntry, 1);
+ 		if (status != B_OK)
+ 			goto err6;
+@@ -552,9 +570,10 @@ virtio_net_open(void* _info, const char* path, int openMode, void** _cookie)
+ 		info->virtio->read_device_config(info->virtio_device,
+ 			offsetof(struct virtio_net_config, mtu),
+ 			&mtu, sizeof(mtu));
+-		// check against minimum MTU
++		// check against minimum MTU; maxframesize is the frame, the stack takes
++		// the Ethernet header off it again (an MTU of 1500 was showing as 1486)
+ 		if (mtu > 68)
+-			info->maxframesize = mtu;
++			info->maxframesize = mtu + ETHER_HEADER_LENGTH;
+ 		else
+ 			info->virtio->clear_feature(info->virtio_device, VIRTIO_NET_F_MTU);
+ 	} else {
+@@ -647,8 +666,8 @@ virtio_net_receive(void* cookie, net_buffer** _buffer)
+ 				break;
+ 			}
+ 
+-			if (usedLength > sizeof(virtio_net_hdr))
+-				buf->rxUsedLength = usedLength - sizeof(virtio_net_hdr);
++			if (usedLength > info->hdrSize)
++				buf->rxUsedLength = usedLength - info->hdrSize;
+ 			else
+ 				buf->rxUsedLength = 0;
+ 			info->rxFullList.Add(buf);
+@@ -762,11 +781,11 @@ virtio_net_send(void* cookie, net_buffer* buffer)
+ 		mutex_unlock(&info->txLock);
+ 		return B_BAD_DATA;
+ 	}
+-	memset(buf->hdr, 0, sizeof(virtio_net_hdr));
++	memset(buf->hdr, 0, info->hdrSize);
+ 
+ 	physical_entry entries[2];
+ 	entries[0] = buf->hdrEntry;
+-	entries[0].size = sizeof(virtio_net_hdr);
++	entries[0].size = info->hdrSize;
+ 	entries[1] = buf->entry;
+ 	entries[1].size = size;
+ 
+-- 
+2.54.0 (Apple Git-157)
+

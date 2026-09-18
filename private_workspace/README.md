@@ -19,6 +19,8 @@ private_workspace/run-vz.sh t1 --headless --seconds 100 --disk virtio
 private_workspace/run-vz.sh s2 --display s2 --screenshot private_workspace/work/s2/shot.png   # S2 Prose Display instead of the S1 virtio-gpu
 private_workspace/run-vz.sh s2 --display s2 --resize-after 45 1600x1000   # live-resize test: the guest desktop follows the window
 private_workspace/run-vz.sh in --display s2 --input-test   # our own keyboard/tablet (default); --input vz restores VZ's devices + view
+PW_INJECT_SCRIPT=private_workspace/netprobe.sh private_workspace/run-vz.sh net --headless --seconds 80   # guest-side network probe
+private_workspace/extract.sh net /home/netprobe.txt   # ... and its result (any file from a run's image copy)
 private_workspace/run-qemu.sh            # QEMU + HVF, modern virtio-pci, ramfb, -snapshot
 private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke/haiku.img
 ```
