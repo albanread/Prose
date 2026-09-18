@@ -303,3 +303,59 @@ The formal contract belongs in a separate spec. It must satisfy these constraint
 - Apple `VZVirtioSharedMemoryRegion`: https://developer.apple.com/documentation/virtualization/vzvirtiosharedmemoryregion
 - Virtio 1.3 specification: https://docs.oasis-open.org/virtio/virtio/v1.3/csd01/virtio-v1.3-csd01.html
 - UTM graphics (virgl/Venus on macOS reference): https://github.com/utmapp/UTM/blob/main/Documentation/Graphics.md
+
+---
+
+## 8. Plan (2026-09-18): from "it boots" to a first-class Haiku on Apple Silicon
+
+Scope decision: we fork Haiku (PROSE) and change whatever the experience needs. Nothing here is constrained by upstream acceptability.
+
+### 8.1 What the virtio investigation established
+
+- **Haiku's virtqueue code is correct.** `VirtioQueue.cpp` builds spec-conformant split-ring chains, direct and indirect: device-readable descriptors first, `VRING_DESC_F_WRITE` on the rest, `NEXT` on all but the last, an indirect table sized `count × 16` with a proper free list, `avail->idx` published behind a write barrier, and the used ring drained with the free list restored. VZ's custom-device framework consumed thousands of these chains unchanged (our GPU), as did VZ's built-in net and, once negotiation was fixed, its block device.
+- **Feature negotiation is narrower than it looks.** A driver only gets transport features it asks for (`fFeatures &= supported` runs first). No Haiku driver asks for `EVENT_IDX`, so its unimplemented `used_event` never matters. `virtio_block` asks for `INDIRECT_DESC` and uses it; others don't.
+- **Every failure was in the PCI transport** (`busses/virtio/virtio_pci`), and QEMU's leniency hid all of them: the driver-feature write to the read-only register, the `cap_len`/`length` mix-up, uninitialized notify offsets, and the legacy I/O-port path whose BARs all translate to host address 0 on arm64. Patch 0003 fixes them; the QEMU `pci-*` rows and VZ's virtio-blk both pass now.
+- **Two things remain unexplained**, both low priority: VZ's own virtio-gpu still hangs Haiku's driver on its first command despite correct negotiation, and the legacy I/O BAR translation (`pci_ram_address()` ignores I/O ranges) is unfixed because nothing uses it any more.
+
+### 8.2 Code reviewed, and what each part needs
+
+| Area | Files | Verdict | Work |
+|---|---|---|---|
+| Virtqueues | `bus_managers/virtio/VirtioQueue.cpp`, `virtio_ring.h` | Correct | Optional: implement `used_event`/`avail_event` and accept `EVENT_IDX` (fewer interrupts and notifies under load) |
+| Negotiation | `bus_managers/virtio/VirtioDevice.cpp` | Correct once the transport writes the right register | Drivers ignore `negotiate_features()` failures (`virtio_gpu`, `virtio_block`, `virtio_net`, …); make them fail init instead of hanging |
+| PCI transport | `busses/virtio/virtio_pci/virtio_pci.cpp` | Fixed (0003) | MSI-X via GICv2m (VZ offers MSI-X on every device; Haiku has no arm64 MSI at all, so everything is INTx); fix I/O BAR translation in `bus_managers/pci/pci.cpp` for completeness |
+| Block driver | `drivers/disk/virtual/virtio_block/virtio_block.cpp` | Works; one request in flight, one shared header buffer | Pipeline requests (per-request headers, many in flight) or standardize on NVMe; measure both on VZ first |
+| GPU driver | `drivers/graphics/virtio/virtio_gpu.cpp` | Works on our device; 20 ms full-frame copies; ignores config events | Superseded by S2 (below); keep for S1 fallback |
+| Interrupts | `kernel/arch/arm64/arch_int_gicv3.cpp`, `kernel/interrupts.cpp` | Level-triggered SPIs, EOI after dispatch; correct | GICv2m MSI frame support (prerequisite for MSI-X) |
+| Loader SMP/ACPI | `boot/platform/efi/arch/arm64/arch_smp.cpp`, `arch_acpi.cpp` | Fixed (0004, 0005) | None |
+| Power | `kernel/arch/arm64/arch_cpu.cpp` (`arch_cpu_shutdown` returns `B_ERROR`) | Missing | PSCI `SYSTEM_OFF`/`SYSTEM_RESET`, and handle VZ's ACPI power button (`PNP0C0C`) so `requestStop` shuts Haiku down cleanly |
+| Clock | `arch_rtc_get_hw_time()` returns 0; VZ exposes no RTC | Missing | Host wall time via a config field of our custom device, read once at boot; NTP later |
+| Console | none under VZ; RAM log (0001) | Adequate for reading | Interactive KDL over a virtio-console (Haiku change 10182 exists) or over our custom device's control queue |
+
+### 8.3 Sequencing
+
+**Sprint 1 (now):**
+1. Turn the patch series into a proper branch in the Haiku tree (one commit per patch, on top of hrev60122 and the PROSE branding), keeping `patches/haiku/` as the exported form.
+2. Clean shutdown and reboot: PSCI `SYSTEM_OFF`/`RESET` plus the ACPI power-button event. Small, and it makes `hvgpu`'s close button work.
+3. Wall clock at boot: host time from our device's config space.
+4. Write the **S2 spec** (`docs/s2-display-device.md`): config layout, shared-region geometry, queue protocol, sync rules, event queue (vsync, mode hint, redraw). This is the contract the guest and host sides build against in parallel.
+5. Time-boxed: a virtqueue dump in `hvgpu` (Haiku prints ring addresses; the host reads them from guest RAM) to close the VZ-GPU question. Drop it if it takes more than a day.
+
+**Sprint 2: S2, the zero-copy display.**
+- Host: the S2 device in `hvgpu` (shared region backed by Metal-visible memory, commit and event queues, `CADisplayLink` presentation). The presenter and RAM console carry over.
+- Guest: `virtio_pci` shared-memory capability (type 8) plus a bus-manager accessor; a new driver and accelerant modeled on `virtio_gpu` and `framebuffer`; the app_server commit hook after `_CopyBackToFront`; retrace semaphore fed by the event queue.
+- Then live resize (`MODE_HINT`) and vsync pacing in app_server (S3 items pulled forward if time allows).
+
+**Sprint 3: polish and reach.**
+- Our own virtio-input keyboard and tablet devices, driven from `hvgpu`'s window, so VZ's GPU no longer has to stay attached and the window is entirely ours.
+- MSI-X through GICv2m; `EVENT_IDX`; block pipelining or NVMe as the settled default.
+- Console: virtio-console debug channel for interactive KDL.
+- 2D offload over the S2 control queue (fill, blit, composite on Metal).
+- The QEMU implementation of the S2 device, for the Windows/WHPX track.
+
+**Parallel track: packages.** There is no arm64 HaikuPorts repository, so the desktop has no applications. A bootstrap build (`haikuporter` + `haikuports`, `jam @bootstrap-raw`) on this Mac produces our own package repository. Hours of compute, little attention; start it early and let it run.
+
+### 8.4 Verification that stays in place
+
+- `sprint0/t2` (QEMU rows, now all expected to pass), `sprint0/t3` (VZ platform baseline), `sprint0/t4` (VZ boot with syslog provenance check), `sprint0/t5` (presenter).
+- New for Sprint 1: a headless `hvgpu` boot check (8 vCPUs, virtio-blk and NVMe, RAM-console markers: no panics, no `ISR 0`, first login, accelerant) — the same command used throughout this investigation, scripted.
