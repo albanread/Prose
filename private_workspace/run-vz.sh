@@ -50,7 +50,7 @@ PY
 fi
 echo ">>> $D/haiku.img (fresh copy of $(ls -l "$PW_IMAGE" | awk '{print $6, $7, $8}') build)"
 "$HVGPU" "$D/haiku.img" --efivars "$D/efivars" --ramconsole-log "$D/ramconsole.log" \
-	--cpus 8 --disk nvme "$@" | tee "$D/hvgpu.log"
+	--cpus 8 --disk nvme --name "$NAME" "$@" | tee "$D/hvgpu.log"
 echo ">>> markers:"
 grep -aE 'UEFI time|GetTime' "$D/ramconsole.log" | head -1 | cut -c1-120 || true
 awk '/----- HAIKU-RAMLOG-V1/{f=1} f' "$D/ramconsole.log" \

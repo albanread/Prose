@@ -25,6 +25,14 @@
 //   --input own|vz          own: our virtio-input keyboard + tablet, window entirely ours (default);
 //                           vz: VZ's USB keyboard/pointer + virtio-gpu + VZVirtualMachineView
 //   --input-test            own input: click the Deskbar leaf, Escape, park the pointer (screenshots)
+//   --name NAME             the VM's name, shown under the window title (run-vz.sh: the run name)
+//   --mac auto|random|MAC   guest MAC; auto (default) derives it from the disk image's path, so the
+//                           VM keeps its DHCP lease and IP address across runs
+//   --no-toolbar            start without the toolbar (View > Show Toolbar brings it back)
+//   --no-statusbar          start without the status bar (View > Show Status Bar)
+//   --exit-on-stop          quit when the guest powers off (the default with --headless, --seconds
+//                           and --input-test); --stay-on-stop keeps the window, with a Start button
+//   --script "T:step,..."   drive the window's controls T seconds after launch (tests; controls.swift)
 //   --no-sound              no virtio-snd device (default: output+input to the Mac's audio devices)
 //   --no-midi               no Prose MIDI device (default: guest MIDI -> Mac's GM synth + CoreMIDI)
 //   --no-synth              keep the CoreMIDI endpoints but don't play guest MIDI on the Mac's synth
@@ -35,6 +43,10 @@
 //   --share-tag TAG         HostFS: virtio-fs tag = Haiku volume name (default HostFS)
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
+//
+// The window is the Prose app (tools/build.sh bundles hvgpu as build/Prose.app): a menu
+// bar (menus.swift), a toolbar with the VM controls and a status bar with activity lights
+// (chrome.swift, controls.swift, monitor.swift). Its shortcuts are ⌃⌘ chords; ⌘ is the guest's.
 import AppKit
 import Metal
 import QuartzCore
@@ -426,6 +438,21 @@ final class CustomVirtioGPU: NSObject, VZCustomVirtioDeviceConfigurationDelegate
         for r in resources.values { r.mapping = nil; r.backingPtr = nil }
     }
 
+    func vmDidStart() {
+        ramConsole?.activate()
+    }
+
+    /// The machine is off: no picture until the next boot draws one.
+    func vmDidStop() {
+        CustomVirtioGPU.sharedQueue.async { [self] in
+            resources.removeAll()
+            scanoutResource = 0
+        }
+        presentLock.withLock { if let surface { memset(surface.base, 0, surface.length) } }
+        seq.withLock { $0 = 0 }
+        ramConsole?.reset()
+    }
+
     func customVirtioDevice(_ device: VZCustomVirtioDevice,
                             didReceiveNotificationFor queue: VZVirtioQueue) {
         guard let surface else { return }
@@ -583,16 +610,42 @@ final class RAMConsole {
     var logHandle: FileHandle?
     let logURL = URL(fileURLWithPath: option("--ramconsole-log") ?? "ramconsole.log")
 
+    static var logStarted = false       // one log per run: a restarted VM's boot is appended
+
     init(device: VZCustomVirtioDevice) {
         self.device = device
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        if !RAMConsole.logStarted {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            RAMConsole.logStarted = true
+        }
         logHandle = FileHandle(forWritingAtPath: logURL.path)
+        logHandle?.seekToEndOfFile()
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + 1, repeating: 1)
         t.setEventHandler { [weak self] in self?.scan() }
         t.resume()
         timer = t
     }
+
+    deinit { timer?.cancel() }
+
+    /// The machine stopped: its RAM is gone (a mapping can't outlive a shutdown), so stop
+    /// scanning until activate() — the next boot is mapped and followed afresh.
+    func reset() {
+        queue.async { [self] in
+            active = false
+            mapping = nil
+            printed.removeAll()
+            bufferAddress.removeAll()
+            attempts = 0
+        }
+    }
+
+    func activate() {
+        queue.async { [self] in active = true }
+    }
+
+    private var active = true
 
     /// Guest RAM only exists once the VM runs; map it on the device's queue.
     func ensureMapping() -> VZGuestMemoryMapping? {
@@ -612,7 +665,7 @@ final class RAMConsole {
     }
 
     func scan() {
-        guard let mapping = ensureMapping() else { return }
+        guard active, let mapping = ensureMapping() else { return }
         let base = mapping.mutableBytes.assumingMemoryBound(to: UInt8.self)
         let length = mapping.length
         for marker in RAMConsole.markers {
@@ -693,8 +746,13 @@ final class MetalView: NSView {
     override func keyUp(with e: NSEvent) { inputRouter?.key(e, pressed: false) }
     override func flagsChanged(with e: NSEvent) { inputRouter?.flags(e) }
     // ⌘-combinations would otherwise be taken as menu equivalents: the guest gets them.
+    // ⌃⌘ chords are the window's own shortcuts (menus.swift): the menu bar gets those first.
     override func performKeyEquivalent(with e: NSEvent) -> Bool {
-        guard let router = inputRouter else { return false }
+        guard let router = inputRouter, router.enabled else { return false }
+        if e.type == .keyDown, e.modifierFlags.intersection(.deviceIndependentFlagsMask).isSuperset(of: [.control, .command]),
+           NSApp.mainMenu?.performKeyEquivalent(with: e) == true {
+            return true
+        }
         if e.type == .keyDown { router.key(e, pressed: true) } else if e.type == .keyUp { router.key(e, pressed: false) }
         return true
     }
@@ -710,9 +768,19 @@ final class Presenter: NSObject {
     var window: NSWindow!
     var view: MetalView!
     var vmView: VZVirtualMachineView!
+    var content: VMContentView!        // display, status bar, overlay (chrome.swift)
     var lastPresentedSeq = -1
+    /// The machine is off: present black once, not the no-signal static.
+    var poweredOff = false {
+        didSet {
+            blackShown = false
+            lastPresentedSeq = -1
+        }
+    }
+    private var blackShown = false
 
-    func makeWindow(vm: VZVirtualMachine, source: PresentSource) {
+    /// decorate: the toolbar and status bar go on before the window is shown.
+    func makeWindow(vm: VZVirtualMachine, source: PresentSource, decorate: (NSWindow, VMContentView) -> Void) {
         guard let surface = source.surface else { return }
         queue = device.makeCommandQueue()
         buffer = device.makeBuffer(bytesNoCopy: surface.base, length: surface.length,
@@ -732,8 +800,7 @@ final class Presenter: NSObject {
         }
 
         let frame = NSRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
-        let container = NSView(frame: frame)
-        container.wantsLayer = true
+        var displayViews: [NSView] = []
         if !ownInput {
             // --input vz: the VZ view sits underneath: it takes keyboard/pointer input and
             // shows VZ's own display. Our Metal view is an overlay on top, hidden until our
@@ -741,13 +808,10 @@ final class Presenter: NSObject {
             vmView = VZVirtualMachineView()
             vmView.virtualMachine = vm
             vmView.capturesSystemKeys = true
-            vmView.frame = container.bounds
-            vmView.autoresizingMask = [.width, .height]
-            container.addSubview(vmView)
+            displayViews.append(vmView)
         }
 
-        view = MetalView(frame: container.bounds)
-        view.autoresizingMask = [.width, .height]
+        view = MetalView(frame: frame)
         view.wantsLayer = true
         layer = (view.layer as! CAMetalLayer)
         layer.device = device
@@ -755,17 +819,31 @@ final class Presenter: NSObject {
         layer.isOpaque = true
         layer.framebufferOnly = true
         view.isHidden = !ownInput        // nothing underneath to show with our own input
-        container.addSubview(view)       // above vmView
+        displayViews.append(view)        // above vmView
+        // The display keeps the scanout size; the status bar goes underneath it.
+        content = VMContentView(displaySize: frame.size, displayViews: displayViews,
+                                statusBarShown: WindowChrome.statusBarInitiallyShown)
+        let container = content!
 
-        window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                          backing: .buffered, defer: false)
-        window.title = "hvgpu — Haiku \(width)x\(height) (\(displayMode.uppercased()))"
+        window = ProseWindow(contentRect: container.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                             backing: .buffered, defer: false)
+        window.title = "Prose"
+        if let name = option("--name") { window.subtitle = name }
+        window.tabbingMode = .disallowed
+        window.collectionBehavior.insert(.fullScreenPrimary)
         window.contentView = container
+        window.contentMinSize = NSSize(width: 320, height: 200 + StatusBar.height)
+        decorate(window, container)
         window.center()
-        window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(ownInput ? view : vmView)
+        if args.contains("--script") {
+            // a scripted test run shows itself but leaves the keyboard with whoever is typing
+            window.orderFrontRegardless()
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         log("window \(width)x\(height) shown")
-        NSApp.activate(ignoringOtherApps: true)
         updateDrawableSize()
 
         // Drive presentation from the container: a hidden view gets no display-link callbacks.
@@ -816,6 +894,20 @@ final class Presenter: NSObject {
         guard let gpu = presenterGPU, let surface = gpu.surface else { return }
         if layer.drawableSize.width != view.bounds.width * window.backingScaleFactor {
             updateDrawableSize()
+        }
+        if poweredOff {
+            guard !blackShown, let drawable = layer.nextDrawable() else { return }
+            blackShown = true
+            let rp = MTLRenderPassDescriptor()
+            rp.colorAttachments[0].texture = drawable.texture
+            rp.colorAttachments[0].loadAction = .clear
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+            rp.colorAttachments[0].storeAction = .store
+            let cb = queue.makeCommandBuffer()!
+            cb.makeRenderCommandEncoder(descriptor: rp)?.endEncoding()
+            cb.present(drawable)
+            cb.commit()
+            return
         }
         // A picture needs a mode and at least one commit; anything else is no signal.
         let flushed = gpu.seq.withLock { $0 }
@@ -919,39 +1011,40 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
     let presenter = Presenter()
     var stateObservation: NSKeyValueObservation?
-    var stopping = false
+    var stopping = false               // quitting: exit once the guest is off
+    // The window's VM controls (controls.swift, chrome.swift, monitor.swift)
+    var chrome: WindowChrome?
+    var monitor: VMMonitor?
+    lazy var macAddress = makeMACAddress()
+    var shutdownRequested: Date?       // Shut Down or Restart pressed the guest's power button
+    var restartPending = false
+    var runningSince: Date?
+    var failure: String?               // why the machine couldn't start
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let config: VZVirtualMachineConfiguration
         do {
-            config = try makeConfiguration()
+            try makeVM()                   // controls.swift
         } catch {
             log("configuration invalid: \(error.localizedDescription)")
             exit(1)
         }
-        vm = VZVirtualMachine(configuration: config)
-        vm.delegate = self
-        stateObservation = vm.observe(\.state, options: [.new]) { vm, _ in
-            log("state \(vm.state.rawValue)")
-        }
 
         if !headless {
-            presenter.makeWindow(vm: vm, source: displaySource)
-            presenter.window.delegate = self     // windowDidResize (MODE_HINT), windowShouldClose
+            NSApp.applicationIconImage = ProseIcon.image()
+            presenter.makeWindow(vm: vm, source: displaySource) { [self] window, content in
+                chrome = WindowChrome(controller: self, window: window, content: content)
+                // the guest's screen follows the display area (status bar, full screen), not just the window
+                content.onDisplayResize = { size in
+                    presenterGPU?.windowResized(width: Int(size.width), height: Int(size.height))
+                }
+            }
+            presenter.window.delegate = self     // windowShouldClose, full screen (MODE_HINT: onDisplayResize)
         }
         presenterGPU = displaySource
+        monitor = VMMonitor(diskImage: diskURL, guestMAC: args.contains("--no-net") ? nil : macAddress.string)
 
-        log("starting \(diskURL.path) cpus=\(cpus) memory=\(memoryGiB)GiB scanout=\(width)x\(height)")
-        vm.start { result in
-            switch result {
-            case .success:
-                log("started")
-                self.displaySource.vmDidStart()
-            case .failure(let error):
-                log("start failed: \(error.localizedDescription)")
-                exit(1)
-            }
-        }
+        bootVM()
+        if let script = option("--script") { runScript(script) }
         if let seconds = runSeconds {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [self] in
                 stopVM(reason: "time limit \(Int(seconds)) s")
@@ -994,8 +1087,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
                     for k in 1...40 {
                         DispatchQueue.main.asyncAfter(deadline: .now() + Double(k) * 0.03) { [self] in
                             let t = Double(k) / 40
+                            let bar = presenter.content.statusBarShown ? StatusBar.height : 0   // WxH is the display's
                             presenter.window.setContentSize(NSSize(width: start.width + (parts[0] - start.width) * t,
-                                                                   height: start.height + (parts[1] - start.height) * t))
+                                                                   height: start.height + (parts[1] - start.height) * t + bar))
                         }
                     }
                 }
@@ -1008,7 +1102,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
             if parts.count == 2 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + after) { [self] in
                     log("resizing the window to \(parts[0])x\(parts[1])")
-                    presenter.window.setContentSize(NSSize(width: parts[0], height: parts[1]))
+                    resizeDisplay(to: NSSize(width: parts[0], height: parts[1]))    // the display's size, bars aside
                 }
             }
         }
@@ -1048,6 +1142,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         if !args.contains("--no-net") {
             let net = VZVirtioNetworkDeviceConfiguration()
             net.attachment = VZNATNetworkDeviceAttachment()
+            net.macAddress = macAddress        // stable per disk image: same lease, same IP
             config.networkDevices = [net]
         }
 
@@ -1114,13 +1209,12 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         guard !stopping else { return }
         stopping = true
         log("stopping: \(reason)")
-        if vm.canRequestStop {
-            do {
-                try vm.requestStop()
-                log("requested guest power-off")
-            } catch {
-                log("requestStop failed: \(error.localizedDescription)")
-            }
+        // already off (the window stays after the guest powers off): nothing to wait for
+        if vm.state == .stopped || vm.state == .error { exit(0) }
+        if vm.state == .paused {
+            vm.resume { [self] _ in requestGuestStop() }
+        } else {
+            requestGuestStop()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [self] in
             guard vm.state != .stopped else { return }
@@ -1129,11 +1223,6 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
                 exit(0)
             }
         }
-    }
-
-    func windowDidResize(_ notification: Notification) {
-        let size = presenter.view.bounds.size
-        presenterGPU?.windowResized(width: Int(size.width), height: Int(size.height))
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -1148,24 +1237,25 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
 
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         log("guest powered off")
-        exit(0)
+        let restarting = restartPending && !stopping
+        if !restarting && (stopping || exitOnStop) { exit(0) }
+        vmStopped()                        // the window stays, with a Start button
+        if restarting { bootVM() }
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         log("stopped with error: \(error.localizedDescription)")
-        exit(1)
+        if stopping || exitOnStop { exit(1) }
+        vmStopped()
+        failure = error.localizedDescription
+        stateChanged()
     }
 }
 
 let app = NSApplication.shared
 app.setActivationPolicy(headless ? .prohibited : .regular)
-let mainMenu = NSMenu()
-let appItem = NSMenuItem()
-mainMenu.addItem(appItem)
-let appMenu = NSMenu()
-appMenu.addItem(withTitle: "Quit hvgpu", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-appItem.submenu = appMenu
-app.mainMenu = mainMenu
+NSWindow.allowsAutomaticWindowTabbing = false
 let controller = Controller()
+app.mainMenu = makeMainMenu(controller)    // menus.swift
 app.delegate = controller
 app.run()

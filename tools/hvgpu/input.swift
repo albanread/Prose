@@ -105,7 +105,8 @@ final class VirtioInputDevice: NSObject, VZCustomVirtioDeviceConfigurationDelega
         d += entry(EV.cfgIdDevids, 0, [6, 0, 0xf4, 0x1a, kind == .keyboard ? 1 : 2, 0, 1, 0])   // BUS_VIRTUAL, vendor 1af4
         switch kind {
         case .keyboard:
-            d += entry(EV.cfgEvBits, EV.key, bitmap(macToEvdev.values.map(Int.init)))
+            // plus Print Screen (KEY_SYSRQ), which only Machine > Send Keys can type
+            d += entry(EV.cfgEvBits, EV.key, bitmap(macToEvdev.values.map(Int.init) + [99]))
             d += entry(EV.cfgEvBits, EV.rep, [0x03])
         case .tablet:
             d += entry(EV.cfgEvBits, EV.key, bitmap([Int(EV.btnLeft), Int(EV.btnRight), Int(EV.btnMiddle)]))
@@ -140,7 +141,9 @@ final class VirtioInputDevice: NSObject, VZCustomVirtioDeviceConfigurationDelega
     }
 
     func customVirtioDeviceWillStop(_ device: VZCustomVirtioDevice) {
+        driverOK = false
         elements.removeAll()
+        pending.removeAll()
     }
 
     func customVirtioDevice(_ device: VZCustomVirtioDevice, didReceiveNotificationFor queue: VZVirtioQueue) {
@@ -189,6 +192,14 @@ final class InputRouter {
     private var cursorHidden = false
     private var wheelX = 0.0, wheelY = 0.0
     private var lastX: Int32 = -1, lastY: Int32 = -1
+    private var down: Set<UInt16> = []      // keys the guest has seen pressed
+    /// Only a running machine takes input: paused or off, events are dropped and the
+    /// pointer stays visible for the overlay's button.
+    var enabled = true {
+        didSet {
+            if !enabled { exited() }
+        }
+    }
 
     init(presenter: Presenter) {
         self.presenter = presenter
@@ -212,11 +223,13 @@ final class InputRouter {
     }
 
     func pointer(_ event: NSEvent, in view: NSView) {
+        guard enabled else { return }
         let (x, y) = guestPosition(view.convert(event.locationInWindow, from: nil))
         move(to: x, y)
     }
 
     func button(_ event: NSEvent, in view: NSView) {
+        guard enabled else { return }
         let (x, y) = guestPosition(view.convert(event.locationInWindow, from: nil))
         let code: UInt16
         switch event.buttonNumber {
@@ -235,6 +248,7 @@ final class InputRouter {
     }
 
     func scroll(_ event: NSEvent) {
+        guard enabled else { return }
         // lines; trackpads report pixels, which ~10 per line turns into something usable
         let scale = event.hasPreciseScrollingDeltas ? 0.1 : 1.0
         wheelY += event.scrollingDeltaY * scale
@@ -247,8 +261,14 @@ final class InputRouter {
     }
 
     func key(_ event: NSEvent, pressed: Bool) {
+        guard enabled else { return }
         if pressed && event.isARepeat { return }        // the guest repeats keys itself
         guard let code = macToEvdev[event.keyCode] else { return }
+        send(code, pressed)
+    }
+
+    private func send(_ code: UInt16, _ pressed: Bool) {
+        if pressed { down.insert(code) } else { down.remove(code) }
         keyboard.send([(EV.key, code, pressed ? 1 : 0), (EV.syn, 0, 0)])
     }
 
@@ -256,17 +276,33 @@ final class InputRouter {
         keyboard.send([(EV.key, code, 1), (EV.syn, 0, 0), (EV.key, code, 0), (EV.syn, 0, 0)])
     }
 
+    /// Press the keys in order and release them in reverse (Control-Alt-Delete).
+    func chord(_ codes: [UInt16]) {
+        let press: [InputEvent] = codes.flatMap { code -> [InputEvent] in [(EV.key, code, 1), (EV.syn, 0, 0)] }
+        let release: [InputEvent] = codes.reversed().flatMap { code -> [InputEvent] in [(EV.key, code, 0), (EV.syn, 0, 0)] }
+        keyboard.send(press + release)
+    }
+
+    /// Let go of every key the guest thinks is down: the window lost the keyboard (⌘Tab
+    /// swallows the ⌘ key-up) or the machine is pausing.
+    func releaseAll() {
+        guard !down.isEmpty else { return }
+        keyboard.send(down.flatMap { code -> [InputEvent] in [(EV.key, code, 0), (EV.syn, 0, 0)] })
+        down.removeAll()
+    }
+
     func flags(_ event: NSEvent) {
+        guard enabled else { return }
         if event.keyCode == 0x39 {                       // caps lock toggles: press and release
             tap(evdev: 58)
             return
         }
         guard let m = modifierKeys[event.keyCode] else { return }
-        let pressed = event.modifierFlags.rawValue & m.mask != 0
-        keyboard.send([(EV.key, m.code, pressed ? 1 : 0), (EV.syn, 0, 0)])
+        send(m.code, event.modifierFlags.rawValue & m.mask != 0)
     }
 
     func entered() {
+        guard enabled else { return }
         if !cursorHidden { NSCursor.hide(); cursorHidden = true }
     }
 

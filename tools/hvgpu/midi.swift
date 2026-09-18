@@ -11,6 +11,7 @@ import AVFoundation
 import CoreMIDI
 import Foundation
 import Virtualization
+import os
 
 // MARK: - MIDI byte stream parser (running status, system common, sysex, realtime)
 
@@ -109,6 +110,9 @@ final class HostSynth {
 final class ProseMIDIDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate, VZCustomVirtioDeviceDelegate {
     static let queue = DispatchQueue(label: "hvgpu.midi")
     static let deviceID: UInt16 = 62      // 63 is the display; 64+ would map past virtio-pci's modern ID range
+    static let endpointName = "Prose"     // the CoreMIDI source and destination, as Mac apps list them
+    /// Messages from the guest, for the status bar's MIDI light (read on the main thread).
+    let activity = OSAllocatedUnfairLock(initialState: 0)
 
     private(set) var device: VZCustomVirtioDevice?
     private var rxElements: [VZVirtioQueueElement] = []      // guest's buffers for host -> guest bytes
@@ -136,9 +140,10 @@ final class ProseMIDIDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate
     // MARK: host side setup
 
     private func setupHost() {
+        guard client == 0 else { return }   // a restarted machine keeps the synth and endpoints
         if !args.contains("--no-synth") { synth = HostSynth() }
         // CoreMIDI: a virtual source (what the guest plays) and a virtual destination (into the guest)
-        let name = "Haiku (hvgpu)"
+        let name = ProseMIDIDevice.endpointName
         var status = MIDIClientCreateWithBlock("hvgpu" as CFString, &client) { _ in }
         guard status == noErr else { log("midi: MIDIClientCreate failed: \(status)"); return }
         status = MIDISourceCreateWithProtocol(client, name as CFString, ._1_0, &source)
@@ -175,6 +180,7 @@ final class ProseMIDIDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate
         fromGuest += bytes.count
         for message in parser.feed(bytes) {
             messages += 1
+            activity.withLock { $0 += 1 }
             if verbose { log("midi: " + message.map { String(format: "%02X", $0) }.joined(separator: " ")) }
             synth?.play(message)
             if source != 0, let status = message.first, status != 0xF0, message.count <= 3 {

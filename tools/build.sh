@@ -27,8 +27,32 @@ build() { # name source-file-or-dir [vz] [target]
 	fi
 }
 
+# hvgpu is the Prose app: build/Prose.app, so the menu bar, Dock and About panel say
+# Prose. It uses the macOS 27 custom-virtio API, so it targets 27.0. A bundle's
+# executable run through a symlink loses its bundle, so build/bin/hvgpu, the
+# command-line entry point, is a two-line script that execs the one in the bundle.
+build_app() {
+	local app="$ROOT/build/Prose.app" src="$ROOT/tools/hvgpu"
+	local exe="$app/Contents/MacOS/hvgpu" fresh=1 f
+	if [ -z "${FORCE:-}" ] && [ -x "$exe" ] && [ -f "$OUT/hvgpu" ]; then
+		for f in "$src"/*.swift "$src/Info.plist" "$0"; do [ "$exe" -nt "$f" ] || fresh=0; done
+		[ $fresh = 1 ] && return
+	fi
+	echo "building Prose.app (hvgpu)"
+	mkdir -p "$app/Contents/MacOS"
+	# build beside it and rename: a running VM keeps its (old) executable intact
+	swiftc -O -target arm64-apple-macos27.0 -o "$exe.new" "$src"/*.swift
+	mv -f "$exe.new" "$exe"
+	sed "s/@VERSION@/$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)/" \
+		"$src/Info.plist" > "$app/Contents/Info.plist"
+	codesign --force -s - --entitlements "$ENT" "$app"
+	rm -f "$OUT/hvgpu"
+	printf '#!/bin/sh\n# hvgpu runs as the Prose app: see tools/build.sh\nexec "$(dirname "$0")/../Prose.app/Contents/MacOS/hvgpu" "$@"\n' \
+		> "$OUT/hvgpu"
+	chmod +x "$OUT/hvgpu"
+}
+
 build vzprobe "$ROOT/tools/vzprobe/vzprobe.swift" vz
 build hvz "$ROOT/tools/hvz/hvz.swift" vz
-# hvgpu uses the macOS 27 custom-virtio API, so it targets 27.0.
-build hvgpu "$ROOT/tools/hvgpu" vz arm64-apple-macos27.0
+build_app
 build presenter "$ROOT/tools/presenter/presenter.swift"

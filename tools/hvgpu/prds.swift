@@ -21,12 +21,15 @@ protocol PresentSource: AnyObject {
     func windowResized(width: Int, height: Int)
     /// The VM is running: guest RAM exists, shared memory can be mapped.
     func vmDidStart()
+    /// The VM is off (the window stays): nothing to show; the next start maps afresh.
+    func vmDidStop()
 }
 
 extension PresentSource {
     func displayTick(timestamp: Double) {}
     func windowResized(width: Int, height: Int) {}
     func vmDidStart() {}
+    func vmDidStop() {}
 }
 
 extension CustomVirtioGPU: PresentSource {}
@@ -163,6 +166,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
     /// mapMemory needs a live VM ("The virtual machine is not live" before start) and must
     /// run on the device queue, so it happens once the VM has started, not at device creation.
     func vmDidStart() {
+        ramConsole?.activate()
         PRDSDevice.queue.async { [self] in
             guard let region, !poolMapped else { return }
             log("prds: mapping the pool into the guest...")
@@ -177,6 +181,16 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
                 }
             }
         }
+    }
+
+    func vmDidStop() {
+        PRDSDevice.queue.async { [self] in
+            poolMapped = false          // the guest's mapping went with the machine
+            mode = nil
+            eventElements.removeAll()
+            clearPresentation()
+        }
+        ramConsole?.reset()
     }
 
     func customVirtioDeviceDidAcceptDriverOk(_ device: VZCustomVirtioDevice) {

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- hvgpu as the Prose app (tools/build.sh fills in @VERSION@: the repo's commit) -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Prose</string>
+	<key>CFBundleDisplayName</key>
+	<string>Prose</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.prose.vm</string>
+	<key>CFBundleExecutable</key>
+	<string>hvgpu</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>27.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Prose passes the Mac's sound input to the virtual machine.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Prose — an operating system for people who write.</string>
+</dict>
+</plist>
