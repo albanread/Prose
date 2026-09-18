@@ -1,0 +1,504 @@
+From b97b09e32cdab2dd8eadb65d1a6d66313247117f Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 13:28:00 +0100
+Subject: [PATCH] acpi_gpio_events: ACPI GPIO-signalled events on PL061;
+ acpi_button on arm64
+
+Apple's Virtualization.framework and QEMU's virt machine signal the power
+button as an ACPI GPIO event: the ARMH0061 (PL061) device's _AEI names the
+pin, and its _Exx/_Lxx method does Notify(PWRB, 0x80). The new driver binds
+to ARMH0061, parses _CRS and _AEI, programs the event pins, and evaluates the
+pin's method from a kernel thread on interrupt. acpi_button, now built for
+arm64 too, turns the notification into /dev/power/button/power, and
+power_daemon shuts the system down. A VM stop request now ends in a clean
+Haiku shutdown within about a second.
+
+The private acpi.h gains the GPIO connection resource (ACPICA's packed
+layout) and its constants. Only the registers Linux's pl061 driver touches
+are written, and only the event pins' bits: Virtualization.framework's
+PL061 model terminates the VM on writes it does not expect (AFSEL, or IC
+bits of unconfigured pins).
+---
+ build/jam/images/definitions/minimum          |   7 +-
+ headers/private/kernel/acpi.h                 |  38 ++
+ src/add-ons/kernel/drivers/power/Jamfile      |   1 +
+ .../drivers/power/acpi_gpio_events/Jamfile    |   9 +
+ .../acpi_gpio_events/acpi_gpio_events.cpp     | 361 ++++++++++++++++++
+ 5 files changed, 415 insertions(+), 1 deletion(-)
+ create mode 100644 src/add-ons/kernel/drivers/power/acpi_gpio_events/Jamfile
+ create mode 100644 src/add-ons/kernel/drivers/power/acpi_gpio_events/acpi_gpio_events.cpp
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index f493f6718d..9dcc1cb184 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -345,8 +345,13 @@ SYSTEM_ADD_ONS_DRIVERS_NET = [ FFilterByBuildFeatures
+ ] ;
+ 
+ SYSTEM_ADD_ONS_DRIVERS_POWER = [ FFilterByBuildFeatures
+-	x86,x86_64 @{
++	x86,x86_64,arm64 @{
+ 		acpi_button
++	}@ # x86,x86_64,arm64
++	arm64 @{
++		acpi_gpio_events
++	}@ # arm64
++	x86,x86_64 @{
+ 		acpi_thermal
+ 		amd_thermal
+ 		pch_thermal
+diff --git a/headers/private/kernel/acpi.h b/headers/private/kernel/acpi.h
+index c5ceb07b74..b36d9bd558 100644
+--- a/headers/private/kernel/acpi.h
++++ b/headers/private/kernel/acpi.h
+@@ -508,8 +508,30 @@ typedef struct acpi_resource_extended_irq {
+ 	uint32 interrupts[1];
+ } _PACKED acpi_resource_extended_irq;
+ 
++// HaikuArmQemu fork: GPIO connection descriptor (ACPI 5.0), the same layout
++// as ACPICA's ACPI_RESOURCE_GPIO (which is packed, like everything here).
++typedef struct acpi_resource_gpio {
++	uint8 revision_id;
++	uint8 connection_type;
++	uint8 producer_consumer;
++	uint8 pin_config;
++	uint8 shareable;
++	uint8 wake_capable;
++	uint8 io_restriction;
++	uint8 triggering;
++	uint8 polarity;
++	uint16 drive_strength;
++	uint16 debounce_timeout;
++	uint16 pin_table_length;
++	uint16 vendor_length;
++	acpi_resource_source resource_source;
++	uint16* pin_table;
++	uint8* vendor_data;
++} _PACKED acpi_resource_gpio;
++
+ typedef union acpi_resource_data {
+ 	acpi_resource_fixed_memory32 fixed_memory32;
++	acpi_resource_gpio gpio;
+ 	acpi_resource_address16 address16;
+ 	acpi_resource_address32 address32;
+ 	acpi_resource_address64 address64;
+@@ -530,6 +552,22 @@ enum {
+ 	ACPI_RESOURCE_TYPE_ADDRESS32 = 12,
+ 	ACPI_RESOURCE_TYPE_ADDRESS64 = 13,
+ 	ACPI_RESOURCE_TYPE_EXTENDED_IRQ = 15,
++	ACPI_RESOURCE_TYPE_GPIO = 17,
++};
++
++// HaikuArmQemu fork: GPIO resource values, as in ACPICA.
++enum {
++	ACPI_RESOURCE_GPIO_TYPE_INT = 0,
++	ACPI_RESOURCE_GPIO_TYPE_IO = 1,
++};
++enum {
++	ACPI_LEVEL_SENSITIVE = 0,
++	ACPI_EDGE_SENSITIVE = 1,
++};
++enum {
++	ACPI_ACTIVE_HIGH = 0,
++	ACPI_ACTIVE_LOW = 1,
++	ACPI_ACTIVE_BOTH = 2,
+ };
+ 
+ 
+diff --git a/src/add-ons/kernel/drivers/power/Jamfile b/src/add-ons/kernel/drivers/power/Jamfile
+index b929cd9759..2910df9daf 100644
+--- a/src/add-ons/kernel/drivers/power/Jamfile
++++ b/src/add-ons/kernel/drivers/power/Jamfile
+@@ -3,6 +3,7 @@ SubDir HAIKU_TOP src add-ons kernel drivers power ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers power acpi_ac ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers power acpi_battery ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers power acpi_button ;
++SubInclude HAIKU_TOP src add-ons kernel drivers power acpi_gpio_events ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers power acpi_lid ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers power acpi_thermal ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers power amd_thermal ;
+diff --git a/src/add-ons/kernel/drivers/power/acpi_gpio_events/Jamfile b/src/add-ons/kernel/drivers/power/acpi_gpio_events/Jamfile
+new file mode 100644
+index 0000000000..90536a895b
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/power/acpi_gpio_events/Jamfile
+@@ -0,0 +1,9 @@
++SubDir HAIKU_TOP src add-ons kernel drivers power acpi_gpio_events ;
++
++UsePrivateKernelHeaders ;
++SubDirHdrs $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include ;
++SubDirHdrs $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include platform ;
++
++KernelAddon acpi_gpio_events :
++	acpi_gpio_events.cpp
++	;
+diff --git a/src/add-ons/kernel/drivers/power/acpi_gpio_events/acpi_gpio_events.cpp b/src/add-ons/kernel/drivers/power/acpi_gpio_events/acpi_gpio_events.cpp
+new file mode 100644
+index 0000000000..f5730f5046
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/power/acpi_gpio_events/acpi_gpio_events.cpp
+@@ -0,0 +1,361 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * ACPI GPIO-signalled events on an ARM PL061 GPIO controller (ACPI ID
++ * ARMH0061). Firmware such as Apple's Virtualization.framework and QEMU's
++ * virt machine signal the power button this way: the GPIO device's _AEI lists
++ * the event pins, and a pin interrupt is answered by evaluating the device's
++ * _Exx (edge) or _Lxx (level) method, which does Notify(PWRB, 0x80). The
++ * acpi_button driver picks the notification up from there.
++ */
++
++
++#include <KernelExport.h>
++#include <device_manager.h>
++#include <drivers/ACPI.h>
++#include <acpi.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++
++//#define TRACE_GPIO_EVENTS
++#ifdef TRACE_GPIO_EVENTS
++#	define TRACE(x...) dprintf("acpi_gpio_events: " x)
++#else
++#	define TRACE(x...)
++#endif
++#define ERROR(x...) dprintf("acpi_gpio_events: " x)
++
++#define ACPI_GPIO_EVENTS_MODULE_NAME "drivers/power/acpi_gpio_events/driver_v1"
++
++// PL061 registers (byte offsets); GPIODATA is address-masked below.
++#define PL061_DATA		0x000
++#define PL061_DIR		0x400
++#define PL061_IS		0x404	// interrupt sense: 1 level, 0 edge
++#define PL061_IBE		0x408	// both edges
++#define PL061_IEV		0x40c	// event: 1 rising/high, 0 falling/low
++#define PL061_IE		0x410	// interrupt mask: 1 enabled
++#define PL061_RIS		0x414	// raw status
++#define PL061_MIS		0x418	// masked status
++#define PL061_IC		0x41c	// interrupt clear (edge)
++#define PL061_AFSEL		0x420
++#define PL061_PINS		8
++
++
++struct gpio_events_device {
++	device_node*				node;
++	acpi_device_module_info*	acpi;
++	acpi_device					acpi_cookie;
++
++	phys_addr_t					regs_base;
++	size_t						regs_size;
++	area_id						regs_area;
++	volatile uint8*				regs;
++	uint32						irq;
++
++	uint8						event_pins;		// pins listed in _AEI
++	uint8						level_pins;		// level-triggered ones
++	uint8						low_pins;		// active low
++	uint8						both_edges_pins;
++
++	int32						pending;		// set by the interrupt handler
++	sem_id						sem;
++	thread_id					thread;
++	bool						quit;
++};
++
++
++static device_manager_info* sDeviceManager;
++
++
++static inline uint8
++read_reg(gpio_events_device* device, uint32 offset)
++{
++	return *(volatile uint8*)(device->regs + offset);
++}
++
++
++static inline void
++write_reg(gpio_events_device* device, uint32 offset, uint8 value)
++{
++	*(volatile uint8*)(device->regs + offset) = value;
++}
++
++
++static acpi_status
++parse_crs(acpi_resource* resource, void* context)
++{
++	gpio_events_device* device = (gpio_events_device*)context;
++	TRACE("_CRS resource type %" B_PRIu32 ", length %" B_PRIu32 "\n", resource->type,
++		resource->length);
++	switch (resource->type) {
++		case ACPI_RESOURCE_TYPE_FIXED_MEMORY32:
++			device->regs_base = resource->data.fixed_memory32.address;
++			device->regs_size = resource->data.fixed_memory32.address_length;
++			break;
++		case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:
++			if (device->irq == 0 && resource->data.extended_irq.interrupt_count > 0)
++				device->irq = resource->data.extended_irq.interrupts[0];
++			break;
++	}
++	return 0;
++}
++
++
++static acpi_status
++parse_aei(acpi_resource* resource, void* context)
++{
++	gpio_events_device* device = (gpio_events_device*)context;
++	TRACE("_AEI resource type %" B_PRIu32 ", length %" B_PRIu32 "\n", resource->type,
++		resource->length);
++	if (resource->type != ACPI_RESOURCE_TYPE_GPIO
++		|| resource->data.gpio.connection_type != ACPI_RESOURCE_GPIO_TYPE_INT)
++		return 0;
++
++	const acpi_resource_gpio& gpio = resource->data.gpio;
++	for (uint16 i = 0; i < gpio.pin_table_length; i++) {
++		uint16 pin = gpio.pin_table[i];
++		if (pin >= PL061_PINS) {
++			ERROR("_AEI pin %u is out of range\n", pin);
++			continue;
++		}
++		uint8 bit = 1 << pin;
++		device->event_pins |= bit;
++		if (gpio.triggering == ACPI_LEVEL_SENSITIVE)
++			device->level_pins |= bit;
++		if (gpio.polarity == ACPI_ACTIVE_LOW)
++			device->low_pins |= bit;
++		else if (gpio.polarity == ACPI_ACTIVE_BOTH)
++			device->both_edges_pins |= bit;
++		dprintf("acpi_gpio_events: event pin %u: %s, %s\n", pin,
++			gpio.triggering == ACPI_LEVEL_SENSITIVE ? "level" : "edge",
++			gpio.polarity == ACPI_ACTIVE_LOW ? "active low"
++				: gpio.polarity == ACPI_ACTIVE_BOTH ? "both" : "active high");
++	}
++	return 0;
++}
++
++
++static int32
++gpio_events_interrupt(void* data)
++{
++	gpio_events_device* device = (gpio_events_device*)data;
++	uint8 status = read_reg(device, PL061_MIS);
++	if (status == 0)
++		return B_UNHANDLED_INTERRUPT;
++
++	// Edge interrupts clear here. Level ones stay asserted until the ACPI
++	// method has dealt with the source, so mask them until then.
++	write_reg(device, PL061_IC, status);
++	uint8 level = status & device->level_pins;
++	if (level != 0)
++		write_reg(device, PL061_IE, read_reg(device, PL061_IE) & ~level);
++
++	atomic_or(&device->pending, status);
++	release_sem_etc(device->sem, 1, B_DO_NOT_RESCHEDULE);
++	return B_INVOKE_SCHEDULER;
++}
++
++
++static status_t
++gpio_events_thread(void* data)
++{
++	gpio_events_device* device = (gpio_events_device*)data;
++	while (acquire_sem(device->sem) == B_OK) {
++		if (device->quit)
++			break;
++		uint8 pins = (uint8)atomic_and(&device->pending, 0);
++		for (uint8 pin = 0; pin < PL061_PINS; pin++) {
++			uint8 bit = 1 << pin;
++			if ((pins & bit) == 0)
++				continue;
++			char method[8];
++			snprintf(method, sizeof(method), "_%c%02X",
++				(device->level_pins & bit) != 0 ? 'L' : 'E', pin);
++			dprintf("acpi_gpio_events: pin %u: evaluating %s\n", pin, method);
++			status_t status = device->acpi->evaluate_method(device->acpi_cookie,
++				method, NULL, NULL);
++			if (status != B_OK)
++				ERROR("evaluating %s failed: %s\n", method, strerror(status));
++			if ((device->level_pins & bit) != 0)
++				write_reg(device, PL061_IE, read_reg(device, PL061_IE) | bit);
++		}
++	}
++	return B_OK;
++}
++
++
++//	#pragma mark - driver module API
++
++
++static float
++gpio_events_support(device_node* parent)
++{
++	const char* bus;
++	if (sDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false) != B_OK
++		|| strcmp(bus, "acpi") != 0)
++		return 0.0;
++
++	const char* hid;
++	if (sDeviceManager->get_attr_string(parent, ACPI_DEVICE_HID_ITEM, &hid, false) != B_OK
++		|| strcmp(hid, "ARMH0061") != 0)
++		return 0.0;
++
++	return 0.6;
++}
++
++
++static status_t
++gpio_events_register_device(device_node* node)
++{
++	device_attr attrs[] = {
++		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, { .string = "ACPI GPIO events (PL061)" }},
++		{ B_DEVICE_FLAGS, B_UINT32_TYPE, { .ui32 = B_KEEP_DRIVER_LOADED }},
++		{ NULL }
++	};
++	return sDeviceManager->register_node(node, ACPI_GPIO_EVENTS_MODULE_NAME, attrs,
++		NULL, NULL);
++}
++
++
++static status_t
++gpio_events_init_driver(device_node* node, void** _cookie)
++{
++	gpio_events_device* device = (gpio_events_device*)calloc(1, sizeof(*device));
++	if (device == NULL)
++		return B_NO_MEMORY;
++	device->node = node;
++	device->regs_area = -1;
++	device->sem = -1;
++	device->thread = -1;
++
++	device_node* parent = sDeviceManager->get_parent_node(node);
++	sDeviceManager->get_driver(parent, (driver_module_info**)&device->acpi,
++		(void**)&device->acpi_cookie);
++	sDeviceManager->put_node(parent);
++
++	status_t status = device->acpi->walk_resources(device->acpi_cookie, (char*)"_CRS",
++		parse_crs, device);
++	if (status == B_OK)
++		status = device->acpi->walk_resources(device->acpi_cookie, (char*)"_AEI",
++			parse_aei, device);
++	if (status != B_OK) {
++		ERROR("reading _CRS/_AEI failed: %s\n", strerror(status));
++		goto error;
++	}
++	if (device->regs_base == 0 || device->irq == 0 || device->event_pins == 0) {
++		ERROR("nothing to do: registers %#" B_PRIxPHYSADDR ", irq %" B_PRIu32
++			", event pins %#x\n", device->regs_base, device->irq, device->event_pins);
++		status = B_DEVICE_NOT_FOUND;
++		goto error;
++	}
++
++	device->regs_area = map_physical_memory("PL061 GPIO registers", device->regs_base,
++		device->regs_size, B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA,
++		(void**)&device->regs);
++	if (device->regs_area < 0) {
++		status = device->regs_area;
++		goto error;
++	}
++
++	device->sem = create_sem(0, "acpi gpio events");
++	if (device->sem < 0) {
++		status = device->sem;
++		goto error;
++	}
++	device->thread = spawn_kernel_thread(gpio_events_thread, "acpi gpio events",
++		B_NORMAL_PRIORITY, device);
++	if (device->thread < 0) {
++		status = device->thread;
++		goto error;
++	}
++
++	// Program the event pins: inputs, then their interrupt mode, then ack.
++	// Only the registers Linux's pl061 driver touches, and only the event
++	// pins' bits: Apple's Virtualization.framework PL061 model terminates the
++	// VM on writes it does not expect (AFSEL, or IC bits of unconfigured pins).
++	{
++		uint8 pins = device->event_pins;
++		write_reg(device, PL061_IE, read_reg(device, PL061_IE) & ~pins);
++		write_reg(device, PL061_DIR, read_reg(device, PL061_DIR) & ~pins);
++		write_reg(device, PL061_IBE, (read_reg(device, PL061_IBE) & ~pins)
++			| (device->both_edges_pins & pins));
++		write_reg(device, PL061_IS, (read_reg(device, PL061_IS) & ~pins)
++			| (device->level_pins & pins));
++		write_reg(device, PL061_IEV, (read_reg(device, PL061_IEV) & ~pins)
++			| (pins & ~device->low_pins));
++		write_reg(device, PL061_IC, pins);
++	}
++
++	status = install_io_interrupt_handler(device->irq, gpio_events_interrupt, device, 0);
++	if (status != B_OK) {
++		ERROR("installing the interrupt handler for irq %" B_PRIu32 " failed\n", device->irq);
++		goto error;
++	}
++	resume_thread(device->thread);
++	write_reg(device, PL061_IE, read_reg(device, PL061_IE) | device->event_pins);
++
++	dprintf("acpi_gpio_events: PL061 at %#" B_PRIxPHYSADDR ", irq %" B_PRIu32 ", event pins %#x\n",
++		device->regs_base, device->irq, device->event_pins);
++	*_cookie = device;
++	return B_OK;
++
++error:
++	if (device->thread >= 0) {
++		device->quit = true;
++		release_sem(device->sem);
++		wait_for_thread(device->thread, NULL);
++	}
++	if (device->sem >= 0)
++		delete_sem(device->sem);
++	if (device->regs_area >= 0)
++		delete_area(device->regs_area);
++	free(device);
++	return status;
++}
++
++
++static void
++gpio_events_uninit_driver(void* cookie)
++{
++	gpio_events_device* device = (gpio_events_device*)cookie;
++	write_reg(device, PL061_IE, read_reg(device, PL061_IE) & ~device->event_pins);
++	remove_io_interrupt_handler(device->irq, gpio_events_interrupt, device);
++	device->quit = true;
++	release_sem(device->sem);
++	wait_for_thread(device->thread, NULL);
++	delete_sem(device->sem);
++	delete_area(device->regs_area);
++	free(device);
++}
++
++
++module_dependency module_dependencies[] = {
++	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info**)&sDeviceManager },
++	{}
++};
++
++
++driver_module_info gpio_events_driver_module = {
++	{
++		ACPI_GPIO_EVENTS_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	gpio_events_support,
++	gpio_events_register_device,
++	gpio_events_init_driver,
++	gpio_events_uninit_driver,
++	NULL,	// register child devices
++	NULL,	// rescan
++	NULL,	// removed
++};
++
++
++module_info* modules[] = {
++	(module_info*)&gpio_events_driver_module,
++	NULL
++};
+-- 
+2.54.0 (Apple Git-157)
+

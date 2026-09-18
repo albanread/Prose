@@ -1,0 +1,121 @@
+From bb7948b2f3686f00c02f68cdd96c5115664546e4 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 13:28:00 +0100
+Subject: [PATCH] arm64: shut down and reboot through PSCI
+
+arch_cpu_shutdown() was a stub returning B_ERROR, so "Shut down" and
+"Restart" did nothing. The boot loader already finds the PSCI conduit (HVC
+or SMC) in the ACPI FADT or the device tree for CPU_ON; it now records it in
+kernel_args, and the kernel issues PSCI SYSTEM_RESET / SYSTEM_OFF with it.
+Under Apple's Virtualization.framework the VM powers off cleanly.
+
+kernel_args also gains boot_time_utc, used by the next commit.
+---
+ .../kernel/arch/arm64/arch_kernel_args.h      |  7 ++++
+ .../boot/platform/efi/arch/arm64/arch_smp.cpp |  3 ++
+ src/system/kernel/arch/arm64/arch_cpu.cpp     | 34 ++++++++++++++++++-
+ 3 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/headers/private/kernel/arch/arm64/arch_kernel_args.h b/headers/private/kernel/arch/arm64/arch_kernel_args.h
+index 459ce88c4b..654da1dae3 100644
+--- a/headers/private/kernel/arch/arm64/arch_kernel_args.h
++++ b/headers/private/kernel/arch/arm64/arch_kernel_args.h
+@@ -35,6 +35,13 @@ typedef struct {
+ 	uart_info	uart;
+ 	intc_info	interrupt_controller;
+ 
++	// HaikuArmQemu fork: the PSCI conduit the loader found (0 none, 1 HVC,
++	// 2 SMC), for shutdown and reboot, and the wall-clock time at boot from
++	// UEFI GetTime(), seconds since 1970 UTC (0 = unknown), for hosts with
++	// no RTC (Apple's Virtualization.framework).
++	uint8	psci_conduit;
++	uint64	boot_time_utc;
++
+ } _PACKED arch_kernel_args;
+ 
+ #endif	/* KERNEL_ARCH_ARM64_KERNEL_ARGS_H */
+diff --git a/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp b/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp
+index 856e6f2961..b926e03481 100644
+--- a/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp
++++ b/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp
+@@ -272,6 +272,7 @@ arm64_handle_acpi_fadt(acpi_fadt_arm_boot_arch armBootFlags)
+ 		sPsciCallFn = arm64_psci_call_hvc;
+ 	else
+ 		sPsciCallFn = arm64_psci_call_smc;
++	gKernelArgs.arch_args.psci_conduit = armBootFlags.psci_use_hvc ? 1 : 2;
+ }
+ 
+ 
+@@ -283,8 +284,10 @@ arm64_handle_fdt_psci_node(const void* fdt, int node)
+ 
+ 	if (strcmp(method, "smc") == 0) {
+ 		sPsciCallFn = arm64_psci_call_smc;
++		gKernelArgs.arch_args.psci_conduit = 2;
+ 	} else if (strcmp(method, "hvc") == 0) {
+ 		sPsciCallFn = arm64_psci_call_hvc;
++		gKernelArgs.arch_args.psci_conduit = 1;
+ 	}
+ }
+ 
+diff --git a/src/system/kernel/arch/arm64/arch_cpu.cpp b/src/system/kernel/arch/arm64/arch_cpu.cpp
+index 643dc98c96..8f4512cf1d 100644
+--- a/src/system/kernel/arch/arm64/arch_cpu.cpp
++++ b/src/system/kernel/arch/arm64/arch_cpu.cpp
+@@ -12,6 +12,30 @@
+ #include <elf.h>
+ 
+ 
++// HaikuArmQemu fork: shutdown and reboot go through PSCI, using the conduit
++// (HVC or SMC) the boot loader found in the ACPI FADT or the device tree.
++#define PSCI_SYSTEM_OFF		0x84000008
++#define PSCI_SYSTEM_RESET	0x84000009
++
++static uint8 sPsciConduit = 0;	// 0 none, 1 HVC, 2 SMC
++
++
++static void
++psci_call(uint64 function)
++{
++	register uint64 x0 asm("x0") = function;
++	if (sPsciConduit == 1) {
++		asm volatile("hvc #0" : "+r" (x0) : : "x1", "x2", "x3", "x4", "x5", "x6",
++			"x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
++			"x17", "memory");
++	} else {
++		asm volatile("smc #0" : "+r" (x0) : : "x1", "x2", "x3", "x4", "x5", "x6",
++			"x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
++			"x17", "memory");
++	}
++}
++
++
+ extern "C" void _exception_vectors(void);
+ 
+ 
+@@ -49,6 +73,7 @@ arch_cpu_init_percpu(kernel_args *args, int curr_cpu)
+ status_t
+ arch_cpu_init(kernel_args *args)
+ {
++	sPsciConduit = args->arch_args.psci_conduit;
+ 	for (uint32 i = 0; i < args->num_cpus; i++) {
+ 		cpu_ent* cpu = &gCPU[i];
+ 
+@@ -77,7 +102,14 @@ arch_cpu_init_post_modules(kernel_args *args)
+ status_t
+ arch_cpu_shutdown(bool reboot)
+ {
+-	// never reached
++	if (sPsciConduit == 0)
++		return B_ERROR;
++
++	dprintf("arch_cpu_shutdown: PSCI %s\n", reboot ? "SYSTEM_RESET" : "SYSTEM_OFF");
++	disable_interrupts();
++	psci_call(reboot ? PSCI_SYSTEM_RESET : PSCI_SYSTEM_OFF);
++
++	// PSCI does not return from these calls; if we get here, it refused.
+ 	return B_ERROR;
+ }
+ 
+-- 
+2.54.0 (Apple Git-157)
+

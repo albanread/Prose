@@ -1,0 +1,136 @@
+From 9dc9df687604c956549b1919476ba81225025143 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 13:28:00 +0100
+Subject: [PATCH] arm64: take the wall clock from UEFI GetTime() at boot
+
+There is no RTC the arm64 kernel can read, and Apple's Virtualization.framework
+has none at all, so the clock started at 1970. The EFI loader reads UEFI
+GetTime() just before ExitBootServices and passes it in kernel_args; the
+kernel's RTC then reports that time plus the monotonic system time, and
+set_hw_time() adjusts an offset. EDK2 on QEMU and Virtualization.framework
+report UTC with an unspecified zone; a specified zone is applied.
+---
+ .../platform/efi/arch/arm64/arch_start.cpp    | 36 +++++++++++++++++++
+ .../arch/arm64/arch_real_time_clock.cpp       | 29 ++++++++++++++-
+ 2 files changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/src/system/boot/platform/efi/arch/arm64/arch_start.cpp b/src/system/boot/platform/efi/arch/arm64/arch_start.cpp
+index 9f8684e91d..7005c907a9 100644
+--- a/src/system/boot/platform/efi/arch/arm64/arch_start.cpp
++++ b/src/system/boot/platform/efi/arch/arm64/arch_start.cpp
+@@ -18,6 +18,31 @@
+ #include "aarch64.h"
+ 
+ 
++// HaikuArmQemu fork: seconds since 1970-01-01 UTC from an EFI_TIME. Days from
++// the civil date follow Howard Hinnant's algorithm. EFI_TIME's TimeZone is
++// the offset in minutes to add to the local time to get UTC; unspecified means
++// the time already is UTC (as EDK2 on QEMU and Virtualization.framework report).
++static uint64
++efi_time_to_unix(const efi_time& t)
++{
++	int64 y = t.Year;
++	int64 m = t.Month;
++	int64 d = t.Day;
++	if (m <= 2)
++		y--;
++	int64 era = (y >= 0 ? y : y - 399) / 400;
++	int64 yoe = y - era * 400;
++	int64 mp = (m + 9) % 12;
++	int64 doy = (153 * mp + 2) / 5 + d - 1;
++	int64 doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
++	int64 days = era * 146097 + doe - 719468;
++	int64 seconds = days * 86400 + (int64)t.Hour * 3600 + (int64)t.Minute * 60 + t.Second;
++	if (t.TimeZone != EFI_UNSPECIFIED_TIMEZONE)
++		seconds += (int64)t.TimeZone * 60;
++	return seconds < 0 ? 0 : (uint64)seconds;
++}
++
++
+ extern const char* granule_type_str(int tg);
+ 
+ 
+@@ -180,6 +205,17 @@ arch_start_kernel(addr_t kernelEntry)
+ 	// they only needed to know about the maximum address, not any specific
+ 	// entry.
+ 
++	// HaikuArmQemu fork: remember the wall-clock time for the kernel, which has
++	// no RTC to read on this platform (Apple's Virtualization.framework has none).
++	efi_time bootTime;
++	if (kRuntimeServices->GetTime(&bootTime, NULL) == EFI_SUCCESS) {
++		gKernelArgs.arch_args.boot_time_utc = efi_time_to_unix(bootTime);
++		dprintf("UEFI time: %04u-%02u-%02u %02u:%02u:%02u, zone %d -> %" B_PRIu64 "\n",
++			bootTime.Year, bootTime.Month, bootTime.Day, bootTime.Hour, bootTime.Minute,
++			bootTime.Second, bootTime.TimeZone, gKernelArgs.arch_args.boot_time_utc);
++	} else
++		dprintf("UEFI GetTime() failed: the kernel starts without a wall clock\n");
++
+ 	dprintf("Calling ExitBootServices. So long, EFI!\n");
+ 	serial_disable();
+ 
+diff --git a/src/system/kernel/arch/arm64/arch_real_time_clock.cpp b/src/system/kernel/arch/arm64/arch_real_time_clock.cpp
+index a0ee708356..0e6cfa7133 100644
+--- a/src/system/kernel/arch/arm64/arch_real_time_clock.cpp
++++ b/src/system/kernel/arch/arm64/arch_real_time_clock.cpp
+@@ -2,6 +2,7 @@
+  * Copyright 2019 Haiku, Inc. All Rights Reserved.
+  * Distributed under the terms of the MIT License.
+  */
++#include <KernelExport.h>
+ #include <arch/real_time_clock.h>
+ 
+ #include <real_time_clock.h>
+@@ -9,9 +10,30 @@
+ #include <smp.h>
+ 
+ 
++// HaikuArmQemu fork: there is no RTC under Apple's Virtualization.framework
++// (and none the kernel drives elsewhere on arm64 yet). The boot loader reads
++// UEFI GetTime() before ExitBootServices and passes it in kernel_args; from
++// then on the wall clock is that time plus the monotonic system time.
++static uint64 sBootTimeUTC = 0;
++static bigtime_t sBootSystemTime = 0;
++static int64 sAdjustment = 0;
++
++
++static uint64
++emulated_hw_time()
++{
++	return sBootTimeUTC + (uint64)((system_time() - sBootSystemTime) / 1000000)
++		+ sAdjustment;
++}
++
++
+ status_t
+ arch_rtc_init(kernel_args *args, struct real_time_data *data)
+ {
++	sBootTimeUTC = args->arch_args.boot_time_utc;
++	sBootSystemTime = system_time();
++	if (sBootTimeUTC != 0)
++		dprintf("rtc: using the boot loader's UEFI time, %" B_PRIu64 "\n", sBootTimeUTC);
+ 	return B_OK;
+ }
+ 
+@@ -19,13 +41,18 @@ arch_rtc_init(kernel_args *args, struct real_time_data *data)
+ uint64
+ arch_rtc_get_hw_time(void)
+ {
+-	return 0;
++	if (sBootTimeUTC == 0)
++		return 0;
++	return emulated_hw_time();
+ }
+ 
+ 
+ void
+ arch_rtc_set_hw_time(uint64 seconds)
+ {
++	if (sBootTimeUTC == 0)
++		return;
++	sAdjustment += (int64)seconds - (int64)emulated_hw_time();
+ }
+ 
+ 
+-- 
+2.54.0 (Apple Git-157)
+
