@@ -397,7 +397,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
 
     /// --screenshot PATH: write the presentation surface as PNG with each stats line,
     /// so a headless run can be checked without anyone looking at the window.
-    private func screenshot(to path: String) {
+    func screenshot(to path: String) {
         guard let surface, surface.width > 0, surface.height > 0, mode != nil else { return }
         presentLock.lock()
         defer { presentLock.unlock() }

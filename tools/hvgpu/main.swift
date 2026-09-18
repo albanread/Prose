@@ -20,6 +20,9 @@
 //   --screenshot PATH       s2: dump the presentation surface as PNG every 10 s (with the stats line)
 //   --resize-after N WxH    resize our window after N seconds (tests MODE_HINT / live resize)
 //   --commit-stats          s2: list the most frequently committed rects with each stats line
+//   --input own|vz          own: our virtio-input keyboard + tablet, window entirely ours (default);
+//                           vz: VZ's USB keyboard/pointer + virtio-gpu + VZVirtualMachineView
+//   --input-test            own input: click the Deskbar leaf, Escape, park the pointer (screenshots)
 //   (same options as hvz: --efivars --cpus --memory --seconds --grace --serial
 //    --nested --no-net --headless)
 import AppKit
@@ -52,6 +55,8 @@ let runSeconds = option("--seconds").flatMap(Double.init)
 let grace = Double(option("--grace") ?? "8") ?? 8
 let headless = args.contains("--headless")
 let displayMode = option("--display") ?? "s1"
+let ownInput = option("--input") != "vz"
+var inputRouter: InputRouter?        // set when our own input devices are in use
 
 let startTime = Date()
 func log(_ event: String) {
@@ -577,8 +582,43 @@ final class RAMConsole {
 final class MetalView: NSView {
     override func makeBackingLayer() -> CALayer { CAMetalLayer() }
     override var wantsUpdateLayer: Bool { true }
-    // Mouse events fall through to the VZ view underneath, which feeds the guest.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    // With VZ's input devices, events fall through to the VZ view underneath; with our
+    // own devices (input.swift) this view is the one that takes them.
+    override func hitTest(_ point: NSPoint) -> NSView? { inputRouter == nil ? nil : super.hitTest(point) }
+    override var acceptsFirstResponder: Bool { inputRouter != nil }
+
+    private var tracking: NSTrackingArea?
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        tracking = t
+    }
+
+    override func mouseMoved(with e: NSEvent) { inputRouter?.pointer(e, in: self) }
+    override func mouseDragged(with e: NSEvent) { inputRouter?.pointer(e, in: self) }
+    override func rightMouseDragged(with e: NSEvent) { inputRouter?.pointer(e, in: self) }
+    override func otherMouseDragged(with e: NSEvent) { inputRouter?.pointer(e, in: self) }
+    override func mouseDown(with e: NSEvent) { inputRouter?.button(e, in: self) }
+    override func mouseUp(with e: NSEvent) { inputRouter?.button(e, in: self) }
+    override func rightMouseDown(with e: NSEvent) { inputRouter?.button(e, in: self) }
+    override func rightMouseUp(with e: NSEvent) { inputRouter?.button(e, in: self) }
+    override func otherMouseDown(with e: NSEvent) { inputRouter?.button(e, in: self) }
+    override func otherMouseUp(with e: NSEvent) { inputRouter?.button(e, in: self) }
+    override func scrollWheel(with e: NSEvent) { inputRouter?.scroll(e) }
+    override func mouseEntered(with e: NSEvent) { inputRouter?.entered() }
+    override func mouseExited(with e: NSEvent) { inputRouter?.exited() }
+    override func keyDown(with e: NSEvent) { inputRouter?.key(e, pressed: true) }
+    override func keyUp(with e: NSEvent) { inputRouter?.key(e, pressed: false) }
+    override func flagsChanged(with e: NSEvent) { inputRouter?.flags(e) }
+    // ⌘-combinations would otherwise be taken as menu equivalents: the guest gets them.
+    override func performKeyEquivalent(with e: NSEvent) -> Bool {
+        guard let router = inputRouter else { return false }
+        if e.type == .keyDown { router.key(e, pressed: true) } else if e.type == .keyUp { router.key(e, pressed: false) }
+        return true
+    }
 }
 
 final class Presenter: NSObject {
@@ -609,17 +649,20 @@ final class Presenter: NSObject {
             exit(1)
         }
 
-        // The VZ view sits underneath: it takes keyboard/pointer input and shows VZ's own
-        // display. Our Metal view is an overlay on top, hidden until our device presents.
         let frame = NSRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
         let container = NSView(frame: frame)
         container.wantsLayer = true
-        vmView = VZVirtualMachineView()
-        vmView.virtualMachine = vm
-        vmView.capturesSystemKeys = true
-        vmView.frame = container.bounds
-        vmView.autoresizingMask = [.width, .height]
-        container.addSubview(vmView)
+        if !ownInput {
+            // --input vz: the VZ view sits underneath: it takes keyboard/pointer input and
+            // shows VZ's own display. Our Metal view is an overlay on top, hidden until our
+            // device presents. With our own input devices there is no VZ view at all.
+            vmView = VZVirtualMachineView()
+            vmView.virtualMachine = vm
+            vmView.capturesSystemKeys = true
+            vmView.frame = container.bounds
+            vmView.autoresizingMask = [.width, .height]
+            container.addSubview(vmView)
+        }
 
         view = MetalView(frame: container.bounds)
         view.autoresizingMask = [.width, .height]
@@ -629,7 +672,7 @@ final class Presenter: NSObject {
         layer.pixelFormat = .bgra8Unorm
         layer.isOpaque = true
         layer.framebufferOnly = true
-        view.isHidden = true
+        view.isHidden = !ownInput        // nothing underneath to show with our own input
         container.addSubview(view)       // above vmView
 
         window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -638,7 +681,7 @@ final class Presenter: NSObject {
         window.contentView = container
         window.center()
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(vmView)
+        window.makeFirstResponder(ownInput ? view : vmView)
         log("window \(width)x\(height) shown")
         NSApp.activate(ignoringOtherApps: true)
         updateDrawableSize()
@@ -646,6 +689,17 @@ final class Presenter: NSObject {
         // Drive presentation from the container: a hidden view gets no display-link callbacks.
         let link = container.displayLink(target: self, selector: #selector(tick(_:)))
         link.add(to: .main, forMode: .common)
+    }
+
+    /// The rectangle (view points) the guest image occupies: the same aspect-fit the shader
+    /// uses; the whole view while there is no image. Pointer coordinates map through it.
+    func imageRect() -> NSRect {
+        let b = view.bounds
+        guard let s = presenterGPU?.surface, s.width > 0, s.height > 0, b.width > 0, b.height > 0 else { return b }
+        let surfAspect = Double(s.width) / Double(s.height), targetAspect = Double(b.width) / Double(b.height)
+        var w = Double(b.width), h = Double(b.height)
+        if targetAspect > surfAspect { w = h * surfAspect } else { h = w / surfAspect }
+        return NSRect(x: Double(b.midX) - w / 2, y: Double(b.midY) - h / 2, width: w, height: h)
     }
 
     func updateDrawableSize() {
@@ -766,6 +820,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     var vm: VZVirtualMachine!
     let gpu = CustomVirtioGPU()
     let prds = PRDSDevice(width: width, height: height, poolMiB: Int(option("--pool-mib") ?? "128") ?? 128)
+    lazy var router = InputRouter(presenter: presenter)
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
     let presenter = Presenter()
@@ -806,6 +861,31 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         if let seconds = runSeconds {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [self] in
                 stopVM(reason: "time limit \(Int(seconds)) s")
+            }
+        }
+        // --input-test: drive our own input devices without a human: click the Deskbar leaf,
+        // Escape, then park the pointer mid-screen; a screenshot after each step.
+        if ownInput, args.contains("--input-test") {
+            let base = option("--screenshot") ?? "input-test.png"
+            func shot(_ n: Int) { prds.screenshot(to: base.replacingOccurrences(of: ".png", with: "-\(n).png")) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [self] in
+                log("input test: click on the Deskbar leaf")
+                router.move(to: Int32(0.986 * Double(EV.absMax)), Int32(0.0175 * Double(EV.absMax)))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in router.click() }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 33) { shot(1) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 34) { [self] in
+                log("input test: Escape")
+                router.tap(evdev: 1)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 36) { shot(2) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 37) { [self] in
+                log("input test: pointer to the centre")
+                router.move(to: Int32(EV.absMax / 2), Int32(EV.absMax / 2))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 39) { [self] in
+                shot(3)
+                log(router.stats)
             }
         }
         // --resize-after N WxH: resize our window after N seconds (live-resize test)
@@ -863,19 +943,25 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         } else if !args.contains("--no-custom-gpu") {   // --no-custom-gpu: VZ's GPU only
             config.customVirtioDevices = [displaySource.configuration]
         }
-        // VZ's own virtio-gpu stays by default: VZVirtualMachineView maps the absolute pointer
-        // onto it, so without it the mouse doesn't move. Stock Haiku opens it first
-        // (graphics/virtio/0) and hangs; our Haiku fork skips GPUs without EDID
-        // (patches/haiku/0002), so app_server uses ours. --no-vz-gpu drops it.
-        if !args.contains("--no-vz-gpu") {
-            let vzGpu = VZVirtioGraphicsDeviceConfiguration()
-            vzGpu.scanouts = [VZVirtioGraphicsScanoutConfiguration(widthInPixels: width,
-                                                                    heightInPixels: height)]
-            config.graphicsDevices = [vzGpu]
+        if ownInput {
+            // Our own virtio-input keyboard and tablet (input.swift): no VZ graphics device,
+            // no USB keyboard or pointing device, no VZVirtualMachineView.
+            inputRouter = router
+            config.customVirtioDevices += [router.keyboard.configuration, router.tablet.configuration]
+        } else {
+            // --input vz: VZ's own virtio-gpu stays: VZVirtualMachineView maps the absolute
+            // pointer onto it, so without it the mouse doesn't move. Stock Haiku opens it first
+            // (graphics/virtio/0) and hangs; our Haiku fork skips GPUs without EDID
+            // (patches/haiku/0002), so app_server uses ours. --no-vz-gpu drops it.
+            if !args.contains("--no-vz-gpu") {
+                let vzGpu = VZVirtioGraphicsDeviceConfiguration()
+                vzGpu.scanouts = [VZVirtioGraphicsScanoutConfiguration(widthInPixels: width,
+                                                                        heightInPixels: height)]
+                config.graphicsDevices = [vzGpu]
+            }
+            config.keyboards = [VZUSBKeyboardConfiguration()]
+            config.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
         }
-
-        config.keyboards = [VZUSBKeyboardConfiguration()]
-        config.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
         config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 
@@ -892,6 +978,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     }
 
     func stopVM(reason: String) {
+        if let router = inputRouter { log(router.stats) }
         guard !stopping else { return }
         stopping = true
         log("stopping: \(reason)")

@@ -1,0 +1,89 @@
+From 358764d059e9b7f544455c40bbc7af848fe6a95d Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 16:24:43 +0100
+Subject: [PATCH] virtio_input: static configuration table for devices without
+ config writes
+
+Custom virtio devices under Apple's Virtualization.framework never see
+the guest's configuration writes, so the select/subsel protocol that
+virtio-input uses to expose its capabilities cannot work there. Such a
+device (hvgpu's keyboard and tablet) marks its configuration with
+"PRIN1" in the reserved bytes and follows it with a table of answers,
+one (select, subsel, size, data[128]) entry per query, terminated by
+select 0xff. QueryConfig() reads the configuration first and, when the
+marker is present, serves the query from the table without ever writing;
+otherwise it does what it always did. The table is read in one call
+because the bus manager's offset argument is only 8 bits wide.
+
+Verified on VZ with hvgpu --input own: both devices identified (tablet by
+ABS_X/ABS_Y, keyboard by its key bitmap), input/virtio/{0,1}/raw
+published, clicks, keys and pointer positions reach app_server.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../input/virtio_input/virtio_input.cpp       | 44 ++++++++++++++++++-
+ 1 file changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/src/add-ons/kernel/drivers/input/virtio_input/virtio_input.cpp b/src/add-ons/kernel/drivers/input/virtio_input/virtio_input.cpp
+index 89a017602a..6647878fae 100644
+--- a/src/add-ons/kernel/drivers/input/virtio_input/virtio_input.cpp
++++ b/src/add-ons/kernel/drivers/input/virtio_input/virtio_input.cpp
+@@ -189,12 +189,54 @@ WriteInputPacket(const VirtioInputPacket &pkt)
+ #endif
+ 
+ 
++// PROSE fork: a device that cannot take configuration writes (custom virtio
++// devices under Apple's Virtualization.framework) answers every query up front
++// with a table of (select, subsel, size, data) entries right after the standard
++// configuration, marked by "PRIN1" in the reserved bytes. The entries are read
++// in one go: the bus manager's offset argument is 8 bits wide, the length is not.
++struct VirtioInputStaticEntry {
++	uint8 select;
++	uint8 subsel;
++	uint8 size;
++	uint8 reserved;
++	uint8 data[128];
++} _PACKED;
++
++#define VIRTIO_INPUT_STATIC_MAGIC		"PRIN1"
++#define VIRTIO_INPUT_STATIC_MAX_ENTRIES	16
++
++
+ static status_t
+ QueryConfig(VirtioInputDevice* dev, uint8 select, uint8 subsel, VirtioInputConfig* config)
+ {
+ 	MutexLocker locker(dev->virtioConfigLock);
+ 
+-	status_t status = dev->virtio->write_device_config(dev->virtioDevice,
++	status_t status = dev->virtio->read_device_config(dev->virtioDevice, 0, config,
++		sizeof(*config));
++	if (status != B_OK)
++		return status;
++	if (memcmp(config->reserved, VIRTIO_INPUT_STATIC_MAGIC, 5) == 0) {
++		static VirtioInputStaticEntry entries[VIRTIO_INPUT_STATIC_MAX_ENTRIES];
++		status = dev->virtio->read_device_config(dev->virtioDevice, sizeof(*config), entries,
++			sizeof(entries));
++		if (status != B_OK)
++			return status;
++		config->select = select;
++		config->subsel = subsel;
++		config->size = 0;
++		for (uint32 i = 0; i < VIRTIO_INPUT_STATIC_MAX_ENTRIES; i++) {
++			if (entries[i].select == 0xff)
++				break;
++			if (entries[i].select == select && entries[i].subsel == subsel) {
++				config->size = entries[i].size;
++				memcpy(config->bitmap, entries[i].data, sizeof(entries[i].data));
++				break;
++			}
++		}
++		return B_OK;
++	}
++
++	status = dev->virtio->write_device_config(dev->virtioDevice,
+ 		offsetof(VirtioInputConfig, select), &select, sizeof(select));
+ 	if (status != B_OK)
+ 		return status;
+-- 
+2.54.0 (Apple Git-157)
+
