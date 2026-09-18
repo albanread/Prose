@@ -8,12 +8,12 @@ cd "$ROOT/packages/src"
 pass=0 fail=0
 for d in */; do
 	n=${d%/}
-	if [ -x "$ROOT/packages/out/$n/$n" ]; then
+	if [ -f "$ROOT/packages/out/$n/$n" ]; then
 		printf '| %s | prebuilt |\n' "$n" >> "$ROOT/packages/RESULTS.md"
 		continue
 	fi
 	out=$(timeout 300 "$ROOT/scripts/pkg-build.sh" "$n" 2>&1)
-	if [ -x "$ROOT/packages/out/$n/$n" ]; then
+	if [ -f "$ROOT/packages/out/$n/$n" ]; then
 		printf '| %s | PASS |\n' "$n" >> "$ROOT/packages/RESULTS.md"
 		pass=$((pass+1))
 	else

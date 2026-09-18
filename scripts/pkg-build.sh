@@ -32,8 +32,8 @@ mkdir -p "$SYSROOT/develop/etc"
 cp "$HAIKU/data/develop/makefile-engine" "$SYSROOT/develop/etc/makefile-engine"
 export PATH="$STUBS:$PATH"
 
-CXX="$HAIKU/generated/cross-tools-arm64/bin/aarch64-unknown-haiku-g++"
-CC="$HAIKU/generated/cross-tools-arm64/bin/aarch64-unknown-haiku-gcc"
+CXX="$ROOT/packages/bin/haiku-c++"
+CC="$ROOT/packages/bin/haiku-cc"
 # The cross-gcc sysroot carries all headers/libs (see packages/README.md):
 # flagless compiles, only the app libs on the link line. Private headers are
 # not part of the compiler's baked search path, so add them explicitly.
