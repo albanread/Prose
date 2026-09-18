@@ -14,7 +14,7 @@ Haiku source tree and <https://www.haiku-os.org/guides/building/>.
 | configure + arm64 cross-tools (GCC 13.3) | done |
 | `jam @minimum-mmc` (source-built image) | done — `haiku/haiku-mmc.image`, 336 MB, ESP + BFS verified |
 | `jam haiku-mmc.image` (full desktop) | blocked: arm64 HaikuPorts packages unavailable locally; needs bootstrap (see §5) |
-| QEMU/HVF boot | draft command in `scripts/run-qemu.sh`, not yet validated |
+| QEMU/HVF boot to desktop | **done** — validated config below (2026-09-18) |
 
 ## 1. Why the odd layout: case sensitivity
 
@@ -161,7 +161,7 @@ brew install qemu          # ships UEFI firmware for aarch64
 scripts/run-qemu.sh
 ```
 
-Which expands to:
+Which expands to (validated — boots to desktop):
 
 ```sh
 qemu-system-aarch64 \
@@ -169,21 +169,33 @@ qemu-system-aarch64 \
     -smp 8 -m 4G \
     -bios /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
     -drive if=none,file=.../haiku-mmc.image,format=raw,id=hd0 \
-    -device virtio-blk-pci,drive=hd0 \
-    -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
-    -device virtio-gpu-pci \
-    -device virtio-keyboard-pci -device virtio-tablet-pci \
+    -device virtio-blk-device,drive=hd0 \
+    -netdev user,id=net0 -device virtio-net-device,netdev=net0 \
+    -device ramfb \
+    -device virtio-keyboard-device -device virtio-tablet-device \
     -serial stdio
 ```
 
 `-accel hvf` runs the guest CPUs natively via the Hypervisor framework — no
-emulation. Device choices to validate on first boot (swap-ins if something
-misbehaves):
+emulation. Two device findings from bring-up (QEMU 11.1.1, macOS, HVF):
 
-* display: `virtio-gpu-pci` (Haiku has a virtio-gpu driver + accelerant) —
-  fallback `-device ramfb` (firmware framebuffer);
-* disk: `virtio-blk-pci` — fallback `-device nvme,drive=hd0`;
-* input: `virtio-keyboard-pci`/`virtio-tablet-pci` — fallback `-device usb-kbd -device usb-tablet`.
+* **Display must be `ramfb`.** With `-device virtio-gpu-pci`, QEMU's edk2
+  firmware exposes no linear framebuffer to the OS (BltOnly, base 0), so the
+  Haiku EFI loader has nothing to draw on and the window stays at "Display
+  output is not active". `ramfb` provides an 800×600 BGRx GOP that Haiku's
+  framebuffer driver + accelerant then drive natively. (virtio-gpu remains
+  interesting later, driven by Haiku's own virtio-gpu driver — see roadmap.)
+* **virtio devices must use the mmio transport** (`virtio-blk-device` etc.,
+  not `virtio-blk-pci`). Over PCI under HVF, virtio-blk produced intermittent
+  `I/O error`s that stalled first-boot midway. With mmio the boot is clean.
+* Obviously, `-display none` hides the window even when everything works —
+  it is only for scripted/serial-only runs.
+
+Expected serial milestones: `framebuffer: framebuffer_init() completed
+successfully!` → `Running first login script ... default_deskbar_items.sh`.
+Some `Cannot open file libgame.so / libmedia.so ...` warnings are normal —
+the minimum image omits the media/midi/game kits (their build features need
+HaikuPorts packages unavailable for arm64; see §5).
 
 ## 7. Day-to-day update cycle
 
