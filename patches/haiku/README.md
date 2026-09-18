@@ -12,6 +12,13 @@ These apply on top of Haiku **hrev60122**. We maintain our own fork; see `haiku_
 | 0006 | The loader logs "Entering the kernel on the boot CPU" | Shows in the RAM console where the loader hands over |
 | 0007 | `virtio_block` logs every request that fails or times out (op, sector, length, vectors, wait result, elapsed, status byte) | Distinguishes "device never answered" (timeout, status 255) from "device rejected" (status 1/2) without a debugger |
 | 0008 | The virtio bus manager logs the device's offered and the driver's accepted feature bits, in hex, for every device | The negotiation is where both VZ failures hid |
+| 0009 | Shutdown and reboot through PSCI `SYSTEM_OFF`/`SYSTEM_RESET`; the loader passes the conduit (HVC/SMC) in `kernel_args` | `arch_cpu_shutdown()` was a stub, so "Shut down" did nothing and VMs could only be force-stopped |
+| 0010 | The loader reads UEFI `GetTime()` before `ExitBootServices` and the kernel's RTC counts on from it | There is no RTC on arm64 Haiku, and none at all under VZ; the clock started at 1970 |
+| 0011 | `acpi_gpio_events`: ACPI GPIO-signalled events on a PL061 (`ARMH0061`, `_AEI` → `_Exx`/`_Lxx`); `acpi_button` enabled for arm64; the private `acpi.h` gains the GPIO resource | This is how VZ signals the power button. Only the registers Linux's pl061 driver touches are written, and only the event pins' bits: VZ's PL061 model terminates the VM on unexpected writes (`AFSEL`, or `IC` bits of unconfigured pins) |
+| 0012 | Per-interrupt trigger configuration for GICv3 (`GICD_ICFGR`), and `arch_int_configure_io_interrupt()` on arm64 | All SPIs were level-sensitive; edge sources that pulse their line, like QEMU's GED, were lost |
+| 0013 | `acpi_gpio_events` also handles the ACPI Generic Event Device (`ACPI0013`, `_EVT(irq)`) | QEMU's `virt` signals the power button this way; `system_powerdown` now ends in a clean PSCI `SYSTEM_OFF` |
+
+From 0009 on, patches are `git format-patch` output of single commits on the `vz-fork` branch (they may touch several files) and apply with `git apply` or `git am`.
 
 Apply to a clean tree, then rebuild the image:
 

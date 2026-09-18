@@ -1,0 +1,109 @@
+From 63e8ac1d11bcb295da3d1d96e24fc37c70288255 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 13:38:08 +0100
+Subject: [PATCH] arm64: per-interrupt trigger configuration for GICv3
+
+InterruptController gains ConfigureInterrupt(), implemented for GICv3 SPIs
+through GICD_ICFGR, and arch_int_configure_io_interrupt() now exists on
+arm64. All SPIs were level-sensitive; edge-triggered sources such as QEMU's
+ACPI Generic Event Device pulse their line and were lost.
+---
+ src/system/kernel/arch/arm/soc.h              |  6 +++++
+ src/system/kernel/arch/arm64/arch_int.cpp     | 10 +++++++++
+ .../kernel/arch/arm64/arch_int_gicv3.cpp      | 22 +++++++++++++++++++
+ src/system/kernel/arch/arm64/arch_int_gicv3.h |  2 ++
+ 4 files changed, 40 insertions(+)
+
+diff --git a/src/system/kernel/arch/arm/soc.h b/src/system/kernel/arch/arm/soc.h
+index b89294d7d7..5b66c14439 100644
+--- a/src/system/kernel/arch/arm/soc.h
++++ b/src/system/kernel/arch/arm/soc.h
+@@ -7,12 +7,18 @@ class InterruptController;
+ 
+ // ------------------------------------------------------ InterruptController
+ 
++#include <arch/int.h>
++
++
+ class InterruptController {
+ public:
+ 	virtual ~InterruptController() = default;
+ 
+ 	virtual void EnableInterrupt(int32 irq) = 0;
+ 	virtual void DisableInterrupt(int32 irq) = 0;
++	// HaikuArmQemu fork: trigger mode/polarity of an interrupt, where programmable.
++	virtual void ConfigureInterrupt(int32 irq, interrupt_trigger_mode mode,
++		interrupt_trigger_polarity polarity) {}
+ 
+ 	virtual void HandleInterrupt() = 0;
+ 
+diff --git a/src/system/kernel/arch/arm64/arch_int.cpp b/src/system/kernel/arch/arm64/arch_int.cpp
+index 6cde153200..844428c1ff 100644
+--- a/src/system/kernel/arch/arm64/arch_int.cpp
++++ b/src/system/kernel/arch/arm64/arch_int.cpp
+@@ -59,6 +59,16 @@ arch_int_disable_io_interrupt(int32 irq)
+ }
+ 
+ 
++void
++arch_int_configure_io_interrupt(int32 irq, interrupt_trigger_mode mode,
++	interrupt_trigger_polarity polarity)
++{
++	InterruptController *ic = InterruptController::Get();
++	if (ic != NULL)
++		ic->ConfigureInterrupt(irq, mode, polarity);
++}
++
++
+ int32
+ arch_int_assign_to_cpu(int32 irq, int32 cpu)
+ {
+diff --git a/src/system/kernel/arch/arm64/arch_int_gicv3.cpp b/src/system/kernel/arch/arm64/arch_int_gicv3.cpp
+index d067512798..28ce7863e7 100644
+--- a/src/system/kernel/arch/arm64/arch_int_gicv3.cpp
++++ b/src/system/kernel/arch/arm64/arch_int_gicv3.cpp
+@@ -115,6 +115,28 @@ GICv3InterruptController::_WaitForMask(volatile uint32_t* reg, uint32_t mask, ui
+ }
+ 
+ 
++// HaikuArmQemu fork: SPIs are all level-sensitive by default (see the
++// distributor init). Edge-triggered sources, such as QEMU's ACPI Generic
++// Event Device, pulse their line and would be lost without this. The GIC has
++// no polarity control. The interrupt should be disabled while it changes.
++void
++GICv3InterruptController::ConfigureInterrupt(int32 irq, interrupt_trigger_mode mode,
++	interrupt_trigger_polarity polarity)
++{
++	if (irq < 32 || irq >= 1020)
++		return;
++	uint32 shift = (irq % 16) * 2 + 1;
++	uint32 value = GICD_ICFGR(irq / 16);
++	if (mode == B_EDGE_TRIGGERED)
++		value |= 1u << shift;
++	else
++		value &= ~(1u << shift);
++	GICD_ICFGR(irq / 16) = value;
++	dprintf("gicv3: irq %" B_PRId32 " configured %s-triggered\n", irq,
++		mode == B_EDGE_TRIGGERED ? "edge" : "level");
++}
++
++
+ void
+ GICv3InterruptController::_SetEnable(uint vector, bool enable)
+ {
+diff --git a/src/system/kernel/arch/arm64/arch_int_gicv3.h b/src/system/kernel/arch/arm64/arch_int_gicv3.h
+index 18fc0e4ffb..7aadeecb1b 100644
+--- a/src/system/kernel/arch/arm64/arch_int_gicv3.h
++++ b/src/system/kernel/arch/arm64/arch_int_gicv3.h
+@@ -19,6 +19,8 @@ public:
+ 
+ 	void EnableInterrupt(int32 irq) override;
+ 	void DisableInterrupt(int32 irq) override;
++	void ConfigureInterrupt(int32 irq, interrupt_trigger_mode mode,
++		interrupt_trigger_polarity polarity) override;
+ 	void HandleInterrupt() override;
+ 	void SendMulticastIci(CPUSet& cpuSet) override;
+ 	void SendUnicastIci(int32 target_cpu) override;
+-- 
+2.54.0 (Apple Git-157)
+

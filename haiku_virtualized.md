@@ -38,6 +38,11 @@ Haiku arm64 boots to the desktop under Apple's Virtualization.framework, with ke
   - VZ's MADT gives every CPU GICC interface number 0, so the loader never started the other CPUs, and the kernel's rendezvous waited for them forever.
   - Once they did start, a `virtio_pci` bug (capabilities read by `length`, not `cap_len`) left `notify_off_multiplier` as garbage on VZ's small notify regions. `virtio_net` then panicked writing to random kernel addresses.
 - **virtio over PCI fixed** (patch 0003): virtio-blk boots under VZ, and QEMU's default `virtio-*-pci` devices boot on arm64 with no I/O errors. Both failures traced to `virtio_pci`, not to descriptor chains: Haiku's chains are spec-correct and VZ's custom-device framework consumes them unchanged.
+- **Sprint 1 items landed (patches 0009–0013, branch `vz-fork` in the private worktree):**
+  - Clean shutdown and reboot: PSCI `SYSTEM_OFF`/`SYSTEM_RESET` (0009). A VZ stop request or QEMU `system_powerdown` now shuts Haiku down in about a second: the power button arrives as an ACPI GPIO event on VZ's PL061 (0011) or through QEMU's Generic Event Device (0013), reaches `acpi_button` (now built for arm64) and `power_daemon`.
+  - Wall clock: UEFI `GetTime()` captured by the loader, RTC emulated from it (0010).
+  - Per-interrupt trigger configuration in the GICv3 driver (0012); QEMU's GED line is edge-triggered and pulsed.
+  - VZ quirk worth remembering: its PL061 model terminates the VM ("stopped unexpectedly") on register writes it does not expect, e.g. `AFSEL` or `IC` bits for unconfigured pins. Write only what Linux's `pl061` driver writes.
 - **Remaining:**
   - app_server hangs on VZ's own virtio-gpu (handled by patch 0002). Retested with the feature fix: Haiku's driver negotiates `VERSION_1`, then its first command never completes. Cause unknown; low priority, since our device is the display.
   - Haiku's legacy virtio-pci path (I/O ports) is still broken on arm64. It's now unused, because transitional devices take the modern path.
@@ -335,9 +340,9 @@ Scope decision: we fork Haiku (PROSE) and change whatever the experience needs. 
 ### 8.3 Sequencing
 
 **Sprint 1 (now):**
-1. Turn the patch series into a proper branch in the Haiku tree (one commit per patch, on top of hrev60122 and the PROSE branding), keeping `patches/haiku/` as the exported form.
-2. Clean shutdown and reboot: PSCI `SYSTEM_OFF`/`RESET` plus the ACPI power-button event. Small, and it makes `hvgpu`'s close button work.
-3. Wall clock at boot: host time from our device's config space.
+1. ✅ Turn the patch series into a proper branch in the Haiku tree: branch `vz-fork` in the private worktree, one commit per patch, `patches/haiku/` as the exported form. (The PROSE branding lives on the colleague's tree; merge later.)
+2. ✅ Clean shutdown and reboot: PSCI plus the ACPI power-button event (PL061 GPIO events on VZ, GED on QEMU), with per-IRQ trigger configuration in the GIC driver.
+3. ✅ Wall clock at boot: UEFI `GetTime()` via the loader turned out simpler than a device config field.
 4. Write the **S2 spec** (`docs/s2-display-device.md`): config layout, shared-region geometry, queue protocol, sync rules, event queue (vsync, mode hint, redraw). This is the contract the guest and host sides build against in parallel.
 5. Time-boxed: a virtqueue dump in `hvgpu` (Haiku prints ring addresses; the host reads them from guest RAM) to close the VZ-GPU question. Drop it if it takes more than a day.
 
