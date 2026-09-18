@@ -4,6 +4,7 @@
 #   defaults: --cpus 8 --disk nvme, windowed, RAM console -> work/<name>/ramconsole.log
 #   e.g. run-vz.sh smoke
 #        run-vz.sh blk --headless --seconds 100 --disk virtio
+#        PW_PACKAGES=@codecs run-vz.sh codecs   # with prosepkg packages installed
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 NAME=${1:?usage: run-vz.sh <name> [hvgpu options...]}
@@ -14,6 +15,10 @@ D="$PW_WORK/$NAME"
 mkdir -p "$D"
 cp "$PW_IMAGE" "$D/haiku.img"
 rm -f "$D/efivars"
+# PW_PACKAGES="<ports|packages|@set>": install packages built by prosepkg into the copy
+if [ -n "${PW_PACKAGES:-}" ]; then
+	"$PW_ROOT/scripts/prosepkg" install "$D/haiku.img" $PW_PACKAGES
+fi
 # PW_INJECT_SCRIPT=<file>: install it as the guest's UserBootscript (runs at boot as root)
 if [ -n "${PW_INJECT_SCRIPT:-}" ]; then
 	read -r START END < <(python3 - "$D/haiku.img" <<'PY'

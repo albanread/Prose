@@ -1,0 +1,24 @@
+# Codec libraries for Prose (runtime packages; prosepkg install adds their
+# requirements). Verified on arm64 by packages/test-codecs.sh.
+# images
+libpng16
+libjpeg_turbo
+libwebp
+tiff
+giflib
+openjpeg
+lcms
+# audio
+libogg
+libvorbis
+flac
+opus
+speex
+speexdsp
+mpg123
+lame
+wavpack
+# video
+libtheora
+libvpx
+dav1d

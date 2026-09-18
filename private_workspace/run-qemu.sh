@@ -2,6 +2,8 @@
 # Boot the private image under QEMU + HVF. Modern virtio-pci devices by default
 # (what Virtualization.framework uses too), ramfb for the boot display, -snapshot.
 # usage: run-qemu.sh [--mmio] [--headless] [--seconds N] [-- extra qemu args]
+#   PW_PACKAGES="<ports|packages|@set>" installs prosepkg packages into a copy,
+#   e.g. PW_PACKAGES=@codecs run-qemu.sh
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 [ -f "$PW_IMAGE" ] || { echo "no image at $PW_IMAGE: run build.sh" >&2; exit 1; }
@@ -20,10 +22,17 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+# PW_PACKAGES="<ports|packages|@set>": install packages built by prosepkg (implies --copy)
+if [ -n "${PW_PACKAGES:-}" ]; then
+	IMAGE="$PW_WORK/qemu/haiku.img"; SNAPSHOT=""
+fi
 D="$PW_WORK/qemu"
 mkdir -p "$D"
 if [ -z "$SNAPSHOT" ]; then
 	cp "$PW_IMAGE" "$IMAGE"
+	if [ -n "${PW_PACKAGES:-}" ]; then
+		"$PW_ROOT/scripts/prosepkg" install "$IMAGE" $PW_PACKAGES
+	fi
 	if [ -n "${PW_INJECT_SCRIPT:-}" ]; then
 		read -r START END < <(python3 - "$IMAGE" <<'PY'
 import struct, sys

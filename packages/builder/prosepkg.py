@@ -1317,7 +1317,14 @@ def install_closure(specs, image_names):
 			system_provides.setdefault(entry_name(p), name)
 	results = load_json(RESULTS, {})
 	todo = []
+	expanded = []
 	for spec in specs:
+		if spec.startswith('@'):
+			# a package set: packages/sets/<name>, one port or package per line
+			expanded += entries((BUILDER_DIR.parent / 'sets' / spec[1:]).read_text())
+		else:
+			expanded.append(spec)
+	for spec in expanded:
 		if spec in packages:
 			todo.append(spec)
 		elif results.get(spec, {}).get('status') == 'built':
@@ -1460,7 +1467,7 @@ def main():
 	b.set_defaults(func=cmd_info)
 	b = sub.add_parser('install', help='install built packages (+ requirements) into a Haiku image')
 	b.add_argument('image')
-	b.add_argument('packages', nargs='+', help='package or port names')
+	b.add_argument('packages', nargs='+', help='package or port names, @set (packages/sets/<set>)')
 	b.set_defaults(func=cmd_install)
 	b = sub.add_parser('index', help='(re)evaluate all recipes')
 	b.add_argument('--refresh', action='store_true')
