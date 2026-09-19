@@ -41,9 +41,14 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
     }
 
     /// Start the machine: at launch, from Start, and for Restart. A stopped VZ machine
-    /// that cannot start again is replaced by a new one with the same configuration.
+    /// that cannot start again is replaced by a new one, and so is one whose processor
+    /// memory, networking or sound setting has been changed since it was built — a
+    /// configuration is fixed when the machine is created, so a new setting needs a
+    /// new machine.
     func bootVM() {
-        if vm == nil || !vm.canStart {
+        let settingsChanged = cpus != Settings.cpuCount || memoryGiB != UInt64(Settings.memoryGiB)
+            || networkingOn != Settings.networking || soundOn != Settings.sound
+        if vm == nil || !vm.canStart || settingsChanged {
             do {
                 try makeVM()
             } catch {
@@ -324,6 +329,8 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
             NSWorkspace.shared.open(share.url)
         }
     }
+
+    @objc func showSettings(_ sender: Any?) { settingsWindow.show() }
 
     @objc func toggleFullScreen(_ sender: Any?) {
         presenter.window?.toggleFullScreen(sender)

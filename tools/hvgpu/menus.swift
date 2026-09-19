@@ -53,6 +53,8 @@ func makeMainMenu(_ controller: Controller) -> NSMenu {
     let app = menu("Prose")
     add(app, "About Prose", #selector(Controller.showAbout(_:)))
     app.addItem(.separator())
+    add(app, "Settings…", #selector(Controller.showSettings(_:)), ",", [.command])
+    app.addItem(.separator())
     let services = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
     services.submenu = NSMenu(title: "Services")
     NSApp.servicesMenu = services.submenu

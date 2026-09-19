@@ -207,8 +207,13 @@ guard let diskPath = diskArgument else {
 
 let diskURL = URL(fileURLWithPath: diskPath)
 let varsURL = URL(fileURLWithPath: option("--efivars") ?? diskPath + ".efivars")
-let cpus = Int(option("--cpus") ?? "4") ?? 4
-let memoryGiB = UInt64(option("--memory") ?? "4") ?? 4
+// What the machine currently in memory was actually built with. Settings can
+// be changed while it runs; these follow only when a new machine is made, so
+// anything reporting on the running machine stays true.
+var cpus = Settings.cpuCount
+var memoryGiB = UInt64(Settings.memoryGiB)
+var networkingOn = Settings.networking
+var soundOn = Settings.sound
 let dims = (option("--size") ?? "1280x800").split(separator: "x").compactMap { Int($0) }
 let (width, height) = (dims.count == 2 ? dims[0] : 1280, dims.count == 2 ? dims[1] : 800)
 let runSeconds = option("--seconds").flatMap(Double.init)
@@ -1345,6 +1350,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
                           poolMiB: Int(option("--pool-mib") ?? "128") ?? 128)
     lazy var router = InputRouter(presenter: presenter)
     lazy var automation = Automation(controller: self)      // automation.swift
+    lazy var settingsWindow = SettingsWindow(controller: self)   // settings.swift
     let midi = ProseMIDIDevice()
     let portal = ProsePortalDevice()           // portal.swift: the guest answers the host
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
@@ -1458,6 +1464,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
                           userInfo: [NSLocalizedDescriptionKey: "surface allocation failed"])
         }
         let config = VZVirtualMachineConfiguration()
+        cpus = Settings.cpuCount
+        memoryGiB = UInt64(Settings.memoryGiB)
         config.cpuCount = cpus
         config.memorySize = memoryGiB << 30
 
@@ -1483,7 +1491,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         default: config.storageDevices = [VZNVMExpressControllerDeviceConfiguration(attachment: disk)]
         }
 
-        if !args.contains("--no-net") {
+        networkingOn = Settings.networking
+        if networkingOn {
             let net = VZVirtioNetworkDeviceConfiguration()
             net.attachment = VZNATNetworkDeviceAttachment()
             net.macAddress = macAddress        // stable per disk image: same lease, same IP
@@ -1526,7 +1535,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         }
         config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         // virtio-snd to the Mac's default output/input (Haiku fork: virtio_sound driver)
-        if !args.contains("--no-sound") {
+        soundOn = Settings.sound
+        if soundOn {
             let output = VZVirtioSoundDeviceOutputStreamConfiguration()
             output.sink = VZHostAudioOutputStreamSink()
             let input = VZVirtioSoundDeviceInputStreamConfiguration()
