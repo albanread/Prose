@@ -39,7 +39,7 @@ To be clear:
 - prose is not affiliated with, endorsed by, or supported by Haiku, Inc. or the
   Haiku Project.
 - Please don't take questions or bug reports about prose to Haiku's issue
-  tracker or forums. They belong here.
+  tracker or forums.
 - If you want the real thing, and it is very much worth your time, go to
   [haiku-os.org](https://www.haiku-os.org).
 
