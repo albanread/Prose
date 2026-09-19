@@ -75,6 +75,8 @@ macOS 26 and 27 added enough to Virtualization.framework — custom virtio devic
 shared memory regions — that a Mac can host that port properly, with its display
 backed by the host GPU rather than emulated.
 
+*The stars aligned when beta6 met macOS 27.*
+
 So I use AI to run Haiku on my Mac.
 
 That is the honest description. The patches here, the host application, the
