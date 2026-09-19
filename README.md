@@ -43,7 +43,9 @@ To be clear:
 - If you want the real thing, and it is very much worth your time, go to
   [haiku-os.org](https://www.haiku-os.org).
 
-Thank you to everyone who has worked on Haiku over the years.
+Thank you to everyone who has worked on Haiku over the years; and to the
+recent contributors who created the arm64 port, which is what makes this
+possible on Apple Silicon.
 
 ## The Haiku project
 
