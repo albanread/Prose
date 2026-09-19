@@ -31,7 +31,9 @@ and `private_workspace/build.sh` run it, so a codec that prosepkg rebuilds is
 in the next image (see `private_workspace/README.md`, "Local packages").
 On the way it moves each package's entries in the Deskbar's Applications menu
 into the folder the tree's `build/jam/DeskbarCategories` gives them (patch
-0053); the packages in `repo/` keep them where their recipes put them. A new
+0053), and gives a folder it makes the tree's icon for it
+(`src/data/directory_attrs/deskbar-applications-<folder>.rdef`, patch 0055);
+the packages in `repo/` keep their entries where their recipes put them. A new
 application goes into a folder by adding its menu name to that file's list.
 `install` is for everything else, and for trying packages without rebuilding
 the image:
@@ -70,8 +72,9 @@ The probes are `tests/codecs.sh` (codec_check), `tests/openssl.sh`,
 `tests/midiplayer.sh` (patch 0048: plays a demo tune, quits cleanly),
 `tests/midikit.sh` (patches 0050, 0051: the Midi Kit's file player deleted
 while it plays and by its own song hook, and stopped at once; midikit_check,
-also on the guarded heap) and `tests/deskbar.sh` (patch 0053: the
-Applications menu folder by folder, every entry leading to its application). `BOOT_TEST_SOUND=1` gives the target a sound card,
+also on the guarded heap) and `tests/deskbar.sh` (patches 0053, 0055: the
+Applications menu folder by folder, every entry leading to its application,
+every folder with its icon). `BOOT_TEST_SOUND=1` gives the target a sound card,
 recorded to `<work>/out.wav` -- the built-in synthesizer only keeps time with
 one. Packages can be `.hpkg` files too, installed as they are: midikit.sh
 needs `haiku_devel.hpkg` of the image's own build for `libroot_debug.so`.

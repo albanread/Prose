@@ -2023,8 +2023,10 @@ def package_listing(hpkg):
 			elif key is not None:
 				attributes[key][-1] += '\n' + line
 		elif text.startswith('<'):
-			# an attribute of the entry above
+			# an attribute of the entry above (kept sorted: the order they
+			# are stored in says nothing)
 			contents[current].append(' '.join(text.split()))
+			contents[current][3:] = sorted(contents[current][3:])
 		elif m:
 			depth = (len(line) - len(line.lstrip(' '))) // 2
 			path = path[:depth] + [m.group(1)]
@@ -2082,6 +2084,25 @@ def deskbar_categories(tree):
 	return categories
 
 
+def deskbar_category_icons(tree, categories):
+	"""{folder: HVIF icon} from a Haiku tree's
+	src/data/directory_attrs/deskbar-applications-<folder>.rdef, the icons
+	the haiku package gives its category folders; folders without one are
+	left out."""
+	icons = {}
+	for folder in sorted(set(categories.values())):
+		path = Path(tree) / 'src' / 'data' / 'directory_attrs' / (
+			'deskbar-applications-%s.rdef' % folder.lower())
+		if not path.exists():
+			continue
+		m = re.search(r'resource\s*\([^)]*"BEOS:ICON"\s*\)\s*#\'VICN\'\s*array\s*\{(.*?)\}',
+			path.read_text(), re.S)
+		if not m:
+			raise BuildError('%s: no BEOS:ICON (VICN) resource' % path)
+		icons[folder] = bytes.fromhex(''.join(re.findall(r'\$"([0-9A-Fa-f]*)"', m.group(1))))
+	return icons
+
+
 def copy_haiku_attributes(src, dst):
 	"""Copy the Haiku attributes of src to dst -- the user.haiku.* extended
 	attributes the host's package tool keeps them in -- of symlinks
@@ -2093,11 +2114,11 @@ def copy_haiku_attributes(src, dst):
 			run(['/usr/bin/xattr', '-s', '-wx', name, ''.join(value.split()), dst], capture=True)
 
 
-def categorize_deskbar_entries(root, categories):
+def categorize_deskbar_entries(root, categories, icons=None):
 	"""Move the Deskbar Applications entries of an extracted package (root)
 	into their folders (deskbar_categories()): a folder gets the mode and
-	attributes of Applications, and a relative symlink one more '../'. The
-	number of entries moved."""
+	attributes of Applications and its icon (deskbar_category_icons()), and
+	a relative symlink one more '../'. The number of entries moved."""
 	apps = Path(root) / DESKBAR_APPLICATIONS
 	if not categories or not apps.is_dir():
 		return 0
@@ -2111,6 +2132,10 @@ def categorize_deskbar_entries(root, categories):
 			target.mkdir()
 			os.chmod(target, os.stat(apps).st_mode & 0o7777)
 			copy_haiku_attributes(apps, target)
+			if icons and folder in icons:
+				# the attribute's type code ('VICN') first, little-endian
+				run(['/usr/bin/xattr', '-s', '-wx', 'user.haiku.BEOS:ICON',
+					(b'NCIV' + icons[folder]).hex(), target], capture=True)
 		link = os.readlink(entry)
 		new = target / entry.name
 		os.symlink(link if link.startswith('/') else '../' + link, new)
@@ -2121,7 +2146,7 @@ def categorize_deskbar_entries(root, categories):
 	return moved
 
 
-def categorized_listing(listing, categories):
+def categorized_listing(listing, categories, icons=None):
 	"""A package_listing() as categorize_deskbar_entries() leaves the
 	package."""
 	attributes, contents = listing
@@ -2133,7 +2158,11 @@ def categorized_listing(listing, categories):
 		if folder is None or not value[1].startswith('l'):
 			moved[path] = value
 			continue
-		moved.setdefault(prefix + folder, list(contents[DESKBAR_APPLICATIONS]))
+		if prefix + folder not in moved:
+			entry = list(contents[DESKBAR_APPLICATIONS])
+			if icons and folder in icons:
+				entry[3:] = sorted(entry[3:] + ["<BEOS:ICON %d 'VICN'>" % len(icons[folder])])
+			moved[prefix + folder] = entry
 		link = value[2]
 		if link.startswith('-> ') and not link.startswith('-> /'):
 			link = '-> ../' + link[3:]
@@ -2141,7 +2170,7 @@ def categorized_listing(listing, categories):
 	return attributes, moved
 
 
-def copy_with_vendor(src, dst, vendor, categories=None):
+def copy_with_vendor(src, dst, vendor, categories=None, icons=None):
 	"""Write the package src to dst with another vendor, and its Deskbar
 	Applications entries in their folders (categorize_deskbar_entries()). A
 	Haiku build's repository accepts only its own vendor ("Haiku Project");
@@ -2158,7 +2187,7 @@ def copy_with_vendor(src, dst, vendor, categories=None):
 		if count != 1:
 			raise BuildError('%s: %d vendor lines in its .PackageInfo' % (src.name, count))
 		info.write_text(text)
-		categorize_deskbar_entries(tmp, categories)
+		categorize_deskbar_entries(tmp, categories, icons)
 		if new.exists():
 			new.unlink()
 		run([host_tool('package'), 'create', '-q', new], cwd=tmp, capture=True)
@@ -2200,6 +2229,7 @@ def cmd_local_packages(args):
 	vendor = m.group(1)
 
 	categories = deskbar_categories(tree)
+	icons = deskbar_category_icons(tree, categories)
 	download = tree / 'generated' / 'download'
 	missing, todo, foreign = [], [], []
 	for leaf in ours:
@@ -2214,7 +2244,7 @@ def cmd_local_packages(args):
 				foreign.append(leaf)
 			elif listing[0].get('vendor') != [vendor] \
 					or not same_package_but_vendor(listing,
-						categorized_listing(package_listing(src), categories)):
+						categorized_listing(package_listing(src), categories, icons)):
 				todo.append(('update', leaf))
 	if missing:
 		results = load_json(RESULTS, {})
@@ -2252,7 +2282,7 @@ def cmd_local_packages(args):
 		return
 	download.mkdir(parents=True, exist_ok=True)
 	for action, leaf in todo:
-		copy_with_vendor(REPO / leaf, download / leaf, vendor, categories)
+		copy_with_vendor(REPO / leaf, download / leaf, vendor, categories, icons)
 	if new_config is not None:
 		write_file(config_file, new_config)
 	if todo or new_config is not None:
