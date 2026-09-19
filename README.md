@@ -15,7 +15,7 @@ please do fork, copy, rewrite and reuse.*
 
 ## Why "prose"?
 
-prose is an experiment that owes a great deal to Haiku, the open-source
+prose is an experiment that owes everything to Haiku, the open-source
 operating system carrying on the spirit of BeOS. The name is a small nod to
 that: where Haiku is poetry, this is prose. It is meant as a mark of respect and
 appreciation, not as a claim of any connection.
