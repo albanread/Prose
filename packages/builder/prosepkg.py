@@ -8,7 +8,9 @@ changes live in packages/builder/overlay. See packages/README.md.
 Everything the builder writes lives below ROOT (the case-sensitive build
 volume). The Haiku tree is an input only: `bootstrap` copies what it needs
 (toolchain, host tools, system packages) once, and builds never touch the
-tree again.
+tree again. The exception is `local-packages`, which the image build scripts
+run: it copies the packages a Haiku tree's own list names into that tree's
+generated/download/ and turns its downloads off.
 """
 
 import argparse
@@ -1728,6 +1730,210 @@ def cmd_audit(args):
 		sys.exit(1)
 
 
+# -- the fork's own packages in a Haiku tree ------------------------------------------
+
+
+def repository_groups(text):
+	"""The ':'-separated groups of a build/jam/repositories/HaikuPorts/<arch>
+	file: name, architecture, URL, "any" packages, architecture packages,
+	source packages, debug info packages."""
+	tokens = []
+	for line in text.splitlines():
+		tokens += line.split('#', 1)[0].split()
+	groups, current = [], []
+	for token in tokens:
+		if token in (':', ';'):
+			groups.append(current)
+			current = []
+			if token == ';':
+				break
+		else:
+			current.append(token)
+	return groups
+
+
+def listed_packages(tree, arch, ref=None):
+	"""{package file name: entry} for what a Haiku tree's HaikuPorts list
+	names: the file in the working tree, or the one at ref."""
+	path = 'build/jam/repositories/HaikuPorts/' + arch
+	if ref:
+		text = run(['git', 'show', '%s:%s' % (ref, path)], cwd=tree, capture=True).stdout
+	else:
+		text = (tree / path).read_text()
+	groups = repository_groups(text)
+	if len(groups) < 5:
+		raise BuildError('%s: not a package list this can read' % (tree / path))
+	files = {'%s-any.hpkg' % e: e for e in groups[3]}
+	files.update({'%s-%s.hpkg' % (e, arch): e for e in groups[4]})
+	return files
+
+
+def upstream_base(tree):
+	"""The upstream commit a Haiku tree is based on, whether the fork's
+	patches are applied on top or committed."""
+	for ref in ('origin/master', 'gerrit/master'):
+		proc = run(['git', 'merge-base', 'HEAD', ref], cwd=tree, capture=True, check=False)
+		if proc.returncode == 0 and proc.stdout.strip():
+			return proc.stdout.strip()
+	raise BuildError('%s: no origin/master or gerrit/master to compare its package list with'
+		% tree)
+
+
+LISTING_ENTRY = re.compile(r'(.+?)\s+(\d+)\s+\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\s+(\S+)\s*(.*)$')
+
+
+def package_listing(hpkg):
+	"""`package list -a`, parsed: ({attribute: [values]}, {entry path: [size,
+	mode, link target, attributes...]}). Keyed by path and without
+	timestamps, so a package extracted and created again compares equal."""
+	out = run([host_tool('package'), 'list', '-a', hpkg], capture=True).stdout
+	attributes, contents, path, current, key = {}, {}, [], None, None
+	for line in out.splitlines():
+		text = line.strip()
+		m = LISTING_ENTRY.match(text)
+		if current is None and not (m and not line.startswith('\t')):
+			# the package attributes, before the first entry: one per line,
+			# indented by a tab; a value with newlines (a description) goes on
+			# in lines without the tab
+			if line.startswith('\t'):
+				key, _, value = text.partition(':')
+				attributes.setdefault(key, []).append(value.strip())
+			elif key is not None:
+				attributes[key][-1] += '\n' + line
+		elif text.startswith('<'):
+			# an attribute of the entry above
+			contents[current].append(' '.join(text.split()))
+		elif m:
+			depth = (len(line) - len(line.lstrip(' '))) // 2
+			path = path[:depth] + [m.group(1)]
+			current = '/'.join(path)
+			size = '-' if m.group(3).startswith('d') else m.group(2)
+			contents[current] = [size, m.group(3), m.group(4)]
+		else:
+			raise BuildError('%s: unexpected line in its listing: %s' % (hpkg, text))
+	return attributes, contents
+
+
+def same_package_but_vendor(a, b):
+	(attributes_a, contents_a), (attributes_b, contents_b) = a, b
+	strip = lambda d, key: {k: v for k, v in d.items() if k != key}
+	return (strip(attributes_a, 'vendor') == strip(attributes_b, 'vendor')
+		and strip(contents_a, '.PackageInfo') == strip(contents_b, '.PackageInfo'))
+
+
+def copy_with_vendor(src, dst, vendor):
+	"""Write the package src to dst with another vendor. A Haiku build's
+	repository accepts only its own vendor ("Haiku Project"); ours say VENDOR."""
+	tmp = CACHE / ('vendor-' + src.name)
+	rmtree(tmp)
+	tmp.mkdir(parents=True)
+	new = dst.with_name('.' + dst.name + '.new')
+	try:
+		run([host_tool('package'), 'extract', '-C', tmp, src], capture=True)
+		info = tmp / '.PackageInfo'
+		text, count = re.subn(r'^vendor\s.*$', 'vendor\t\t"%s"' % vendor,
+			info.read_text(), flags=re.M)
+		if count != 1:
+			raise BuildError('%s: %d vendor lines in its .PackageInfo' % (src.name, count))
+		info.write_text(text)
+		if new.exists():
+			new.unlink()
+		run([host_tool('package'), 'create', '-q', new], cwd=tmp, capture=True)
+		# replaced by rename: the build never sees half a package
+		os.replace(new, dst)
+	finally:
+		rmtree(tmp)
+		if new.exists():
+			new.unlink()
+
+
+def cmd_local_packages(args):
+	"""Make a Haiku tree build with the packages its fork lists beyond
+	upstream's HaikuPorts list, which prosepkg builds and the package server
+	does not have: copy them into the tree's generated/download/ with the
+	repository's vendor, and turn downloads off. A tree whose list is
+	upstream's is left alone."""
+	tree = Path(args.tree).resolve()
+	config_file = tree / 'generated' / 'build' / 'BuildConfig'
+	config = config_file.read_text() if config_file.exists() else ''
+	m = re.search(r'^HAIKU_PACKAGING_ARCHS\s*\?=\s*"?(\w+)', config, re.M)
+	arch = m.group(1) if m else ARCH
+	upstream = listed_packages(tree, arch, upstream_base(tree))
+	ours = sorted(leaf for leaf in listed_packages(tree, arch) if leaf not in upstream)
+	if not ours:
+		say('%s: the package list is upstream\'s, nothing to do' % tree)
+		return
+	if not config:
+		raise BuildError('%s is not configured (no generated/build/BuildConfig)' % tree)
+	if arch != ARCH:
+		raise BuildError('%s builds %s; prosepkg builds %s packages' % (tree, arch, ARCH))
+	if not host_tool('package').exists() or not REPO.is_dir():
+		raise BuildError('%s lists %d packages beyond upstream\'s, which come from prosepkg; '
+			'%s has none (scripts/prosepkg bootstrap, then build them)' % (tree, len(ours), ROOT))
+	m = re.search(r'^vendor\s+"([^"]*)"', (tree / 'src' / 'data' / 'repository_infos'
+		/ 'haikuports').read_text(), re.M)
+	if not m:
+		raise BuildError('%s: no vendor in src/data/repository_infos/haikuports' % tree)
+	vendor = m.group(1)
+
+	download = tree / 'generated' / 'download'
+	missing, todo, foreign = [], [], []
+	for leaf in ours:
+		src, dst = REPO / leaf, download / leaf
+		if not src.exists():
+			missing.append(leaf)
+		elif not dst.exists():
+			todo.append(('add', leaf))
+		else:
+			listing = package_listing(dst)
+			if listing[0].get('packager') != [PACKAGER]:
+				foreign.append(leaf)
+			elif listing[0].get('vendor') != [vendor] \
+					or not same_package_but_vendor(listing, package_listing(src)):
+				todo.append(('update', leaf))
+	if missing:
+		results = load_json(RESULTS, {})
+		lines = []
+		for leaf in missing:
+			name = leaf.split('-')[0]
+			built = sorted(p.name for p in REPO.glob(name + '-*.hpkg'))
+			port = next((p for p, r in sorted(results.items())
+				if any(f.split('-')[0] == name for f in r.get('packages', []))), None)
+			lines.append('  %-44s %s' % (leaf, 'built: ' + ', '.join(built) if built
+				else 'port %s: %s' % (port, results[port].get('status')) if port
+				else 'never built'))
+		raise BuildError('%s lists packages prosepkg has not built:\n%s\n'
+			'build them (scripts/prosepkg build <port>), or list the versions that are built'
+			% (tree, '\n'.join(lines)))
+
+	downloads_off = re.search(r'^HAIKU_NO_DOWNLOADS\s*\?=\s*"1"\s*;', config, re.M)
+	say('%s: %d packages beyond upstream\'s list, %d up to date in generated/download%s' % (
+		tree, len(ours), len(ours) - len(todo) - len(foreign),
+		'' if downloads_off else '; downloads are on'))
+	for action, leaf in todo:
+		print('  %-6s %s' % (action, leaf))
+	for leaf in foreign:
+		print('  kept   %s (not built by prosepkg)' % leaf)
+	new_config = None
+	if not downloads_off:
+		new_config, n = re.subn(r'^HAIKU_NO_DOWNLOADS\s*\?=.*$',
+			'HAIKU_NO_DOWNLOADS\t\t\t?= "1" ;', config, flags=re.M)
+		if not n:
+			new_config = config.rstrip('\n') + '\nHAIKU_NO_DOWNLOADS\t\t\t?= "1" ;\n'
+		print('  set    HAIKU_NO_DOWNLOADS ?= "1" in generated/build/BuildConfig')
+	if args.dry_run:
+		if todo or new_config is not None:
+			say('dry run: nothing written')
+		return
+	download.mkdir(parents=True, exist_ok=True)
+	for action, leaf in todo:
+		copy_with_vendor(REPO / leaf, download / leaf, vendor)
+	if new_config is not None:
+		write_file(config_file, new_config)
+	if todo or new_config is not None:
+		say('%s: done' % tree)
+
+
 def cmd_index(args):
 	recipes, index = recipe_index(refresh=args.refresh)
 	print('%d ports, %d provided names' % (len(recipes), len(index)))
@@ -1771,6 +1977,11 @@ def main():
 	b.add_argument('image')
 	b.add_argument('packages', nargs='+', help='package or port names, @set (packages/sets/<set>)')
 	b.set_defaults(func=cmd_install)
+	b = sub.add_parser('local-packages', help='put the packages a Haiku tree lists beyond '
+		'upstream into its generated/download/, downloads off')
+	b.add_argument('tree', nargs='?', default=str(HAIKU_TREE))
+	b.add_argument('--dry-run', '-n', action='store_true', help='say what would change')
+	b.set_defaults(func=cmd_local_packages)
 	b = sub.add_parser('audit', help='check built packages for build-host paths and cross tool names')
 	b.add_argument('packages', nargs='*', help='hpkg file names (default: the whole repo)')
 	b.set_defaults(func=cmd_audit)

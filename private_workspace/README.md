@@ -71,14 +71,15 @@ $P create -q /Volumes/HaikuSrc/private_workspace/haiku/generated/download/<pkg>.
    build), add it to `build/jam/UserBuildConfig` with
    `AddHaikuImageSystemPackages <name> ;`.
 
-`private_workspace/addpkg.sh <name>...` does step 3 and the copy of step 2 for
-packages built by prosepkg: it takes `<name>` and `<name>_devel` from
-prose-packages' `repo/` and prints the lines for the repository list. The image
-carries the whole codec set this way (patch 0040). When prosepkg rebuilds a
-codec, copy it again and rebuild the image, or the image keeps the old build:
+`scripts/local-packages.sh <tree>` does steps 1 and 3 and the copy of step 2 for
+every package the tree lists beyond upstream's list. `build.sh` and
+`scripts/build-image.sh` run it before jam. A package prosepkg has rebuilt is
+copied again, and one that is unchanged is left alone. The image carries the
+whole codec set this way (patch 0040). To add a package:
+`private_workspace/addpkg.sh <name>` prints its lines for the list; then list it
+in `UserBuildConfig` and build:
 
 ```bash
-private_workspace/addpkg.sh $(grep -v '^#' packages/sets/codecs) libiconv libtool_libltdl
 private_workspace/build.sh
 packages/boot-test.sh packages/tests/codecs.sh codec_check   # 19/19 on the image's own packages
 ```

@@ -12,6 +12,10 @@ export PATH="$HOME/bin:/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/gettext/bin
 # jam opens a lot of files at once
 ulimit -n 1024
 
+# packages the tree lists beyond upstream's (codecs, the translators'
+# libraries) come from prosepkg, not the package server; no-op otherwise
+"$(dirname "$0")/local-packages.sh" "$ROOT"
+
 cd "$ROOT"
 JOBS=$(sysctl -n hw.ncpu)
 echo ">>> jam -q -j$JOBS $TARGET"

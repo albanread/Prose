@@ -55,10 +55,16 @@ git apply /Volumes/xb/HaikuArmQemu/patches/haiku/*.patch
 /Volumes/xb/HaikuArmQemu/scripts/build-image.sh
 ```
 
+`build-image.sh` first runs `scripts/local-packages.sh`. That script copies the
+packages that 0033, 0037 and 0040 list (built by `scripts/prosepkg`; the
+package server has none of them) into `generated/download/` and turns downloads
+off. It stops, naming them, if any are not built. On a tree without these
+patches it does nothing.
+
 To refresh the patches after editing the tree:
 
 ```sh
 git diff -- <file> > /Volumes/xb/HaikuArmQemu/patches/haiku/<NNNN-name>.patch
 ```
 
-Each patch covers one file.
+0001–0008 each cover one file.

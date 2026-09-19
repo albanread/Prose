@@ -23,12 +23,14 @@ Results: [RESULTS.md](RESULTS.md) (regenerated on every build), packages in
 
 ## Putting packages on our image
 
-The fork's image (`private_workspace/build.sh`, patch 0040) is built with the
-codec set in it: the Haiku build takes the packages from its
-`generated/download/`, where `private_workspace/addpkg.sh` puts them (see
-`private_workspace/README.md`, "Local packages"). After rebuilding a codec, run
-addpkg.sh for it and rebuild the image. `install` is for everything else, and
-for trying packages without rebuilding the image:
+The fork's image is built with the codec set in it (patch 0040). The Haiku build
+takes those packages from its `generated/download/`, and
+`scripts/local-packages.sh` puts them there: it copies every package the tree
+lists beyond upstream's, then turns downloads off. `scripts/build-image.sh`
+and `private_workspace/build.sh` run it, so a codec that prosepkg rebuilds is
+in the next image (see `private_workspace/README.md`, "Local packages").
+`install` is for everything else, and for trying packages without rebuilding
+the image:
 
 ```sh
 scripts/prosepkg install <image> libwebp flac     # + their requirements
@@ -61,9 +63,13 @@ The probes are `tests/codecs.sh` (codec_check) and `tests/openssl.sh`.
 
 ## Rules (the incident, turned into design)
 
-1. The builder writes only below `/Volumes/HaikuSrc/prose-packages/`.
+1. Builds write only below `/Volumes/HaikuSrc/prose-packages/`.
    `bootstrap` copies what it needs from the Haiku tree. After that, builds
-   read nothing from the tree, and nothing is ever written into it.
+   read nothing from the tree and never write into it. The one command that
+   writes into a Haiku tree is `local-packages`, run by the image build
+   scripts. It writes only the package files the tree's own list names, into
+   `generated/download/`, and the `HAIKU_NO_DOWNLOADS` line of
+   `generated/build/BuildConfig`.
 2. The toolchain is a private, read-only copy (`chmod a-w`).
 3. Generated wrappers are real files, replaced by rename. There are no
    symlinks to tools.

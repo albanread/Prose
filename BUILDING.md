@@ -123,8 +123,17 @@ Notes:
 
 ```sh
 scripts/build-image.sh              # default: @minimum-mmc
-# which is: cd /Volumes/HaikuSrc/haiku && jam -q -j14 @minimum-mmc
+# which is: scripts/local-packages.sh, then cd /Volumes/HaikuSrc/haiku && jam -q -j14 @minimum-mmc
 ```
+
+* `scripts/local-packages.sh` is a no-op on a stock tree. With the fork's
+  patches applied (`patches/haiku/`), the tree's HaikuPorts list names
+  packages the package server does not have: the codecs and the translators'
+  libraries, built by `scripts/prosepkg` (see `packages/README.md`). It copies
+  them into `generated/download/` and sets `HAIKU_NO_DOWNLOADS` in
+  `generated/build/BuildConfig`, which re-running `configure` resets; running
+  it on every build puts it back. It stops, naming the packages, if one
+  isn't built.
 
 * Output: `/Volumes/HaikuSrc/haiku/haiku-mmc.image` — **in the haiku source
   root, not `generated/`**: the MMC image target isn't `MakeLocate`d, so jam
