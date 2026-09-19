@@ -3,7 +3,7 @@
 An unofficial, experimental port of the Haiku operating system to Apple Silicon,
 running under macOS 27's Virtualization.framework with a host-GPU-backed display.
 
-![The prose desktop](docs/images/prose-desktop.png)
+![prose running on macOS: the guest desktop at 2560x1600 in a Prose.app window](docs/images/prose-desktop.png)
 
 > **This is not Haiku.** Haiku itself — the real thing, and very much worth your
 > time — is at **[haiku-os.org](https://www.haiku-os.org)**.
