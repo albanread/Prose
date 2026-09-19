@@ -35,6 +35,18 @@ func hostShares() -> [HostShare] {
             i += 1
         }
     }
+    // An installed copy shares a folder without being asked to: a machine with no
+    // way to exchange a file with the Mac it runs on is much less useful, and there
+    // is no command line to put a --share on. A script that passes none gets none.
+    if shares.isEmpty, usingInstalledMachine {
+        let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("HostFS", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: folder.path) {
+            shares.append(HostShare(url: folder.standardizedFileURL, readOnly: false))
+            log("hostfs: sharing \(folder.path)")
+        }
+    }
     return shares
 }
 

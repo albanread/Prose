@@ -1,0 +1,42 @@
+From 5072fc57ab9fe5338e5ce3af7473bc57d32bb6f9 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 18:49:03 +0100
+Subject: [PATCH] Prose profile: a gigabyte of disk
+
+650 MiB left about 450 free, and BFS cannot be grown afterwards: Haiku's
+own disk system add-on has B_DISK_SYSTEM_SUPPORTS_RESIZING commented out,
+so DriveSetup cannot offer it and the size chosen at build time is the
+size it stays.
+
+Room is nearly free to ship. The unused space is zeros, so an image
+compresses to under a third in the installer -- 686 MiB became 196 -- and
+a larger one adds almost nothing to a download.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0056-prose-profile-a-gigabyte-of-disk.patch 5edd02754e01154d34ea579709eaf4ec1ce76741a021954429fd88df78a92e09
+---
+ build/jam/DefaultBuildProfiles | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index f2a5e5d2cc..a15813595b 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -198,9 +198,15 @@ rule DefineDefaultBuildProfiles
+ 			HAIKU_IMAGE_LABEL ?= Prose ;
+ 			HAIKU_MMC_LABEL ?= Prose ;
+ 			if $(DEBUG) != 0 {
+-				HAIKU_IMAGE_SIZE ?= 850 ;
++				HAIKU_IMAGE_SIZE ?= 1400 ;
+ 			}
+-			HAIKU_IMAGE_SIZE ?= 650 ;
++			# A gigabyte, of which the system uses about 200 MiB. Room costs
++			# almost nothing to ship: the free space is zeros, and an image
++			# compresses to under a third of its size in the installer.
++			# BFS cannot be grown afterwards -- Haiku's own disk system add-on
++			# has B_DISK_SYSTEM_SUPPORTS_RESIZING commented out -- so the size
++			# chosen here is the size it stays.
++			HAIKU_IMAGE_SIZE ?= 1024 ;
+ 
+ 			# The regular image's packages that exist for arm64 -- built by
+ 			# HaikuArmQemu's prosepkg, the package server has none of them --

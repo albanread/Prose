@@ -104,7 +104,7 @@ their work produced, and everything that makes it good is theirs.
   Virtualization.framework VM with custom virtio devices of its own — a
   shared-surface display, keyboard and tablet, a MIDI port — plus networking,
   sound, and a Mac folder shared into the guest.
-- **`patches/haiku`** — 54 patches against Haiku at hrev60122, applied to a
+- **`patches/haiku`** — 56 patches against Haiku at hrev60122, applied to a
   local tree to build the guest.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
@@ -257,6 +257,8 @@ table there also records why each one exists.
 | 0052 | The image's boot partition takes its label from the build profile |
 | 0053 | The Deskbar's Applications menu in folders by category |
 | 0054 | `prose_portal`: the guest answers the host — run a command, report whether the desktop is up |
+| 0055 | An icon for each folder of the Deskbar's Applications menu |
+| 0056 | A gigabyte of disk in the image |
 
 ## Layout
 

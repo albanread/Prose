@@ -89,6 +89,25 @@ codesign --force --timestamp --options runtime \
 	--sign "$APP_ID" "$STAGED"
 codesign --verify --deep --strict --verbose=1 "$STAGED"
 
+# --------------------------------------------------- notarize the app itself
+# Stapling the .dmg or .pkg staples the container, not the application inside
+# it. Once someone drags Prose.app out, the container is gone and the
+# application has no ticket of its own: Gatekeeper then has to ask Apple, and
+# on a Mac that is offline -- or behind something that blocks it -- an
+# application that passed here can be refused there. So the application is
+# notarized first, on its own, and carries its ticket wherever it is copied.
+if [ "$NOTARIZE" = 1 ]; then
+	say "notarizing the application (so it keeps its ticket when copied out)"
+	APPZIP="$OUT/Prose.app.zip"
+	ditto -c -k --keepParent "$STAGED" "$APPZIP"
+	xcrun notarytool submit "$APPZIP" --keychain-profile "$PROFILE" --wait \
+		|| die "notarizing the application failed. For the reasons:
+   xcrun notarytool log <submission-id> --keychain-profile $PROFILE"
+	xcrun stapler staple "$STAGED"
+	xcrun stapler validate "$STAGED"
+	rm -f "$APPZIP"
+fi
+
 # ---------------------------------------------------------------- package
 if [ "$FORMAT" = dmg ]; then
 	PRODUCT="$OUT/Prose-$VERSION.dmg"
@@ -149,7 +168,7 @@ fi
 
 # --------------------------------------------------------------- notarize
 if [ "$NOTARIZE" = 1 ]; then
-	say "notarizing with the “$PROFILE” profile (this waits for Apple)"
+	say "notarizing the $FORMAT with the “$PROFILE” profile (this waits for Apple)"
 	xcrun notarytool submit "$PRODUCT" --keychain-profile "$PROFILE" --wait \
 		|| die "notarization failed. For the reasons:
    xcrun notarytool log <submission-id> --keychain-profile $PROFILE"
@@ -164,3 +183,9 @@ else
 fi
 
 say "done: $PRODUCT  ($(du -m "$PRODUCT" | cut -f1) MiB)"
+cat <<'NOTE'
+
+   On its first run Prose makes, as the person running it:
+     ~/Library/Application Support/Prose/Machines/Prose.image   the machine
+     ~/Documents/HostFS                                         shared into it
+NOTE

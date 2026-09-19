@@ -89,6 +89,9 @@ func installedMachine() -> String? {
 }
 
 var diskArgument: String? = args.count >= 2 && !args[1].hasPrefix("--") ? args[1] : nil
+/// No disk on the command line: this is an installed copy, opened rather than run
+/// by a script. It sets up its own folders (hostfs.swift shares one by default).
+let usingInstalledMachine = diskArgument == nil
 if diskArgument == nil { diskArgument = installedMachine() }
 guard let diskPath = diskArgument else {
     print("usage: hvgpu <disk.img> [--size WxH] [--efivars path] [--cpus n] "
