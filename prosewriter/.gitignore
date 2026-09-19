@@ -1,0 +1,25 @@
+# VM disks and downloaded archives stay out of git
+vm/*.image
+vm/*.img
+vm/*.fd
+vm/run/
+research/bebook/
+research/benewsletters/
+research/hig/
+research/gobe/images/
+api-db/*.sqlite
+app/host/
+# binaries and scratch (regenerable: make / mksysroot.sh)
+app/ProseWriter
+app/proseagent
+app/hello
+app/sysroot/
+# VM runtime artifacts
+vm/*.png
+vm/*.ppm
+vm/run/
+vm/www/
+vm/*.sock
+vm/qemu.pid
+prose_api.sqlite-shm
+prose_api.sqlite-wal

@@ -1,6 +1,6 @@
 # Case-sensitive build volume image + mountpoint symlink
 HaikuBuild.sparsebundle*
-src
+/src  # the HaikuSrc symlink at repo root only
 
 # Local scratch
 *.log

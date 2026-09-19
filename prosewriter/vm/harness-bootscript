@@ -1,0 +1,22 @@
+#!/bin/sh
+# UserBootscript installed by the ProseWriter dev harness.
+# Runs the network probe (pushes a report to the host) and keeps proseagent
+# alive for the life of the session.
+{
+  echo "=== prose boot probe $(date) ==="
+  ifconfig -a
+  route 2>/dev/null
+  ping -c 1 -t 3 10.0.2.2 2>&1
+  wget -q -t 1 -T 3 -O /boot/home/hostping.txt http://10.0.2.2:8000/ping.txt \
+    && cat /boot/home/hostping.txt
+} > /boot/home/boot-probe.txt 2>&1
+wget -q -t 1 -T 3 --post-file=/boot/home/boot-probe.txt \
+  http://10.0.2.2:8000/up/boot-probe.txt 2>/dev/null || true
+
+mkdir -p /boot/home/apps
+(
+  while true; do
+    /boot/home/apps/proseagent >> /boot/home/proseagent.log 2>&1
+    sleep 2
+  done
+) &
