@@ -2043,9 +2043,109 @@ def same_package_but_vendor(a, b):
 		and strip(contents_a, '.PackageInfo') == strip(contents_b, '.PackageInfo'))
 
 
-def copy_with_vendor(src, dst, vendor):
-	"""Write the package src to dst with another vendor. A Haiku build's
-	repository accepts only its own vendor ("Haiku Project"); ours say VENDOR."""
+DESKBAR_APPLICATIONS = 'data/deskbar/menu/Applications'
+
+
+def jam_tokens(text):
+	"""The tokens of a Jamfile: words between white space, a "quoted" one as
+	one word, # comments left out."""
+	return [m.group(1) if m.group(1) is not None else m.group(3)
+		for m in re.finditer(r'"([^"]*)"|(#[^\n]*)|(\S+)', text) if m.group(2) is None]
+
+
+def deskbar_categories(tree):
+	"""{Applications menu entry: folder} from a Haiku tree's
+	build/jam/DeskbarCategories (the Prose fork's): the folder of the
+	Deskbar's Applications menu each application's entry goes into. The
+	tree places its own applications; the ports' entries are moved when
+	local-packages copies their packages in. Empty for a tree without it."""
+	path = Path(tree) / 'build' / 'jam' / 'DeskbarCategories'
+	if not path.exists():
+		return {}
+	tokens = jam_tokens(path.read_text())
+	lists = {}
+	for i, token in enumerate(tokens):
+		if token.startswith('DESKBAR_CATEGOR') and tokens[i + 1:i + 2] == ['=']:
+			lists[token] = tokens[i + 2:tokens.index(';', i)]
+	folders = lists.get('DESKBAR_CATEGORIES', [])
+	categories = {}
+	for name, entries in lists.items():
+		if name == 'DESKBAR_CATEGORIES':
+			continue
+		folder = name[len('DESKBAR_CATEGORY_'):]
+		if folder not in folders:
+			raise BuildError('%s: %s, but %s is not in DESKBAR_CATEGORIES' % (path, name, folder))
+		for entry in entries:
+			if entry in categories:
+				raise BuildError('%s: %s is in %s and in %s' % (path, entry, categories[entry], folder))
+			categories[entry] = folder
+	return categories
+
+
+def copy_haiku_attributes(src, dst):
+	"""Copy the Haiku attributes of src to dst -- the user.haiku.* extended
+	attributes the host's package tool keeps them in -- of symlinks
+	themselves."""
+	names = run(['/usr/bin/xattr', '-s', src], capture=True).stdout.split('\n')
+	for name in names:
+		if name.startswith('user.haiku.'):
+			value = run(['/usr/bin/xattr', '-s', '-px', name, src], capture=True).stdout
+			run(['/usr/bin/xattr', '-s', '-wx', name, ''.join(value.split()), dst], capture=True)
+
+
+def categorize_deskbar_entries(root, categories):
+	"""Move the Deskbar Applications entries of an extracted package (root)
+	into their folders (deskbar_categories()): a folder gets the mode and
+	attributes of Applications, and a relative symlink one more '../'. The
+	number of entries moved."""
+	apps = Path(root) / DESKBAR_APPLICATIONS
+	if not categories or not apps.is_dir():
+		return 0
+	moved = 0
+	for entry in sorted(apps.iterdir()):
+		folder = categories.get(entry.name)
+		if folder is None or not entry.is_symlink():
+			continue
+		target = apps / folder
+		if not target.exists():
+			target.mkdir()
+			os.chmod(target, os.stat(apps).st_mode & 0o7777)
+			copy_haiku_attributes(apps, target)
+		link = os.readlink(entry)
+		new = target / entry.name
+		os.symlink(link if link.startswith('/') else '../' + link, new)
+		os.lchmod(new, os.lstat(entry).st_mode & 0o7777)
+		copy_haiku_attributes(entry, new)
+		entry.unlink()
+		moved += 1
+	return moved
+
+
+def categorized_listing(listing, categories):
+	"""A package_listing() as categorize_deskbar_entries() leaves the
+	package."""
+	attributes, contents = listing
+	prefix = DESKBAR_APPLICATIONS + '/'
+	moved = {}
+	for path, value in contents.items():
+		name = path[len(prefix):] if path.startswith(prefix) else None
+		folder = categories.get(name) if name and '/' not in name else None
+		if folder is None or not value[1].startswith('l'):
+			moved[path] = value
+			continue
+		moved.setdefault(prefix + folder, list(contents[DESKBAR_APPLICATIONS]))
+		link = value[2]
+		if link.startswith('-> ') and not link.startswith('-> /'):
+			link = '-> ../' + link[3:]
+		moved[prefix + folder + '/' + name] = value[:2] + [link] + value[3:]
+	return attributes, moved
+
+
+def copy_with_vendor(src, dst, vendor, categories=None):
+	"""Write the package src to dst with another vendor, and its Deskbar
+	Applications entries in their folders (categorize_deskbar_entries()). A
+	Haiku build's repository accepts only its own vendor ("Haiku Project");
+	ours say VENDOR."""
 	tmp = CACHE / ('vendor-' + src.name)
 	rmtree(tmp)
 	tmp.mkdir(parents=True)
@@ -2058,6 +2158,7 @@ def copy_with_vendor(src, dst, vendor):
 		if count != 1:
 			raise BuildError('%s: %d vendor lines in its .PackageInfo' % (src.name, count))
 		info.write_text(text)
+		categorize_deskbar_entries(tmp, categories)
 		if new.exists():
 			new.unlink()
 		run([host_tool('package'), 'create', '-q', new], cwd=tmp, capture=True)
@@ -2098,6 +2199,7 @@ def cmd_local_packages(args):
 		raise BuildError('%s: no vendor in src/data/repository_infos/haikuports' % tree)
 	vendor = m.group(1)
 
+	categories = deskbar_categories(tree)
 	download = tree / 'generated' / 'download'
 	missing, todo, foreign = [], [], []
 	for leaf in ours:
@@ -2111,7 +2213,8 @@ def cmd_local_packages(args):
 			if listing[0].get('packager') != [PACKAGER]:
 				foreign.append(leaf)
 			elif listing[0].get('vendor') != [vendor] \
-					or not same_package_but_vendor(listing, package_listing(src)):
+					or not same_package_but_vendor(listing,
+						categorized_listing(package_listing(src), categories)):
 				todo.append(('update', leaf))
 	if missing:
 		results = load_json(RESULTS, {})
@@ -2149,7 +2252,7 @@ def cmd_local_packages(args):
 		return
 	download.mkdir(parents=True, exist_ok=True)
 	for action, leaf in todo:
-		copy_with_vendor(REPO / leaf, download / leaf, vendor)
+		copy_with_vendor(REPO / leaf, download / leaf, vendor, categories)
 	if new_config is not None:
 		write_file(config_file, new_config)
 	if todo or new_config is not None:

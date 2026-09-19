@@ -1,0 +1,232 @@
+From 45baa5a936fa2119640b6ffee29b37e6e8c03820 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 12:19:43 +0100
+Subject: [PATCH] Deskbar: the Applications menu in folders by category
+
+The Prose image has over a hundred applications, and the Deskbar's
+Applications menu listed them all in one column. They now go into nine
+folders: Accessories, Development, Files, Games, Graphics, Internet,
+Multimedia, Office and System.
+
+build/jam/DeskbarCategories lists each entry's folder, by its name in
+the menu, for Haiku's own applications and for the ports in the Prose
+image. The haiku package puts its links there (DeskbarCategory rule);
+an entry the file does not list stays in Applications itself, so
+anything new still shows up. The Deskbar merges the menu from all
+packages by folder name, so a flat entry from a package cannot be
+hidden from outside it: the ports' packages have their entries moved
+by HaikuArmQemu's prosepkg when scripts/local-packages.sh copies them
+into generated/download, from this same file.
+
+The applications themselves stay in /boot/system/apps.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0053-deskbar-the-applications-menu-in-folders-by-category.patch 1ab7cb834d8de0b4585c532ac65bbe54d48d67d0af81b900c445e9dad55036c4
+---
+ build/jam/DeskbarCategories | 169 ++++++++++++++++++++++++++++++++++++
+ build/jam/packages/Haiku    |  13 ++-
+ 2 files changed, 179 insertions(+), 3 deletions(-)
+ create mode 100644 build/jam/DeskbarCategories
+
+diff --git a/build/jam/DeskbarCategories b/build/jam/DeskbarCategories
+new file mode 100644
+index 0000000000..2ceb197fe9
+--- /dev/null
++++ b/build/jam/DeskbarCategories
+@@ -0,0 +1,169 @@
++# The folders of the Deskbar's Applications menu (Prose fork): each
++# application's entry goes into the folder of its category.
++#
++# Haiku's own applications are placed by build/jam/packages/Haiku. The
++# ports' entries are moved into place by prosepkg (HaikuArmQemu) when
++# scripts/local-packages.sh copies their packages into generated/download;
++# it reads this file, so keep to its form: one DESKBAR_CATEGORY_<folder>
++# list per folder, the entries by their names in the menu, quoted if they
++# have spaces. An entry that is in no list stays in Applications itself.
++
++DESKBAR_CATEGORIES =
++	Accessories
++	Development
++	Files
++	Games
++	Graphics
++	Internet
++	Multimedia
++	Office
++	System
++	;
++
++DESKBAR_CATEGORY_Accessories =
++	"BDH Calc"
++	BSnow
++	CharacterMap
++	Clipdinger
++	DeskCalc
++	DeskNotes
++	FlyingTroll
++	Fortuna
++	Magnify
++	NightAndDay
++	Remember
++	RomanNumbers
++	StyledEdit
++	TextWorker
++	TimeBomb
++	Tipster
++	WakeUp
++	WordClock
++	;
++
++DESKBAR_CATEGORY_Development =
++	BRIE
++	CatKeysEditor
++	DebugMonitor
++	DiskProbe
++	Globe
++	Microbe
++	Pe
++	PonpokoDiff
++	SerialConnect
++	;
++
++DESKBAR_CATEGORY_Files =
++	Attrify
++	DiskUsage
++	Expander
++	FastTraX
++	FileCropper
++	Filer
++	FolderShaper
++	"Genesis Commander"
++	PecoRename
++	PPViewer
++	QueryWatcher
++	TraX
++	ZooKeeper
++	;
++
++DESKBAR_CATEGORY_Games =
++	2048
++	BeBattle
++	BeCheckers
++	BeSpider
++	Bong
++	Connect4
++	HexVexed
++	LightsOff
++	Minesweeper
++	Peggy
++	W6
++	;
++
++DESKBAR_CATEGORY_Graphics =
++	ArtPaint
++	FontBoy
++	Icon-O-Matic
++	PhotoGrabber
++	TAResizer
++	;
++
++DESKBAR_CATEGORY_Internet =
++	BeShare
++	EmailViews
++	FtpPositive
++	HaikuWebSearch
++	Mail
++	NetSurf
++	PonyExpress
++	PoorMan
++	Vision
++	VWGet
++	WebPositive
++	;
++
++DESKBAR_CATEGORY_Multimedia =
++	CDPlayer
++	CherryBlossom
++	CodyCam
++	InternalMIDI
++	"MIDI Keyboard"
++	MediaConverter
++	MediaPlayer
++	MidiPlayer
++	PecoBeat
++	PhantomLimb
++	Samedi
++	SoundRecorder
++	Toner
++	WaveView
++	XRS
++	;
++
++DESKBAR_CATEGORY_Office =
++	A-Book
++	BePDF
++	BeTeX
++	BSAP
++	CapitalBe
++	fairtrade
++	Lingua
++	"Mr. Peeps!"
++	People
++	TimeTracker
++	Tolmach
++	;
++
++DESKBAR_CATEGORY_System =
++	ActivityMonitor
++	CommandTimer
++	Devices
++	DriveSetup
++	HaikuDepot
++	Installer
++	LockWorkstation
++	Slayer
++	SoftwareUpdater
++	SuperPrefs
++	SystemInfo
++	TaskManager
++	Terminal
++	TimeCop
++	;
++
++
++rule DeskbarCategory entry
++{
++	# DeskbarCategory <entry> : the folder the Applications entry <entry>
++	# goes into, or nothing
++	local category result ;
++	for category in $(DESKBAR_CATEGORIES) {
++		if $(entry) in $(DESKBAR_CATEGORY_$(category)) {
++			result = $(category) ;
++		}
++	}
++	return $(result) ;
++}
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 06104f23df..21a33b4795 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -494,12 +494,19 @@ AddDirectoryToPackage preferences : system-preferences.rdef ;
+ 
+ local linkTarget ;
+ 
+-# "Applications" links
++# "Applications" links, each in the folder of its category (DeskbarCategories)
++include [ FDirName $(HAIKU_BUILD_RULES_DIR) DeskbarCategories ] ;
+ AddDirectoryToPackage data deskbar menu Applications
+ 	: deskbar-applications.rdef ;
+ for linkTarget in $(DESKBAR_APPLICATIONS) {
+-	AddSymlinkToPackage data deskbar menu Applications
+-		: ../../../../apps/$(linkTarget) : $(linkTarget) ;
++	local category = [ DeskbarCategory $(linkTarget) ] ;
++	if $(category) {
++		AddSymlinkToPackage data deskbar menu Applications $(category)
++			: ../../../../../apps/$(linkTarget) : $(linkTarget) ;
++	} else {
++		AddSymlinkToPackage data deskbar menu Applications
++			: ../../../../apps/$(linkTarget) : $(linkTarget) ;
++	}
+ }
+ 
+ # "Desktop applets" links
