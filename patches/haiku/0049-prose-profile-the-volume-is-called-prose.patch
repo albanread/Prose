@@ -1,0 +1,32 @@
+From 2d21f1b33c9fa896e25ee1adf759cb4e74be5892 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 10:50:58 +0100
+Subject: [PATCH] Prose profile: the volume is called Prose
+
+The disk Tracker shows on the desktop, and its window title, said "Haiku":
+HAIKU_IMAGE_LABEL and HAIKU_MMC_LABEL both default to that name. The
+prose-* profile sets them, as it already sets the host name.
+
+Nothing reads the label -- the boot loader finds the partition by its
+contents and /boot is the mount point either way.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0049-prose-profile-the-volume-is-called-prose.patch a784d31f8b5e85c690b15f27885602d40dc3982e207723a70c4c77ea785515a5
+---
+ build/jam/DefaultBuildProfiles | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index b20ce36e5b..f2a5e5d2cc 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -194,6 +194,9 @@ rule DefineDefaultBuildProfiles
+ 		case "prose-*" : {
+ 			Echo Building Prose ;
+ 			HAIKU_IMAGE_HOST_NAME ?= prose ;
++			# the volume Tracker shows on the desktop, and the boot partition
++			HAIKU_IMAGE_LABEL ?= Prose ;
++			HAIKU_MMC_LABEL ?= Prose ;
+ 			if $(DEBUG) != 0 {
+ 				HAIKU_IMAGE_SIZE ?= 850 ;
+ 			}
