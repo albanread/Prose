@@ -44,6 +44,7 @@ These apply on top of Haiku **hrev60122**. We maintain our own fork; see `haiku_
 | 0038 | No upstream marks: AboutSystem names "The Haiku operating system" in body text, not in the wordmark; the trademark assertion becomes a statement that the name and logos are Haiku's and this build claims no rights or association; the "HAIKU logo" artwork is no longer shipped | This build is not entitled to the Haiku name or logos |
 | 0039 | Follow-up to 0029: SIGBUS from an external abort whose FAR the ISS marks invalid (FnV) carries address 0 instead of FAR; the `EXCP_ILL_STATE` comment corrected (PSTATE.IL at EL0 comes from a legal return whose SPSR had IL set) | From a review of 0029; `trap-test.sh` still passes 14/14 |
 | 0040 | All 19 codec libraries built in prose-packages go into the image: libpng16, libjpeg_turbo, tiff, libwebp, giflib, openjpeg, lcms; libogg, libvorbis, flac, opus, speex, speexdsp, mpg123, lame, wavpack; libtheora, libvpx, dav1d (`UserBuildConfig`). The build resolves libiconv and libtool_libltdl from the same local repository. `repositories/HaikuPorts/arm64` keeps every local package in one sorted block | The image had only the five libraries the translators link against. Needs the packages in `generated/download/` (`private_workspace/addpkg.sh`). `packages/boot-test.sh packages/tests/codecs.sh codec_check` passes 19/19 on the image's own packages |
+| 0041 | openssl3, bc and wget, which the minimum profile asks for, plus what they need: ca_root_certificates (2026_07_16-1 replaces upstream's entry), zstd, gettext_libintl; all from prose-packages | The build printed "AddHaikuImagePackages: package openssl3/bc/wget not available!" and went on without them; Haiku's server has none of them for arm64. `packages/tests/minimum.sh` checks them on the target |
 
 From 0009 on, patches are `git format-patch` output of single commits on the `vz-fork` branch (they may touch several files) and apply with `git apply` or `git am`. 0031–0038 sit between 0023 and 0024 on the branch and were exported later. They apply after 0030, and the whole series reproduces `vz-fork` exactly (0001–0038 checked file by file on a clean hrev60122). 0031 and 0035 carry PNG files as git binary patches, which `patch(1)` cannot apply. 0033, 0037 and 0040 need the local packages (`private_workspace/README.md`, "Local packages"). `../prose-branding-01-artwork.patch` is the earlier branding for the main tree (it also sets `uname` to "Kronkite"); it applies to a plain hrev60122 but not on top of this series.
 
@@ -62,10 +63,13 @@ the same tree as `prose` (`94f281d`); its checkout under
 To add a change: commit it on `prose`, then
 
 ```sh
-git format-patch -1 --stdout HEAD > /Volumes/xb/HaikuArmQemu/patches/haiku/<NNNN-name>.patch
+/Volumes/xb/HaikuArmQemu/scripts/export-patch.sh     # writes the next NNNN-<subject>.patch
 ```
 
-A patch edited after it was applied makes `apply-patches.sh` stop and say so
-(the hash no longer matches the commit's record); refresh the patch from the
+It first puts the record into the commit (`Prose-Patch: <file> <hash>`, the
+hash being of the diff alone, `scripts/patch-diff-hash.sh`, which is the same
+for the commit and the file); then add the row above. A patch whose diff was
+edited after it was applied makes `apply-patches.sh` stop and say so (the hash
+no longer matches the record); run `export-patch.sh` again on the amended
 commit, or rebuild `prose` from the patches (`git branch -D prose`, build).
 0001–0008 are plain `git diff` output and each cover one file.

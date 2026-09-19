@@ -1,15 +1,15 @@
 #!/bin/bash
-# boot-test.sh <probe> <port|package|@set>... — run a probe script on Prose.
+# boot-test.sh <probe> [<port|package|@set>...] — run a probe script on Prose.
 #
-# Installs the packages (prosepkg install adds their requirements) into a
-# clone of the image, runs <probe> from a UserBootscript with its output in
-# /boot/home/probe.txt, powers off, and prints that file. Exit status 0 when
-# the probe's last line is "PASS".
-#   PW_IMAGE: the image to clone (default: the private workspace build)
+# Installs the packages, if any (prosepkg install adds their requirements),
+# into a clone of the image, runs <probe> from a UserBootscript with its
+# output in /boot/home/probe.txt, powers off, and prints that file. Exit
+# status 0 when the probe's last line is "PASS".
+#   PW_IMAGE: the image to clone (default: the image scripts/build-image.sh built)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/private_workspace/env.sh"
-PROBE=${1:?usage: boot-test.sh <probe> <port|package|@set>...}
+PROBE=${1:?usage: boot-test.sh <probe> [<port|package|@set>...]}
 shift
 PP=/Volumes/HaikuSrc/prose-packages
 NAME=$(basename "$PROBE" .sh)
@@ -19,7 +19,7 @@ mkdir -p "$WORK"
 IMG=$WORK/haiku.img
 
 cp -c "$PW_IMAGE" "$IMG"
-"$ROOT/scripts/prosepkg" install "$IMG" "$@" | sed -n '1p'
+[ $# -eq 0 ] || "$ROOT/scripts/prosepkg" install "$IMG" "$@" | sed -n '1p'
 {
 	echo '#!/bin/sh'
 	echo '/boot/home/probe.sh > /boot/home/probe.txt 2>&1'

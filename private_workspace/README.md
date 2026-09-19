@@ -37,7 +37,7 @@ private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke
 `run-vz.sh` always boots a **fresh copy** of the image, so every run starts from first boot and `first login` is a reliable marker.
 
 ## Rules
-- Change Haiku as commits on `prose`; export each as the next `patches/haiku/NNNN-*.patch` (`git format-patch -1`), so main carries it. The build refuses a tree with uncommitted changes.
+- Change Haiku as commits on `prose`; export each with `scripts/export-patch.sh` as the next `patches/haiku/NNNN-*.patch`, so main carries it. The build refuses a tree with uncommitted changes.
 - The image is only ever built by `scripts/build-image.sh` (or `build.sh`, which runs it).
 
 ## Local packages (no remote resolution)

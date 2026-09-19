@@ -7,6 +7,8 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 |---|---|---|---|
 | album | 0.9.4-7 | failed | BUILD phase failed (exit 2) |
 | artpaint | 2.8-1 | built | artpaint-2.8-1-arm64.hpkg |
+| autoconf_archive | 2024.10.16-1 | built | autoconf_archive-2024.10.16-1-any.hpkg |
+| bc | 1.07.1-2 | built | bc-1.07.1-2-arm64.hpkg |
 | belife | 1.0.0-2 | failed | BUILD phase failed (exit 2) |
 | bepdf | 2.1.4-6 | built | bepdf-2.1.4-6-arm64.hpkg |
 | besol | 2.0.5-5 | failed | BUILD phase failed (exit 1) |
@@ -81,5 +83,6 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | wakeup | 1.0-3 | built | wakeup-1.0-3-arm64.hpkg |
 | wavpack | 5.5.0-3 | built | wavpack-5.5.0-3-arm64.hpkg, wavpack_bin-5.5.0-3-arm64.hpkg, wavpack_devel-5.5.0-3-arm64.hpkg |
 | weather | 1.1.0-1 | failed | BUILD phase failed (exit 2) |
+| wget | 1.24.5-2 | built | wget-1.24.5-2-arm64.hpkg |
 | xz_utils | 5.8.4-1 | built | xz_utils-5.8.4-1-arm64.hpkg, xz_utils_devel-5.8.4-1-arm64.hpkg |
 | zstd | 1.5.7-1 | built | zstd-1.5.7-1-arm64.hpkg, zstd_bin-1.5.7-1-arm64.hpkg, zstd_devel-1.5.7-1-arm64.hpkg |

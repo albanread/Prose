@@ -134,9 +134,10 @@ itself stays upstream's.
 
 * `scripts/apply-patches.sh` puts the tree on `prose` (creating it from the
   current commit the first time) and applies the patches that aren't there
-  yet. Each commit records its patch file and that file's hash
-  (`Prose-Patch:`), so a second run does nothing, and a patch edited in
-  this repo after it was applied is reported rather than silently left out.
+  yet. Each commit records its patch file and the hash of that file's diff
+  (`Prose-Patch:`, `scripts/patch-diff-hash.sh`), so a second run does
+  nothing, and a patch whose diff was edited in this repo after it was
+  applied is reported rather than silently left out.
   A tree with uncommitted changes to tracked files is refused. `--dry-run`
   applies the series to a scratch index and reports.
 * `scripts/local-packages.sh` is a no-op on a stock tree. On `prose`, the
@@ -234,9 +235,11 @@ scripts/build-image.sh              # the usual case: nothing pulled, just rebui
 Rebuilding after touching kernel/driver sources only needs `jam` — it is
 incremental. To force-rebuild one component: `jam -qa <Target>`.
 
-Changing Haiku: commit on `prose` in `/Volumes/HaikuSrc/haiku`, then export
-the commit as the next `patches/haiku/NNNN-*.patch` (`git format-patch -1`)
-so that main carries it. A tree with uncommitted changes will not build
+Changing Haiku: commit on `prose` in `/Volumes/HaikuSrc/haiku`, then
+`scripts/export-patch.sh`, which writes the commit as the next
+`patches/haiku/NNNN-*.patch` (after putting the `Prose-Patch:` record into
+the commit, so the next build knows it is applied); add the row to
+`patches/haiku/README.md`. A tree with uncommitted changes will not build
 (`apply-patches.sh` refuses it).
 
 Moving to a newer upstream:

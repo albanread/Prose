@@ -1,0 +1,74 @@
+From 0f1597509ea6ad0ba7fa174f75dcc1ad66224a55 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 04:36:30 +0100
+Subject: [PATCH] OpenSSL, CA certificates, bc and wget in the image
+
+The minimum profile asks for openssl3, bc and wget (build/jam/
+DefaultBuildProfiles), and the build printed "not available!" for each and
+went on without them: Haiku's package server has none of the three for
+arm64. They are built in prose-packages now, and so are what they need
+beyond the image's packages: ca_root_certificates and zstd for OpenSSL,
+gettext's libintl for wget. Listed here, the build adds openssl3, bc and
+wget because the profile names them, and the rest through its dependency
+resolution.
+
+The ca_root_certificates entry replaces upstream's (2025_12_02-1, whose
+file was never here) with the version the recipes build (2026_07_16-1).
+
+The openssl3 build is the one from HaikuArmQemu's overlay: a haiku-aarch64
+target, no CPU probing, hardware AES/SHA.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0041-openssl-ca-certificates-bc-and-wget-in-the-image.patch a2e5bc41d33c7d0fffc079c423b5bd262762443d6a2870aba0425ba48f158237
+---
+ build/jam/repositories/HaikuPorts/arm64 | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 996609cad1..46980d1378 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -3,7 +3,8 @@ RemotePackageRepository HaikuPorts
+ 	: https://eu.hpkg.haiku-os.org/haikuports/master/build-packages
+ 	:
+ 	# architecture "any" packages
+-	ca_root_certificates-2025_12_02-1
++	# from prose-packages (the server has no arm64 snapshot of this list)
++	ca_root_certificates-2026_07_16-1
+ 	haikuporter-0_bootstrap-1
+ 	noto-20170202_bootstrap-7
+ 	:
+@@ -41,12 +42,14 @@ RemotePackageRepository HaikuPorts
+ 	texinfo-7.2_bootstrap-1
+ 	zlib-1.2.13_bootstrap-1
+ 	zlib_devel-1.2.13_bootstrap-1
+-	# built in prose-packages, vendor rewritten by HaikuArmQemu
+-	# private_workspace/addpkg.sh (resolved from generated/download/)
++	# built in prose-packages; HaikuArmQemu scripts/local-packages.sh puts
++	# them in generated/download/ (the server has no arm64 snapshot of this list)
++	bc-1.07.1-2
+ 	dav1d-1.5.4-2
+ 	dav1d_devel-1.5.4-2
+ 	flac-1.5.0-1
+ 	flac_devel-1.5.0-1
++	gettext_libintl-1.0-1
+ 	giflib-5.2.2-1
+ 	giflib_devel-5.2.2-1
+ 	lame-3.100-4
+@@ -74,6 +77,7 @@ RemotePackageRepository HaikuPorts
+ 	mpg123_devel-1.32.9-1
+ 	openjpeg-2.5.4-1
+ 	openjpeg_devel-2.5.4-1
++	openssl3-3.5.8-2
+ 	opus-1.3.1-2
+ 	opus_devel-1.3.1-2
+ 	speex-1.2.1-2
+@@ -84,6 +88,8 @@ RemotePackageRepository HaikuPorts
+ 	tiff_devel-4.7.0-1
+ 	wavpack-5.5.0-3
+ 	wavpack_devel-5.5.0-3
++	wget-1.24.5-2
++	zstd-1.5.7-1
+ 	:
+ 	# source packages
+ 	bash

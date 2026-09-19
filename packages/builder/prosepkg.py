@@ -1487,6 +1487,9 @@ def build_env(sysroot, work):
 		'PROSE_CMAKE_TOOLCHAIN': str(ENV_DIR / 'cmake-toolchain.cmake'),
 		'PROSE_MESON_CROSS': str(Path(work) / 'meson-cross.ini'),
 		'CONFIG_SITE': str(ENV_DIR / 'config.site'),
+		# the host's aclocal looks only in its own dirs; macro packages a recipe
+		# requires (autoconf_archive) are in the sysroot, where Haiku puts them
+		'ACLOCAL_PATH': str(sysroot / 'boot' / 'system' / 'data' / 'aclocal'),
 		'CC_FOR_BUILD': '/usr/bin/clang', 'CXX_FOR_BUILD': '/usr/bin/clang++',
 		'BUILD_CC': '/usr/bin/clang', 'HOSTCC': '/usr/bin/clang',
 	}
