@@ -41,7 +41,10 @@ hello: hello.cpp
 probe: probe.cpp
 	$(XGXX) $(CXXFLAGS) $(INCS) $(LIBS) -o $@ $< $(LDFLAGS) $(LDLIBS)
 
+pwquery: pwquery.cpp
+	$(XGXX) $(CXXFLAGS) $(INCS) $(LIBS) -o $@ $< $(LDFLAGS) $(LDLIBS) -lbsd
+
 clean:
-	rm -f $(BINS) hello probe *.o
+	rm -f $(BINS) hello probe pwquery *.o
 
 .PHONY: all clean

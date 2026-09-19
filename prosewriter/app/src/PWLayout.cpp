@@ -58,15 +58,42 @@ IsBreakChar(char c)
 
 // Greedy line breaking over styled text. Words are measured whole; a word
 // longer than the column is broken byte-wise at the column edge.
+// Width of one byte at `at`, with tabs advancing to the paragraph's next
+// tab stop (absolute from the left text edge) or a default 36 pt step.
+float
+PWLayout::ByteWidth(int32 para, const std::vector<PWRun>& runs,
+	const int32* runOf, const char* text, int32 at, int32 paraLen,
+	float lineX, float edge) const
+{
+	if (text[at] == '\t') {
+		const std::vector<PWTab>& tabs = fDoc->ParagraphFormat(para).tabs;
+		float pos = lineX + 0.01f - edge;	// x relative to the text edge
+		for (const PWTab& tab : tabs)
+			if (tab.x > pos)
+				return tab.x - pos;
+		return 36.0f;
+	}
+	if (runOf == NULL)
+		return 0;
+	BFont f = FontForRun(runs[runOf[at]]);
+	return f.StringWidth(text + at, 1);
+}
+
 void
 PWLayout::LayoutParagraph(int32 para)
 {
 	const char* text = fDoc->ParagraphText(para);
 	int32 paraLen = fDoc->ParagraphLength(para);
 	const std::vector<PWRun>& runs = fDoc->ParagraphRuns(para);
-	float column = fSetup.TextWidth();
+	const PWParaFormat& fmt = fDoc->ParagraphFormat(para);
 
-	// Precompute which run covers each byte (a byte->run index map).
+	// The paragraph's text box, inside the page margins and indents. Lists
+	// hang their marker in the left indent.
+	float edge = fSetup.marginLeft + fmt.indentLeft;
+	float listIndent = fmt.listKind != PW_LIST_NONE ? 18.0f : 0.0f;
+	float column = fSetup.pageWidth - fSetup.marginRight - fmt.indentRight
+		- edge - listIndent;
+
 	std::vector<int32> runOf(paraLen > 0 ? paraLen : 1, 0);
 	for (size_t r = 0; r < runs.size(); r++) {
 		int32 from = runs[r].start;
@@ -75,20 +102,31 @@ PWLayout::LayoutParagraph(int32 para)
 			runOf[i] = (int32)r;
 	}
 
+	int32 listSeq = 0;
+	if (fmt.listKind == PW_LIST_NUMBER) {
+		for (int32 p = para - 1; p >= 0; p--) {
+			if (fDoc->ParagraphFormat(p).listKind != PW_LIST_NUMBER)
+				break;
+			listSeq++;
+		}
+		listSeq++;	// 1-based, restarting at each non-list paragraph
+	}
+
 	int32 lineStart = 0;
 	while (lineStart < paraLen || (lineStart == 0 && paraLen == 0)) {
-		// Measure word by word from lineStart.
+		bool first = (lineStart == 0);
+		float lineEdge = edge + listIndent + (first ? fmt.indentFirst : 0);
+
 		int32 i = lineStart;
 		float width = 0;
-		int32 lastGood = lineStart;		// end (exclusive) that fits
-		int32 lastBreak = -1;			// offset after a break char that fits
+		int32 lastGood = lineStart;
+		int32 lastBreak = -1;
 		while (i < paraLen) {
 			int32 wordStart = i;
 			float wordWidth = 0;
-			// leading break chars attach to the previous word
 			while (i < paraLen && IsBreakChar(text[i])) {
-				BFont f = FontForRun(runs[runOf[i]]);
-				wordWidth += f.StringWidth(text + i, 1);
+				wordWidth += ByteWidth(para, runs, runOf.data(), text, i,
+					paraLen, lineEdge + width, edge);
 				i = UTF8Next(text, i, paraLen);
 			}
 			while (i < paraLen && !IsBreakChar(text[i])) {
@@ -105,14 +143,12 @@ PWLayout::LayoutParagraph(int32 para)
 				break;
 		}
 		if (lastGood == lineStart)
-			lastGood = paraLen;	// single overlong word: fill the line
+			lastGood = paraLen;
 
-		// Trim trailing break chars from the line (they wrap invisibly).
 		int32 lineEnd = lastGood;
 		while (lineEnd > lineStart && IsBreakChar(text[lineEnd - 1]))
 			lineEnd--;
 
-		// Line metrics: the tallest font on the line rules.
 		float ascent = 0, descent = 0;
 		for (int32 b = lineStart; b < lineEnd;) {
 			const PWRun& r = runs[runOf[b]];
@@ -122,7 +158,7 @@ PWLayout::LayoutParagraph(int32 para)
 			descent = std::max(descent, fh.descent + fh.leading);
 			b = UTF8Next(text, b, paraLen);
 		}
-		if (ascent == 0) {	// empty line: use the paragraph's first run
+		if (ascent == 0) {
 			font_height fh;
 			BFont f = FontForRun(runs[0]);
 			f.GetHeight(&fh);
@@ -134,47 +170,52 @@ PWLayout::LayoutParagraph(int32 para)
 		line.para = para;
 		line.startPara = lineStart;
 		line.length = lineEnd - lineStart;
-		// width recomputed for the trimmed end; alignment shifts x
 		float lineW = 0;
 		for (int32 b = lineStart; b < lineEnd;) {
 			const PWRun& r = runs[runOf[b]];
 			BFont f = FontForRun(r);
-			// measure to the end of this run's span on the line
 			int32 segEnd = std::min(r.start + r.length, lineEnd);
+			if (text[b] == '\t' && segEnd == b + 1) {
+				lineW += ByteWidth(para, runs, runOf.data(), text, b, paraLen,
+					lineEdge + lineW, edge);
+				b = segEnd;
+				continue;
+			}
 			lineW += f.StringWidth(text + b, segEnd - b);
 			b = segEnd;
 		}
 		line.width = lineW;
-		line.height = ascent + descent;
-		line.baseline = ascent;
-		// x/y assigned in AssignLinesToPages; alignment here:
-		switch (fDoc->ParagraphFormat(para).alignment) {
+		line.height = (ascent + descent) * fmt.lineSpacing;
+		line.baseline = ascent * fmt.lineSpacing;
+		switch (fmt.alignment) {
 			case PW_ALIGN_CENTER:
-				line.x = fSetup.marginLeft + (column - lineW) / 2;
+				line.x = lineEdge + (column - lineW) / 2;
 				break;
 			case PW_ALIGN_RIGHT:
-				line.x = fSetup.marginLeft + column - lineW;
+				line.x = lineEdge + column - lineW;
 				break;
 			default:
-				line.x = fSetup.marginLeft;
+				line.x = lineEdge;
 				break;
 		}
 		line.last = (lineEnd >= paraLen);
+		if (first && fmt.listKind != PW_LIST_NONE) {
+			line.listMark = fmt.listKind;
+			line.listSeq = listSeq;
+		}
 		fLines.push_back(line);
 
 		if (line.last)
 			break;
-		// Next line starts after the break chars we swallowed.
 		int32 next = lastBreak > lineEnd ? lastBreak : lastGood;
 		if (next <= lineStart)
 			next = lastGood > lineStart ? lastGood : lineEnd;
 		lineStart = next;
 	}
-	// Empty paragraph: one zero-length line.
 	if (fLines.empty() || fLines.back().para != (int32)para) {
 		Line empty;
 		empty.para = para;
-		empty.x = fSetup.marginLeft;
+		empty.x = edge + listIndent;
 		empty.last = true;
 		fLines.push_back(empty);
 	}
@@ -192,11 +233,18 @@ PWLayout::AssignLinesToPages()
 		span.firstLine = i;
 		float used = 0;
 		while (i < (int32)fLines.size()) {
+			const PWParaFormat& fmt = fDoc->ParagraphFormat(fLines[i].para);
+			// vertical spacing around paragraphs, not inside pages' first line
+			float before = (fLines[i].startPara == 0 && used > 0)
+				? fmt.spaceBefore : 0;
 			float h = fLines[i].height > 0 ? fLines[i].height : 14;
-			if (used > 0 && used + h > columnHeight)
+			if (used > 0 && used + before + h > columnHeight)
 				break;
+			used += before;
 			fLines[i].y = pageTop + fSetup.marginTop + used;
 			used += h;
+			if (fLines[i].last)
+				used += fmt.spaceAfter;
 			i++;
 		}
 		span.lineCount = i - span.firstLine;
@@ -463,8 +511,11 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 	const Line& l = fLines[lineIndex];
 	const std::vector<PWRun>& runs = fDoc->ParagraphRuns(l.para);
 	const char* text = fDoc->ParagraphText(l.para);
+	int32 paraLen = fDoc->ParagraphLength(l.para);
 	bool justify = LineIsJustified(lineIndex);
 	float slack = justify ? SlackPerGap(lineIndex) : 0;
+	float edge = fSetup.marginLeft
+		+ fDoc->ParagraphFormat(l.para).indentLeft;
 	float x = l.x;
 	int32 b = l.startPara;
 	int32 end = l.startPara + l.length;
@@ -475,6 +526,12 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 		s.length = to - from;
 		s.x = at;
 		s.baseline = l.y + l.baseline;
+		if (to - from == 1 && text[from] == '\t') {
+			// tabs advance to the paragraph's next stop, not their glyph
+			at += ByteWidth(l.para, runs, NULL, text, from, paraLen, at, edge);
+			out->push_back(s);
+			return;
+		}
 		BFont f = FontForRun(*r);
 		at += f.StringWidth(text + from, to - from);
 		if (justify && to < end && text[to - 1] == ' ')
@@ -489,8 +546,18 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 		if (segEnd <= b)
 			segEnd = b + 1;
 		if (!justify) {
-			pushSeg(r, b, segEnd, x);
-			b = segEnd;
+			while (b < segEnd) {
+				if (text[b] == '\t') {
+					pushSeg(r, b, b + 1, x);
+					b++;
+				} else {
+					int32 word = b;
+					while (word < segEnd && text[word] != '\t')
+						word++;
+					pushSeg(r, b, word, x);
+					b = word;
+				}
+			}
 			continue;
 		}
 		// justified: split at spaces so each gap can stretch

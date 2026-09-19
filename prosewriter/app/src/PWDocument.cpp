@@ -36,6 +36,51 @@ PWCharFormat::Unarchive(const BMessage* from)
 	from->FindBool("underline", &underline);
 }
 
+void
+PWParaFormat::Archive(BMessage* into) const
+{
+	into->AddInt8("align", (int8)alignment);
+	into->AddFloat("il", indentLeft);
+	into->AddFloat("ir", indentRight);
+	into->AddFloat("if", indentFirst);
+	into->AddFloat("ls", lineSpacing);
+	into->AddFloat("sb", spaceBefore);
+	into->AddFloat("sa", spaceAfter);
+	into->AddInt8("list", (int8)listKind);
+	for (const PWTab& tab : tabs) {
+		BMessage tabMsg('pWt&');
+		tabMsg.AddFloat("x", tab.x);
+		tabMsg.AddInt8("kind", (int8)tab.kind);
+		into->AddMessage("tab", &tabMsg);
+	}
+}
+
+void
+PWParaFormat::Unarchive(const BMessage* from)
+{
+	int8 v = 0;
+	if (from->FindInt8("align", &v) == B_OK)
+		alignment = (PWAlignment)v;
+	from->FindFloat("il", &indentLeft);
+	from->FindFloat("ir", &indentRight);
+	from->FindFloat("if", &indentFirst);
+	from->FindFloat("ls", &lineSpacing);
+	from->FindFloat("sb", &spaceBefore);
+	from->FindFloat("sa", &spaceAfter);
+	if (from->FindInt8("list", &v) == B_OK)
+		listKind = (PWListKind)v;
+	tabs.clear();
+	BMessage tabMsg;
+	for (int32 i = 0; from->FindMessage("tab", i, &tabMsg) == B_OK; i++) {
+		PWTab tab;
+		tabMsg.FindFloat("x", &tab.x);
+		int8 k = 0;
+		if (tabMsg.FindInt8("kind", &k) == B_OK)
+			tab.kind = (PWTabKind)k;
+		tabs.push_back(tab);
+	}
+}
+
 PWCharFormat
 PWDocument::MakeDefaultFormat()
 {
@@ -598,7 +643,7 @@ PWDocument::SaveToMessage(BMessage* msg) const
 		const Para& p = fParas[i];
 		BMessage paraMsg('pWp&');
 		paraMsg.AddString("text", p.text.c_str());
-		paraMsg.AddInt8("align", (int8)p.format.alignment);
+		p.format.Archive(&paraMsg);
 		for (const PWRun& r : p.runs) {
 			BMessage runMsg('pWr&');
 			runMsg.AddInt32("start", r.start);
@@ -625,9 +670,7 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 		const char* text = NULL;
 		if (paraMsg.FindString("text", &text) == B_OK)
 			p.text = text;
-		int8 align = 0;
-		if (paraMsg.FindInt8("align", &align) == B_OK)
-			p.format.alignment = (PWAlignment)align;
+		p.format.Unarchive(&paraMsg);
 		BMessage runMsg;
 		for (int32 j = 0; paraMsg.FindMessage("run", j, &runMsg) == B_OK; j++) {
 			PWRun r;

@@ -80,9 +80,10 @@ Classic BeOS aesthetics (per the screenshots and contemporary accounts):
    instant launch. Gobe's 2-second cold start is the benchmark.
 3. **The BeOS look** — yellow tabs, flat toolbars, floating palette, rulers,
    page-on-grey-desk. Detailed in `docs/ui-design.md`.
-4. **The cautionary tales** — .doc import fidelity and image wrapping broke
-   trust; ProseWriter's RTF import/export must be honest about what it
-   keeps, and text wrap is in the plan from the start.
+4. **The cautionary tales** — .doc import fidelity broke trust. Decision
+   (2026-09-19): ProseWriter ships no .doc/.docx support at all — the
+   converter would outweigh the OS. RTF is the interchange format, kept
+   honest about what it preserves.
 
 ## Sources
 

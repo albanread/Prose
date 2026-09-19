@@ -100,12 +100,28 @@ PW_WriteRTF(const PWDocument* doc, BString* out)
 		const char* text = doc->ParagraphText(p);
 		int32 len = doc->ParagraphLength(p);
 		const std::vector<PWRun>& runs = doc->ParagraphRuns(p);
-		switch (doc->ParagraphFormat(p).alignment) {
+		const PWParaFormat& fmt = doc->ParagraphFormat(p);
+		switch (fmt.alignment) {
 			case PW_ALIGN_CENTER:	*out << "\\qc "; break;
 			case PW_ALIGN_RIGHT:	*out << "\\qr "; break;
 			case PW_ALIGN_JUSTIFY:	*out << "\\qj "; break;
 			default:				*out << "\\ql "; break;
 		}
+		// geometry in twips (points * 20)
+		if (fmt.indentLeft != 0)
+			AppendFmt(out, "\\li%d ", (int)(fmt.indentLeft * 20 + 0.5f));
+		if (fmt.indentRight != 0)
+			AppendFmt(out, "\\ri%d ", (int)(fmt.indentRight * 20 + 0.5f));
+		if (fmt.indentFirst != 0)
+			AppendFmt(out, "\\fi%d ", (int)(fmt.indentFirst * 20 + 0.5f));
+		if (fmt.lineSpacing != 1.0f)
+			AppendFmt(out, "\\sl%d ", (int)(fmt.lineSpacing * 240 + 0.5f));
+		if (fmt.spaceBefore != 0)
+			AppendFmt(out, "\\sb%d ", (int)(fmt.spaceBefore * 20 + 0.5f));
+		if (fmt.spaceAfter != 0)
+			AppendFmt(out, "\\sa%d ", (int)(fmt.spaceAfter * 20 + 0.5f));
+		for (const PWTab& tab : fmt.tabs)
+			AppendFmt(out, "\\tx%d ", (int)(tab.x * 20 + 0.5f));
 		size_t ri = 0;
 		for (int32 at = 0; at < len; ) {
 			while (ri + 1 < runs.size()
@@ -161,6 +177,9 @@ struct RtfState {
 	int32 font = 0;
 	int32 color = 0;
 	PWAlignment align = PW_ALIGN_LEFT;
+	float indentLeft = 0, indentRight = 0, indentFirst = 0;
+	float lineSpacing = 1.0f, spaceBefore = 0, spaceAfter = 0;
+	std::vector<float> tabs;
 };
 
 bool
@@ -218,7 +237,7 @@ public:
 			}
 		}
 		// The last paragraph has no trailing \par; apply its alignment.
-		ApplyAlignment(fDoc->CountParagraphs() - 1);
+		ApplyParaFormat(fDoc->CountParagraphs() - 1);
 		return B_OK;
 	}
 
@@ -235,19 +254,6 @@ private:
 	{
 		if (fPos < fLen && fText[fPos] == c) { fPos++; return true; }
 		return false;
-	}
-
-	void ApplyAlignment(int32 para)
-	{
-		if (para < 0 || para >= fDoc->CountParagraphs())
-			return;
-		// Only if this paragraph's text is untouched by an earlier \q*
-		if (fSeenAlignForPara.find(para) != fSeenAlignForPara.end())
-			return;
-		PWParaFormat fmt = fDoc->ParagraphFormat(para);
-		fmt.alignment = fState.align;
-		fDoc->SetParaFormat(para, fmt);
-		fSeenAlignForPara.insert(para);
 	}
 
 	void Emit(const char* bytes, int32 count)
@@ -327,7 +333,28 @@ private:
 	void EndParagraph()
 	{
 		fDoc->Insert(fDoc->Length(), "\n", NULL);
-		ApplyAlignment(fDoc->CountParagraphs() - 2);
+		ApplyParaFormat(fDoc->CountParagraphs() - 2);
+	}
+
+	void ApplyParaFormat(int32 para)
+	{
+		if (para < 0 || para >= fDoc->CountParagraphs())
+			return;
+		if (fSeenAlignForPara.find(para) != fSeenAlignForPara.end())
+			return;
+		PWParaFormat fmt = fDoc->ParagraphFormat(para);
+		fmt.alignment = fState.align;
+		fmt.indentLeft = fState.indentLeft;
+		fmt.indentRight = fState.indentRight;
+		fmt.indentFirst = fState.indentFirst;
+		fmt.lineSpacing = fState.lineSpacing > 0 ? fState.lineSpacing : 1.0f;
+		fmt.spaceBefore = fState.spaceBefore;
+		fmt.spaceAfter = fState.spaceAfter;
+		fmt.tabs.clear();
+		for (float x : fState.tabs)
+			fmt.tabs.push_back(PWTab{ x, PW_TAB_LEFT });
+		fDoc->SetParaFormat(para, fmt);
+		fSeenAlignForPara.insert(para);
 	}
 
 	void Control()
@@ -391,6 +418,15 @@ private:
 		else if (word == "f") fState.font = hasParam ? param : 0;
 		else if (word == "cf") fState.color = hasParam ? param : 0;
 		else if (word == "ql") fState.align = PW_ALIGN_LEFT;
+		else if (word == "li") fState.indentLeft = hasParam ? param / 20.0f : 0;
+		else if (word == "ri") fState.indentRight = hasParam ? param / 20.0f : 0;
+		else if (word == "fi") fState.indentFirst = hasParam ? param / 20.0f : 0;
+		else if (word == "sl")
+			fState.lineSpacing = hasParam ? param / 240.0f : 1.0f;
+		else if (word == "sb") fState.spaceBefore = hasParam ? param / 20.0f : 0;
+		else if (word == "sa") fState.spaceAfter = hasParam ? param / 20.0f : 0;
+		else if (word == "tx" && hasParam)
+			fState.tabs.push_back(param / 20.0f);
 		else if (word == "qc") fState.align = PW_ALIGN_CENTER;
 		else if (word == "qr") fState.align = PW_ALIGN_RIGHT;
 		else if (word == "qj") fState.align = PW_ALIGN_JUSTIFY;

@@ -9,6 +9,7 @@
 #include <math.h>
 #include <cstring>
 #include <algorithm>
+#include <map>
 
 static const bigtime_t kBlinkInterval = 500000;	// 500 ms
 static const rgb_color kWhite = { 255, 255, 255, 255 };
@@ -93,9 +94,35 @@ PWPageView::ApplyCharFormat(const PWCharFormat& fmt)
 }
 
 void
+PWPageView::UpdateSpellCache()
+{
+	if (!fSpell || !fSpellOn || !fSpell->Loaded()) {
+		if (!fSpellCache.empty())
+			fSpellCache.clear();
+		return;
+	}
+	// Recheck only paragraphs whose text changed since the last scan.
+	std::map<int32, std::pair<BString, std::vector<std::pair<int32, int32>>>>
+		next;
+	for (int32 p = 0; p < fDoc->CountParagraphs(); p++) {
+		BString text(fDoc->ParagraphText(p));
+		auto it = fSpellCache.find(p);
+		if (it != fSpellCache.end() && it->second.first == text) {
+			next[p] = it->second;
+			continue;
+		}
+		std::vector<std::pair<int32, int32>> ranges;
+		fSpell->ScanParagraph(text.String(), &ranges);
+		next[p] = std::make_pair(text, ranges);
+	}
+	fSpellCache.swap(next);
+}
+
+void
 PWPageView::Relayout()
 {
 	fLayout->Layout();
+	UpdateSpellCache();
 	Invalidate();
 	Window()->PostMessage('pWup');	// tell the window to refresh status text
 }
@@ -165,6 +192,28 @@ PWPageView::DrawPages(BRect updateRect)
 			std::vector<PWLayout::Segment> segs;
 			fLayout->FillSegments(li, &segs);
 			const char* text = fDoc->ParagraphText(line.para);
+
+			// List marker for a paragraph's first line, right-aligned into
+			// the hanging indent.
+			if (line.listMark != 0) {
+				BString marker = line.listMark == PW_LIST_BULLET
+					? BString(B_UTF8_BULLET) : BString("");
+				if (line.listMark == PW_LIST_NUMBER)
+					marker.SetToFormat("%d.", (int)line.listSeq);
+				BFont font(be_plain_font);
+				if (!segs.empty()) {
+					font.SetFamilyAndFace(segs[0].run->format.family, 0);
+					font.SetSize(segs[0].run->format.size * fZoom);
+				}
+				SetFont(&font);
+				SetHighColor(ui_color(B_DOCUMENT_TEXT_COLOR));
+				float w = font.StringWidth(marker.String());
+				float px = DocToView(BPoint(line.x, 0)).x - 4 * fZoom - w;
+				DrawString(marker.String(),
+					BPoint(px, 24 + line.y * fZoom + line.baseline * fZoom
+						- (fPrinting ? 24 : 0)));
+			}
+			DrawSquiggles(line, segs);
 			for (const PWLayout::Segment& s : segs) {
 				BFont font(be_plain_font);
 				font.SetFamilyAndFace(s.run->format.family,
@@ -217,6 +266,70 @@ PWPageView::DrawHeaderFooter(int32 page, BRect pageRect)
 		float w = StringWidth(text.String());
 		DrawString(text.String(),
 			BPoint(pageRect.left + (pageRect.Width() - w) / 2, y));
+	}
+}
+
+void
+PWPageView::DrawSquiggles(const PWLayout::Line& line,
+	const std::vector<PWLayout::Segment>& segs)
+{
+	if (!fSpellOn || fSpellCache.empty() || line.length <= 0)
+		return;
+	auto it = fSpellCache.find(line.para);
+	if (it == fSpellCache.end())
+		return;
+	const char* text = fDoc->ParagraphText(line.para);
+	int32 lineStart = line.startPara;
+	int32 lineEnd = line.startPara + line.length;
+	for (const auto& range : it->second.second) {
+		int32 rs = std::max(range.first, lineStart);
+		int32 re = std::min(range.first + range.second, lineEnd);
+		if (re <= rs)
+			continue;
+		// x of a byte offset by walking the line's segments
+		auto xAt = [&](int32 at) -> float {
+			float x = line.x;
+			for (const PWLayout::Segment& s : segs) {
+				if (at <= s.startPara)
+					return x;
+				int32 segEnd = s.startPara + s.length;
+				if (at >= segEnd) {
+					BFont f(be_plain_font);
+					f.SetFamilyAndFace(s.run->format.family, 0);
+					f.SetSize(s.run->format.size);
+					x += f.StringWidth(text + s.startPara, s.length);
+				} else {
+					BFont f(be_plain_font);
+					f.SetFamilyAndFace(s.run->format.family, 0);
+					f.SetSize(s.run->format.size);
+					x += f.StringWidth(text + s.startPara,
+						at - s.startPara);
+					return x;
+				}
+			}
+			return x;
+		};
+		float x0 = xAt(rs), x1 = xAt(re);
+		float top = 24 + (line.y + line.baseline + 2.5f) * fZoom;
+		if (fPrinting)
+			top = (line.y + line.baseline + 2.5f) * fZoom;
+		SetHighColor(rgb_color{ 200, 0, 0, 255 });
+		float step = std::max(2.0f, 3.0f * fZoom);
+		float amp = std::max(1.0f, 1.5f * fZoom);
+		float x = 24 + x0 * fZoom;
+		if (fPrinting)
+			x = x0 * fZoom;
+		float limit = 24 + x1 * fZoom;
+		if (fPrinting)
+			limit = x1 * fZoom;
+		bool up = true;
+		while (x < limit) {
+			float next = std::min(x + step, limit);
+			StrokeLine(BPoint(x, up ? top - amp : top + amp),
+				BPoint(next, up ? top + amp : top - amp));
+			x = next;
+			up = !up;
+		}
 	}
 }
 

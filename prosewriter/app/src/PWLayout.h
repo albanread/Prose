@@ -59,6 +59,8 @@ public:
 		float	height = 0;		// line height
 		float	baseline = 0;	// baseline offset within the line
 		bool	last = false;	// last line of its paragraph
+		uint8	listMark = 0;	// PWListKind of the paragraph, first line only
+		int32	listSeq = 0;	// 1-based ordinal for numbered lists
 	};
 	const std::vector<Line>& Lines() const { return fLines; }
 	// The lines of one page, for per-page drawing (see PWPageView).
@@ -96,6 +98,9 @@ private:
 	// the last line owns through the document end. Trimmed trailing spaces
 	// and paragraph separators therefore always have exactly one owner.
 	int32	LineEndAbs(int32 lineIndex) const;
+	float	ByteWidth(int32 para, const std::vector<PWRun>& runs,
+			const int32* runOf, const char* text, int32 at, int32 paraLen,
+			float lineX, float edge) const;
 	bool	LineIsJustified(int32 lineIndex) const;
 	float	SlackPerGap(int32 lineIndex) const;
 

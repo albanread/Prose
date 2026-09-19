@@ -115,16 +115,53 @@ The distance from "engine with menus" to a word processor people write in.
    format), document icon + MIME registration, window placement memory,
    Esc closes the find bar.
 
-**Exit criteria:** a multi-page document with headings, lists, indents and
-tabs round-trips through `.prose` and RTF; `hey ProseWriter get Text of
-Window 1` returns the document text; the perf measurements are recorded
-and within budget. Printing on real paper stays open until a printer
-exists on a Prose machine.
+*Sprint 4 status: feature work complete and selftested (65/65). Items
+delivered: indents, spacing, tab stops, lists, RTF geometry round trip,
+spell check as-you-type with red squiggles (user-pulled forward from
+Sprint 5; dictionary = macOS's 235k-word list, 2.4 MB, loaded once per
+window), Esc-closes-find, B/I/U menu marks reflect the caret's format.*
+
+**Open: scripting via `hey` (experimental).** Implemented: ResolveSpecifier
+and app-level B_GET/SET_PROPERTY handling for Text, Header, Footer,
+Selection, Modified, WordCount. Verified: messages are delivered to
+PWApp::MessageReceived with the specifier stack intact ('PGET',
+HasSpecifiers=1, seen via stderr traces), replies are constructed and the
+reply mechanism itself is proven (error replies reach hey). Not working:
+property extraction at answer time — GetCurrentSpecifier returns nothing
+useful on the delivered message and the property field is absent, so the
+default looper suite answers instead. Not yet tried: GetSupportedSuites
+with a BPropertyInfo suite (the fully documented pattern; the working
+receiver examples in the tree — StyledEdit — simply inherit BTextView's
+native suites and define none of their own). Harness note: hey
+auto-launches by signature, so test only against a known single instance.
+
+**Sprint 4 hardening ledger** (all root-caused, all fixed): the selftest
+case array overflowed its fixed size (now a vector); the agent died on
+SIGPIPE from disconnected clients (ignored) and could wedge for 20
+minutes on a hung child (deadline now 90 s, units checked twice);
+children inherited the listening socket and starved restarts (CLOEXEC);
+`cp` over a running binary truncated it (renames now); harness flags
+mutated window-owned state from the app thread (delivered as a message to
+the window thread); `killall` does not exist on this image — kill by
+team id.
+
+**Exit criteria review:** round trip ✓, perf budget ✓ (96 pages ~180 ms),
+hey ✗ (open as above), printing still awaits real paper. Sprint 5 takes
+the scripting open item, images-in-text with wrap, tables, and the styles
+panel deferred from S4.
 
 ### Sprint 5+ (drawn from the GoBe research)
 
 Images and frames in text (anchored, with wrap), tables, spell-check as
-you type, .doc import via a converter — each sized when Sprint 4 lands.
+you type — each sized when Sprint 4 lands.
+
+**Non-goal, decided 2026-09-19: Word .doc/.docx import.** A converter
+stack capable of honest OOXML fidelity would be larger than the whole
+Prose system image — out of proportion for a word processor on this OS,
+and the GoBe post-mortem says fidelity-that-almost-works burns more trust
+than no attempt. Interchange is RTF (ours, dependency-free), plain text,
+and the native `.prose` format. If Word exchange ever matters, the right
+shape is a small external converter tool, never code in ProseWriter.
 
 ## Test definitions (guest, automated via `vm/guest.sh`)
 

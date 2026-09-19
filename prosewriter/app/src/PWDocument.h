@@ -39,15 +39,41 @@ struct PWCharFormat {
 	void Unarchive(const BMessage* from);
 };
 
-// Paragraph format (alignment only for sprint 1; tabs/indents come with the
-// ruler in sprint 2).
+// Paragraph format. Distances are points from the page's text edges;
+// tabs are absolute x positions from the left text edge.
 enum PWAlignment : uint8 { PW_ALIGN_LEFT, PW_ALIGN_CENTER, PW_ALIGN_RIGHT,
 	PW_ALIGN_JUSTIFY };
+enum PWListKind : uint8 { PW_LIST_NONE, PW_LIST_BULLET, PW_LIST_NUMBER };
+enum PWTabKind : uint8 { PW_TAB_LEFT, PW_TAB_CENTER, PW_TAB_RIGHT };
+
+struct PWTab {
+	float		x = 0;
+	PWTabKind	kind = PW_TAB_LEFT;
+	bool operator==(const PWTab& o) const
+		{ return x == o.x && kind == o.kind; }
+};
 
 struct PWParaFormat {
 	PWAlignment	alignment = PW_ALIGN_LEFT;
+	float		indentLeft = 0;
+	float		indentRight = 0;
+	float		indentFirst = 0;
+	float		lineSpacing = 1.0f;	// multiplier on the natural line height
+	float		spaceBefore = 0;	// points
+	float		spaceAfter = 0;
+	PWListKind	listKind = PW_LIST_NONE;
+	std::vector<PWTab> tabs;
+
 	bool operator==(const PWParaFormat& o) const
-		{ return alignment == o.alignment; }
+	{
+		return alignment == o.alignment
+			&& indentLeft == o.indentLeft && indentRight == o.indentRight
+			&& indentFirst == o.indentFirst && lineSpacing == o.lineSpacing
+			&& spaceBefore == o.spaceBefore && spaceAfter == o.spaceAfter
+			&& listKind == o.listKind && tabs == o.tabs;
+	}
+	void Archive(BMessage* into) const;
+	void Unarchive(const BMessage* from);
 };
 
 struct PWRun {

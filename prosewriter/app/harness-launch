@@ -1,0 +1,12 @@
+#!/bin/sh
+# UserBootscript portion: proseagent is supervised by launch_daemon, not a
+# shell wrapper (a wrapper dies with its parent and takes the safety net
+# with it; see the 2026-09-19 silent-disappearance incident).
+LAUNCH_DIR=/boot/home/config/settings/launch
+mkdir -p "$LAUNCH_DIR"
+cat > "$LAUNCH_DIR/com.prose.proseagent.launch" <<'JOB'
+job com.prose.proseagent {
+	exec /boot/home/apps/proseagent
+	respawn
+}
+JOB

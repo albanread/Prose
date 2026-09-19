@@ -9,6 +9,7 @@
 
 #include "PWDocument.h"
 #include "PWLayout.h"
+#include "PWSpell.h"
 
 class BCheckBox;
 class PWHeaderWindow;
@@ -20,6 +21,7 @@ class PWRuler;
 
 class PWWindow : public BWindow {
 public:
+	struct Panels;
 			PWWindow(BRect frame, const char* title);
 
 	bool	QuitRequested() override;
@@ -72,9 +74,14 @@ private:
 	void	ApplyAlignment(int32 alignment);
 public:
 	void	ApplyPageSetup(const PWPageSetup& setup);
+	void	AdoptDoc(PWDocument* fresh);
+public:
+	void	SetSpellChecker(PWSpellChecker* spell);
+	Panels*	EnsurePanels();
 private:
 	void	SetZoom(float zoom);
 	void	MarkZoomItem(float zoom);
+	bool	HandleScripting(BMessage* message);
 	void	Print();
 	void	AddRecentFile(const char* path);
 	void	BuildRecentMenu();
@@ -94,12 +101,24 @@ private:
 	BMenuItem*		fUndoItem;
 	BMenuItem*		fRedoItem;
 	BMenuItem*		fSaveItem;
-	BFilePanel*		fOpenPanel;
-	BFilePanel*		fSavePanel;
-	BFilePanel*		fExportPanel;
+	// File panels are created on first use; they are windows, and an
+	// eagerly created one hijacks "Window 1" from script senders.
+public:
+	struct Panels {
+		BFilePanel* open;
+		BFilePanel* save;
+		BFilePanel* exportRtf;
+		Panels(BFilePanel* o, BFilePanel* s, BFilePanel* e)
+			: open(o), save(s), exportRtf(e) {}
+	};
+	Panels*		fPanels = NULL;
+
+private:
 	BStringView*	fStatusView;
 	BMenu*			fZoomMenu;
 	BMenu*			fRecentMenu;
+	PWSpellChecker*	fSpell;
+	BMenuItem*		fSpellItem;
 	PWPageSetupWindow*	fSetupWin = NULL;
 	PWHeaderWindow*	fHeaderWin = NULL;
 };

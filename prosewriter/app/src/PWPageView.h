@@ -5,9 +5,12 @@
 #include <ScrollView.h>
 #include <View.h>
 
+#include <map>
+#include <utility>
 #include <vector>
 
 #include "PWLayout.h"
+#include "PWSpell.h"
 
 
 class PWPageView : public BView {
@@ -57,6 +60,12 @@ public:
 	BPoint	ViewToDoc(BPoint p) const
 			{ return BPoint((p.x - 24) / fZoom, (p.y - 24) / fZoom); }
 
+	// ---- spell check (1997's finest: the red squiggle)
+	void	SetSpellChecker(PWSpellChecker* checker) { fSpell = checker; }
+	void	SetSpellEnabled(bool on) { fSpellOn = on; fSpellCache.clear();
+			if (Window()) Relayout(); else Invalidate(); }
+	bool	SpellEnabled() const { return fSpellOn; }
+
 	// ---- the format typing uses and menus change
 	const PWCharFormat& CurrentFormat() const { return fCurrentFormat; }
 	void	ApplyCharFormat(const PWCharFormat& fmt);
@@ -73,6 +82,9 @@ private:
 	void	DeleteSelection();
 	void	DrawPages(BRect updateRect);
 	void	DrawHeaderFooter(int32 page, BRect pageRect);
+	void	DrawSquiggles(const PWLayout::Line& line,
+		const std::vector<PWLayout::Segment>& segs);
+	void	UpdateSpellCache();
 	void	DrawSelection();
 	void	DrawCaret();
 	void	ClickCycled(BPoint where, int32 clicks);
@@ -90,6 +102,11 @@ private:
 	float		fZoom = 1.0f;
 	PWCharFormat	fCurrentFormat;
 	bool		fOverrideFormat = false;
+	PWSpellChecker* fSpell = NULL;
+	bool		fSpellOn = false;
+	// paragraph -> (text snapshot, misspelled byte ranges)
+	std::map<int32, std::pair<BString,
+		std::vector<std::pair<int32, int32>>>> fSpellCache;
 	int32		fClickCount = 0;
 	bigtime_t	fLastClickTime = 0;
 	bool		fMouseSelecting = false;

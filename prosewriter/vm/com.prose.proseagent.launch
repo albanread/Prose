@@ -1,0 +1,4 @@
+job com.prose.proseagent {
+	exec /boot/home/apps/proseagent
+	respawn
+}

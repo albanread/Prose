@@ -32,6 +32,7 @@
 #include "PWPageView.h"
 #include "PWRTF.h"
 #include "PWRuler.h"
+#include "PWSpell.h"
 
 // ---------------------------------------------------------------- helpers --
 static BMenuItem*
@@ -323,6 +324,8 @@ private:
 	BTextControl*	fFooter;
 };
 
+static void LoadSpellDictionary(PWWindow* window);
+
 // ----------------------------------------------------------------- window --
 PWWindow::PWWindow(BRect frame, const char* title)
 	:
@@ -355,15 +358,11 @@ PWWindow::PWWindow(BRect frame, const char* title)
 	fStatusView->SetAlignment(B_ALIGN_RIGHT);
 	AddChild(fStatusView);
 
-	fOpenPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), NULL,
-		B_FILE_NODE, false, new BMessage(OPEN_PANEL_MSG));
-	fSavePanel = new BFilePanel(B_SAVE_PANEL, new BMessenger(this), NULL,
-		B_FILE_NODE, false, new BMessage(SAVE_PANEL_MSG));
-	fExportPanel = new BFilePanel(B_SAVE_PANEL, new BMessenger(this), NULL,
-		B_FILE_NODE, false, new BMessage(EXPORT_RTF_DONE_MSG));
-
+	// File panels are created lazily: they are windows, and an eagerly
+	// created panel hijacks "Window 1" from script senders.
 	SetSizeLimits(460, 4000, 380, 4000);
 	LayoutChildren();
+	LoadSpellDictionary(this);
 	UpdateStatusText();
 	fView->MakeFocus();
 }
@@ -397,35 +396,49 @@ ParseArgs(int argc, char** argv)
 	}
 }
 
+// The window thread owns the document, layout and view; the harness
+// arguments are delivered as a message so nothing is mutated cross-thread.
 static void
 ApplyWindowArgs(PWWindow* window)
 {
-	PWPageSetup setup = window->Layout()->PageSetup();
-	if (gPaper) {
-		for (int i = 0; kPapers[i].name; i++) {
-			if (!strcasecmp(kPapers[i].name, gPaper)) {
-				setup.pageWidth = kPapers[i].width;
-				setup.pageHeight = kPapers[i].height;
-				break;
-			}
-		}
-	}
-	if (gLandscape && setup.pageWidth < setup.pageHeight) {
-		float t = setup.pageWidth;
-		setup.pageWidth = setup.pageHeight;
-		setup.pageHeight = t;
-	}
-	if (gPaper || gLandscape)
-		window->Layout()->SetPageSetup(setup);
+	BMessage args('pWda');
 	if (gHeader)
-		window->Document()->SetHeaderText(gHeader);
+		args.AddString("header", gHeader);
 	if (gFooter)
-		window->Document()->SetFooterText(gFooter);
+		args.AddString("footer", gFooter);
+	if (gPaper)
+		args.AddString("paper", gPaper);
+	if (gLandscape)
+		args.AddBool("landscape", true);
 	if (gSeed)
-		window->Document()->Insert(0, gSeed, NULL);
-	window->View()->Relayout();
+		args.AddString("seed", gSeed);
 	if (gPrint)
-		window->PostMessage(PWWindow::PRINT_MSG);
+		args.AddBool("print", true);
+	window->PostMessage(&args);
+}
+
+PWWindow::Panels*
+PWWindow::EnsurePanels()
+{
+	if (fPanels == NULL)
+		fPanels = new Panels(new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
+			NULL, B_FILE_NODE, false, new BMessage(OPEN_PANEL_MSG)),
+			new BFilePanel(B_SAVE_PANEL, new BMessenger(this), NULL,
+				B_FILE_NODE, false, new BMessage(SAVE_PANEL_MSG)),
+			new BFilePanel(B_SAVE_PANEL, new BMessenger(this), NULL,
+				B_FILE_NODE, false, new BMessage(EXPORT_RTF_DONE_MSG)));
+	return fPanels;
+}
+
+void
+PWWindow::AdoptDoc(PWDocument* fresh)
+{
+	BMessage msg;
+	fresh->SaveToMessage(&msg);
+	fDoc.LoadFromMessage(&msg);
+	fView->SetCaret(0, false);
+	fView->Relayout();
+	UpdateStatusText();
 }
 
 void
@@ -577,6 +590,10 @@ PWWindow::BuildMenus()
 
 	menu = new BMenu("Document");
 	menu->AddItem(item("Header and footer" B_UTF8_ELLIPSIS, HEADER_MSG));
+	fSpellItem = item("Check spelling", 'pWsc');
+	fSpellItem->SetMessage(new BMessage('pWsc'));
+	fSpellItem->SetMarked(true);
+	menu->AddItem(fSpellItem);
 	fMenuBar->AddItem(menu);
 
 	menu = new BMenu("Search");
@@ -611,6 +628,10 @@ PWWindow::MenusBeginning()
 	fUndoItem->SetEnabled(fDoc.CanUndo());
 	fRedoItem->SetEnabled(fDoc.CanRedo());
 	fSaveItem->SetEnabled(fDoc.IsModified());
+	const PWCharFormat& fmt = fView->CurrentFormat();
+	fMenuBar->FindItem("Bold")->SetMarked(fmt.bold);
+	fMenuBar->FindItem("Italic")->SetMarked(fmt.italic);
+	fMenuBar->FindItem("Underline")->SetMarked(fmt.underline);
 }
 
 void
@@ -739,6 +760,36 @@ PWWindow::MarkZoomItem(float zoom)
 	}
 }
 
+// Dictionary search order: the user's settings, the system data dir, and
+// beside the application (dev installs). Any hit enables checking.
+static void
+LoadSpellDictionary(PWWindow* window)
+{
+	PWSpellChecker* spell = new PWSpellChecker();
+	BPath candidates[3];
+	find_directory(B_USER_SETTINGS_DIRECTORY, &candidates[0]);
+	candidates[0].Append("ProseWriter/words");
+	candidates[1].SetTo("/boot/system/data/ProseWriter/words");
+	candidates[2].SetTo("/boot/home/apps/words");
+	for (BPath& path : candidates) {
+		int32 n = spell->Load(path.Path());
+		if (n > 0) {
+			fprintf(stderr, "ProseWriter: %d words from %s\n", (int)n,
+				path.Path());
+			break;
+		}
+	}
+	window->SetSpellChecker(spell);
+}
+
+void
+PWWindow::SetSpellChecker(PWSpellChecker* spell)
+{
+	fSpell = spell;
+	fView->SetSpellChecker(spell);
+	fView->SetSpellEnabled(fSpellItem->IsMarked() && spell->Loaded());
+}
+
 void
 PWWindow::ApplyPageSetup(const PWPageSetup& setup)
 {
@@ -863,21 +914,147 @@ PWWindow::AddRecentFile(const char* path)
 	BuildRecentMenu();
 }
 
+// ---- scripting: the Be way. hey ProseWriter get Text of Window 1, &c.
+static void
+ReplyString(BMessage* message, const char* value)
+{
+	BMessage reply(B_REPLY);
+	reply.AddString("result", value);
+	message->SendReply(&reply);
+}
+
+static void
+ReplyInt(BMessage* message, int32 value)
+{
+	BMessage reply(B_REPLY);
+	reply.AddInt32("result", value);
+	message->SendReply(&reply);
+}
+
+static void
+ReplyError(BMessage* message, const char* error)
+{
+	BMessage reply(B_REPLY);
+	reply.AddString("error", error);
+	message->SendReply(&reply);
+}
+
+// Answered on whichever looper owns the window; property work is all
+// main-thread window state, so this is safe from app or window looper.
+static bool
+HandleScriptingForWindow(PWWindow* window, BMessage* message,
+	const char* property)
+{
+	if (property == NULL || !property[0])
+		return false;
+	PWDocument& doc = *window->Document();
+	BString prop = property;
+	bool isGet = message->what == B_GET_PROPERTY;
+	bool isSet = message->what == B_SET_PROPERTY;
+	if (!isGet && !isSet)
+		return false;
+
+	if (prop == "Text") {
+		if (isGet) {
+			ReplyString(message, doc.PlainText());
+		} else {
+			BString text;
+			if (message->FindString("data", &text) == B_OK) {
+				PWDocument fresh;
+				fresh.Insert(0, text.String(), NULL);
+				window->AdoptDoc(&fresh);
+				ReplyString(message, "");
+			} else
+				ReplyError(message, "no data");
+		}
+		return true;
+	}
+	if (prop == "Header" || prop == "Footer") {
+		if (isGet) {
+			ReplyString(message, prop == "Header" ? doc.HeaderText()
+				: doc.FooterText());
+		} else {
+			BString text;
+			if (message->FindString("data", &text) == B_OK) {
+				if (prop == "Header")
+					doc.SetHeaderText(text.String());
+				else
+					doc.SetFooterText(text.String());
+				window->View()->Relayout();
+				ReplyString(message, "");
+			} else
+				ReplyError(message, "no data");
+		}
+		return true;
+	}
+	if (prop == "Selection") {
+		BString sel;
+		if (isGet) {
+			int32 from, to;
+			window->View()->GetSelection(&from, &to);
+			sel.SetToFormat("%d-%d", (int)from, (int)to);
+			ReplyString(message, sel.String());
+		} else if (message->FindString("data", &sel) == B_OK) {
+			int32 dash = sel.FindFirst('-');
+			int32 a = atol(sel.String());
+			int32 b = dash >= 0 ? atol(sel.String() + dash + 1) : a;
+			window->View()->Select(a, b);
+			ReplyString(message, "");
+		} else
+			ReplyError(message, "no data");
+		return true;
+	}
+	if (prop == "Modified") {
+		if (isGet)
+			ReplyInt(message, doc.IsModified() ? 1 : 0);
+		else
+			ReplyError(message, "read-only property");
+		return true;
+	}
+	if (prop == "WordCount" && isGet) {
+		int32 words = 0;
+		const char* plain = doc.PlainText();
+		bool inWord = false;
+		for (const char* c = plain; *c; c++) {
+			bool w = (*c != ' ' && *c != '\n' && *c != '\t');
+			if (w && !inWord) words++;
+			inWord = w;
+		}
+		ReplyInt(message, words);
+		return true;
+	}
+	return false;
+}
+
+bool
+PWWindow::HandleScripting(BMessage* message)
+{
+	int32 index = 0;
+	BMessage spec;
+	int32 what = 0;
+	const char* prop = NULL;
+	if (message->GetCurrentSpecifier(&index, &spec, &what, &prop) != B_OK)
+		return false;
+	return HandleScriptingForWindow(this, message, prop);
+}
+
 void
 PWWindow::MessageReceived(BMessage* message)
 {
+	if (HandleScripting(message))
+		return;
 	switch (message->what) {
 		case DOC_MODIFIED_MSG:
 			UpdateStatusText();
 			break;
 		case OPEN_PANEL_MSG:
-			fOpenPanel->Show();
+			EnsurePanels()->open->Show();
 			break;
 		case SAVE_PANEL_MSG:
-			fSavePanel->Show();
+			EnsurePanels()->save->Show();
 			break;
 		case EXPORT_RTF_MSG:
-			fExportPanel->Show();
+			EnsurePanels()->exportRtf->Show();
 			break;
 		case 'pWop': {	// open panel selection
 			entry_ref ref;
@@ -915,7 +1092,7 @@ PWWindow::MessageReceived(BMessage* message)
 			if (fFilePath.Length())
 				DoSave(fFilePath);
 			else
-				fSavePanel->Show();
+				EnsurePanels()->save->Show();
 			break;
 		case 'pWud':
 			fDoc.Undo();
@@ -1026,6 +1203,10 @@ PWWindow::MessageReceived(BMessage* message)
 		case FIND_BAR_MSG:
 			ToggleFindBar(!fFindShown);
 			break;
+		case B_ESCAPE:
+			if (fFindShown)
+				ToggleFindBar(false);
+			break;
 		case PAGE_SETUP_MSG:
 			if (fSetupWin == NULL) {
 				fSetupWin = new PWPageSetupWindow(this,
@@ -1048,9 +1229,50 @@ PWWindow::MessageReceived(BMessage* message)
 		case 'pWhC':
 			fHeaderWin = NULL;
 			break;
+		case 'pWsc':
+			fView->SetSpellEnabled(fSpellItem->IsMarked()
+				&& fSpell && fSpell->Loaded());
+			UpdateStatusText();
+			break;
 		case PRINT_MSG:
 			Print();
 			break;
+		case 'pWda': {
+			BMessage* args = message;
+			BString text;
+			if (args->FindString("header", &text) == B_OK)
+				fDoc.SetHeaderText(text.String());
+			if (args->FindString("footer", &text) == B_OK)
+				fDoc.SetFooterText(text.String());
+			BString paper;
+			if (args->FindString("paper", &paper) == B_OK) {
+				PWPageSetup setup = fLayout.PageSetup();
+				for (int i = 0; kPapers[i].name; i++) {
+					if (!strcasecmp(kPapers[i].name, paper.String())) {
+						setup.pageWidth = kPapers[i].width;
+						setup.pageHeight = kPapers[i].height;
+						break;
+					}
+				}
+				bool landscape = false;
+				args->FindBool("landscape", &landscape);
+				if (landscape && setup.pageWidth < setup.pageHeight) {
+					float t = setup.pageWidth;
+					setup.pageWidth = setup.pageHeight;
+					setup.pageHeight = t;
+				}
+				fLayout.SetPageSetup(setup);
+			}
+			if (args->FindString("seed", &text) == B_OK)
+				fDoc.Insert(0, text.String(), NULL);
+			fView->SetCaret(0, false);
+			fView->Relayout();
+			UpdateStatusText();
+			bool doPrint = false;
+			if (args->FindBool("print", &doPrint) == B_OK && doPrint)
+				Print();
+			break;
+		}
 		case RECENT_MSG: {
 			BString path;
 			if (message->FindString("path", &path) == B_OK) {
@@ -1143,7 +1365,7 @@ PWWindow::QuitRequested()
 			if (fFilePath.Length())
 				DoSave(fFilePath);
 			else {
-				fSavePanel->Show();
+				EnsurePanels()->save->Show();
 				return false;
 			}
 		}
@@ -1172,10 +1394,21 @@ public:
 		fWindow->Show();
 		if (gHeader || gFooter || gPaper || gLandscape || gSeed)
 			ApplyWindowArgs(fWindow);
+		// Without a preferred handler the looper answers scripting itself.
+		SetPreferredHandler(this);
 	}
 
 	void	MessageReceived(BMessage* message) override
 	{
+		fprintf(stderr, "PWApp::MessageReceived what=%lx spec=%d\n",
+			(long)message->what, (int)message->HasSpecifiers());
+		if ((message->what == B_GET_PROPERTY
+				|| message->what == B_SET_PROPERTY)
+			&& fWindow != NULL) {
+			// not ours after all: let the inherited handling answer
+			BApplication::MessageReceived(message);
+			return;
+		}
 		switch (message->what) {
 			case 'pWnw': {
 				BRect frame = fWindow ? fWindow->Frame()
@@ -1446,6 +1679,143 @@ SelfTest()
 	}
 
 		printf("block: perf\n"); fflush(stdout);
+	{
+		// Sprint 4: indents, tabs, spacing, lists.
+		printf("block: s4 layout\n"); fflush(stdout);
+		PWDocument doc;
+		doc.Insert(0, "First line indented then wraps around here we go "
+			"with more words to be sure it wraps twice.", NULL);
+		PWParaFormat fmt;
+		fmt.indentFirst = 36;
+		fmt.indentLeft = 18;
+		doc.SetParaFormat(0, fmt);
+		PWLayout layout(&doc);
+		PWPageSetup setup;
+		layout.SetPageSetup(setup);
+		layout.Layout();
+		const PWLayout::Line& first = layout.Lines()[0];
+		const PWLayout::Line& second = layout.Lines()[1];
+		CHECK("first-line indent shifts line 0",
+			fabs(first.x - (setup.marginLeft + fmt.indentLeft
+				+ fmt.indentFirst)) < 0.5f);
+		CHECK("left indent shifts wrapped lines",
+			fabs(second.x - (setup.marginLeft + fmt.indentLeft)) < 0.5f);
+
+		// Tab advance: a tab at 72 jumps the second word there.
+		PWDocument tdoc;
+		tdoc.Insert(0, "a\tb", NULL);
+		PWParaFormat tfmt;
+		tfmt.tabs.push_back(PWTab{ 72, PW_TAB_LEFT });
+		tdoc.SetParaFormat(0, tfmt);
+		PWLayout tlayout(&tdoc);
+		tlayout.SetPageSetup(setup);
+		tlayout.Layout();
+		std::vector<PWLayout::Segment> tsegs;
+		tlayout.FillSegments(0, &tsegs);
+		CHECK("tab produces three segments", tsegs.size() >= 3);
+		if (tsegs.size() >= 3)
+			CHECK("tab advances to the stop",
+				fabs(tsegs[2].x - (setup.marginLeft + 72)) < 1.0f);
+
+		// Line spacing doubles the used height.
+		PWDocument sdoc;
+		BString filler;
+		for (int i = 0; i < 80; i++)
+			filler << "spacing test ";
+		sdoc.Insert(0, filler.String(), NULL);
+		PWLayout sl1(&sdoc), sl2(&sdoc);
+		sl1.SetPageSetup(setup);
+		sl2.SetPageSetup(setup);
+		sl1.Layout();
+		PWParaFormat sfmt;
+		sfmt.lineSpacing = 2.0f;
+		sdoc.SetParaFormat(0, sfmt);
+		sl2.Layout();
+		CHECK("spacing grows the layout",
+			sl2.Lines().back().y > sl1.Lines().back().y * 1.5f);
+
+		// Numbered lists: sequence restarts after a plain paragraph.
+		PWDocument ldoc;
+		ldoc.Insert(0, "one", NULL);
+		ldoc.Insert(3, "\ntwo", NULL);
+		ldoc.Insert(7, "\nbreak\nfour", NULL);
+		PWParaFormat lfmt;
+		lfmt.listKind = PW_LIST_NUMBER;
+		ldoc.SetParaFormat(0, lfmt);
+		ldoc.SetParaFormat(1, lfmt);
+		ldoc.SetParaFormat(3, lfmt);
+		PWLayout llayout(&ldoc);
+		llayout.SetPageSetup(setup);
+		llayout.Layout();
+		CHECK("numbered marker on line 0",
+			llayout.Lines()[0].listMark == PW_LIST_NUMBER
+			&& llayout.Lines()[0].listSeq == 1);
+		CHECK("numbered marker continues",
+			llayout.Lines()[1].listMark == PW_LIST_NUMBER
+			&& llayout.Lines()[1].listSeq == 2);
+		CHECK("numbered restarts after break",
+			llayout.Lines()[3].listMark == PW_LIST_NUMBER
+			&& llayout.Lines()[3].listSeq == 1);
+
+		// RTF round trip of the new geometry.
+		PWDocument rdoc;
+		rdoc.Insert(0, "indented", NULL);
+		PWParaFormat rfmt;
+		rfmt.indentLeft = 28;
+		rfmt.indentFirst = -14;
+		rfmt.lineSpacing = 1.5f;
+		rfmt.spaceAfter = 10;
+		rfmt.tabs.push_back(PWTab{ 90, PW_TAB_LEFT });
+		rdoc.SetParaFormat(0, rfmt);
+		BString rrtf;
+		PW_WriteRTF(&rdoc, &rrtf);
+		PWDocument rloaded;
+		PW_LoadRTF(&rloaded, rrtf.String());
+		printf("dbg geometry rtf: %s\n", rrtf.String());
+		const PWParaFormat& dbgF = rloaded.ParagraphFormat(0);
+		printf("dbg loaded: il=%.1f fi=%.1f ls=%.2f sa=%.1f tabs=%d\n",
+			dbgF.indentLeft, dbgF.indentFirst, dbgF.lineSpacing,
+			dbgF.spaceAfter, (int)dbgF.tabs.size());
+		const PWParaFormat& rf = rloaded.ParagraphFormat(0);
+		CHECK("rtf indent left", fabs(rf.indentLeft - 28) < 1.0f);
+		CHECK("rtf indent first", fabs(rf.indentFirst + 14) < 1.0f);
+		CHECK("rtf line spacing", fabs(rf.lineSpacing - 1.5f) < 0.05f);
+		CHECK("rtf space after", fabs(rf.spaceAfter - 10) < 1.0f);
+		CHECK("rtf tab stop", rf.tabs.size() == 1
+			&& fabs(rf.tabs[0].x - 90) < 1.0f);
+	}
+
+	{
+		// Spell checker, 1997-style.
+		printf("block: spell\n"); fflush(stdout);
+		PWSpellChecker spell;
+		spell.AddWord("hello");
+		spell.AddWord("world");
+		spell.AddWord("don't");
+		spell.AddWord("cat");
+		spell.AddWord("the");
+		spell.AddWord("says");
+		spell.AddWord("it");
+		CHECK("known word passes", spell.IsCorrect("hello"));
+		CHECK("case-insensitive", spell.IsCorrect("HELLO"));
+		CHECK("typo flagged", !spell.IsCorrect("helo"));
+		CHECK("contraction", spell.IsCorrect("don't"));
+		CHECK("possessive", spell.IsCorrect("cat's"));
+		CHECK("digits pass", spell.IsCorrect("mp3"));
+		CHECK("single letters pass", spell.IsCorrect("a"));
+		CHECK("hyphen parts", spell.IsCorrect("hello-world"));
+		CHECK("hyphen typo", !spell.IsCorrect("hello-wrold"));
+		std::vector<std::pair<int32, int32>> ranges;
+		spell.ScanParagraph("The wrold says hello, don't it? mp3", &ranges);
+		CHECK("one misspelling found", ranges.size() == 1);
+		if (ranges.size() == 1) {
+			BString word;
+			BString("The wrold says hello, don't it? mp3").CopyInto(word,
+				ranges[0].first, ranges[0].second);
+			CHECK("misspelling is 'wrold'", word == "wrold");
+		}
+	}
+
 	{
 		// Performance: ~100 pages.
 		PWDocument doc;
