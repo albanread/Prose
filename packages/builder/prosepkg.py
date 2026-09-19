@@ -71,6 +71,10 @@ BASH = '/opt/homebrew/bin/bash'
 HOST_PATH = [
 	'/opt/homebrew/opt/coreutils/libexec/gnubin',
 	'/opt/homebrew/opt/gnu-sed/libexec/gnubin',
+	# keg-only: Apple's bison is 2.3, which cannot read a %destructor with a
+	# type tag (libnslog); the Haiku build puts these first too
+	'/opt/homebrew/opt/bison/bin',
+	'/opt/homebrew/opt/gettext/bin',
 	'/opt/homebrew/bin',
 	'/usr/bin', '/bin', '/usr/sbin', '/sbin',
 ]
@@ -502,8 +506,10 @@ MAKE_WRAPPER = r"""#!/opt/homebrew/bin/python3
 #  - INSTALL exports DESTDIR. It also goes on the command line, which beats
 #    Makefiles that assign "DESTDIR =". A command-line value that already
 #    points into the staging tree (make install PREFIX=$prefix, MANDIR=$manDir)
-#    becomes the runtime path again when the Makefile uses DESTDIR, so both
-#    re-root it once; without DESTDIR in the Makefile, DESTDIR is dropped
+#    becomes the runtime path again when the Makefile roots that variable
+#    under DESTDIR ($(DESTDIR)$(PREFIX)), so both re-root it once; a value
+#    the Makefile uses as given stays staged; without DESTDIR in the
+#    Makefile at all, DESTDIR is dropped
 #  - `include /boot/system/...` (and /system/...) names paths inside the
 #    chroot a Haiku build runs in; a makefile with them runs as a copy whose
 #    includes point into the build sysroot; BUILDHOME=/system/develop (the
@@ -552,14 +558,23 @@ def read(name):
 
 texts = {name: read(name) for _, _, name in files}
 
-# BUILDHOME is a build-time path: a Haiku-absolute value means the sysroot
+# a chroot path in a command-line variable names something in the sysroot
+# here (BUILDHOME=/system/develop, the netsurf libraries' NSSHARED=/system/
+# data/netsurf-buildsystem that their Makefiles include from): map it when
+# the sysroot has it. A destination that does not exist there stays as it
+# is, and the recipes give destinations as the staged $prefix anyway.
 for i, a in enumerate(args):
-	if sysroot and a.startswith('BUILDHOME=/'):
-		value = a.split('=', 1)[1]
-		if value.startswith('/boot/'):
-			args[i] = 'BUILDHOME=' + sysroot + value
-		elif value.startswith('/system/'):
-			args[i] = 'BUILDHOME=' + sysroot + '/boot' + value
+	if not sysroot or a.startswith('-') or '=' not in a:
+		continue
+	name, value = a.split('=', 1)
+	if value.startswith('/boot/'):
+		mapped = sysroot + value
+	elif value.startswith('/system/'):
+		mapped = sysroot + '/boot' + value
+	else:
+		continue
+	if os.path.exists(mapped):
+		args[i] = name + '=' + mapped
 
 # DESTDIR during INSTALL
 if root and env.get('DESTDIR'):
@@ -571,9 +586,23 @@ if root and env.get('DESTDIR'):
 	else:
 		for i, a in staged:
 			name, value = a.split('=', 1)
-			args[i] = name + '=' + value[len(root):]
+			# only a variable the Makefile itself roots under DESTDIR
+			# ($(DESTDIR)$(PREFIX)) goes back to the runtime path; one it uses
+			# as given stays staged (BASE=... in netsurf's buildsystem, whose
+			# default is $(DESTDIR)$(PREFIX)/...): the install would otherwise
+			# land in the Mac's /boot. A doubled staging prefix, when a derived
+			# variable gets DESTDIR, is folded back after the phase.
+			applied = re.compile(r'\$[({]DESTDIR[)}]/?\$[({]%s[)}]' % re.escape(name))
+			if any(applied.search(text) for text in texts.values()):
+				args[i] = name + '=' + value[len(root):]
 		if not any(a.startswith('DESTDIR=') for _, a in assigned):
 			args.append('DESTDIR=' + env['DESTDIR'])
+
+# recipes run in /bin/sh, on macOS bash 3.2 in POSIX mode: "echo -n" prints
+# the -n (NetSurf's link.d came out unreadable). Haiku's /bin/sh is bash 5;
+# the same one runs them here
+if not any(a.startswith('SHELL=') for a in args):
+	args.append('SHELL=@BASH@')
 
 # absolute Haiku includes
 INCLUDE = re.compile(r'^(\s*-?include\s+)/(boot/|system/)', re.M)
@@ -776,7 +805,7 @@ echo "${out[*]}"
 	wrapper(bindir / 'libtoolize', 'exec /opt/homebrew/bin/glibtoolize "$@"\n')
 	real_make = run(['xcrun', '-f', 'make'], capture=True, check=False).stdout.strip() \
 		or '/usr/bin/make'
-	write_file(bindir / 'make', MAKE_WRAPPER.replace('@REAL_MAKE@', real_make), 0o755)
+	write_file(bindir / 'make', MAKE_WRAPPER.replace('@REAL_MAKE@', real_make).replace('@BASH@', BASH), 0o755)
 	_env_written.add(bindir / 'make')
 	wrapper(bindir / 'jam', r'''
 # jam as a Haiku chroot runs it: its built-in OS variable names the build
@@ -1187,6 +1216,7 @@ class Builder:
 			try:
 				self._prepare_sysroot(port, work, log)
 				sources = self._fetch_and_unpack(port, work, log)
+				self._build_host_tools(port, work, sources, log)
 				self._run_phase(port, work, sources, 'PATCH', log)
 				self._run_phase(port, work, sources, 'BUILD', log)
 				self._run_phase(port, work, sources, 'INSTALL', log)
@@ -1213,7 +1243,12 @@ class Builder:
 		if missing:
 			log.write('note: host commands not found: %s\n' % ', '.join(missing))
 		todo = list(entries(port.keys.get('BUILD_REQUIRES')))
-		todo += [e for e in prerequires if not entry_name(e).startswith('cmd:')]
+		# prerequisites are build-time tools, never linked against: a Perl
+		# module (xml_parser for libdom) or a generator the host has anyway.
+		# One that cannot be built for the target is noted, not fatal.
+		tools = [e for e in prerequires if not entry_name(e).startswith('cmd:')]
+		todo += tools
+		tool_names = {entry_name(e) for e in tools}
 		activated = set()
 		while todo:
 			entry = todo.pop(0)
@@ -1221,7 +1256,14 @@ class Builder:
 			if provider is None:
 				continue
 			pname, pversion, psuffix = provider
-			dep = self.build('%s-%s' % (pname, pversion))
+			try:
+				dep = self.build('%s-%s' % (pname, pversion))
+			except BuildError as e:
+				if entry_name(entry) not in tool_names:
+					raise
+				log.write('note: prerequisite %s not built for the target (%s); '
+					'the host may provide it\n' % (entry, str(e)[:120]))
+				continue
 			package = dict(dep.packages()).get(psuffix)
 			if package is None:
 				raise BuildError('%s: %s provides %s via an unbuilt package'
@@ -1240,6 +1282,29 @@ class Builder:
 	def _host_command(self, name):
 		path = ':'.join([str(ENV_DIR / 'bin'), str(HOSTTOOLS / 'bin')] + HOST_PATH)
 		return shutil.which(name.replace('_', '-'), path=path) or shutil.which(name, path=path)
+
+	def _build_host_tools(self, port, work, sources, log):
+		"""Tools a port runs while building, built for this Mac: an overlay
+		names ports in PROSE_HOST_TOOLS (NetSurf: nsgenbind, its JavaScript
+		binding generator, and the NetSurf build system it needs). Their
+		sources are fetched like any port's, then the overlay's HOST_BUILD()
+		runs in a host environment -- cc is the Mac's compiler, no cross
+		wrappers -- with $hostSourceDir_<name> for each and $hostPrefix to
+		install into; $hostPrefix/bin is on the PATH of the phases after."""
+		names = port.keys.get('PROSE_HOST_TOOLS', '').split()
+		if not names:
+			return
+		if not port.keys.get('PHASE_HOST_BUILD'):
+			raise BuildError('%s names PROSE_HOST_TOOLS but has no HOST_BUILD()' % port.name)
+		extra = {}
+		for name in names:
+			host_port = self.find_port(name)
+			base = work / 'host' / name
+			base.mkdir(parents=True, exist_ok=True)
+			log.write('host tool %s: sources of %s-%s\n' % (name, host_port.name, host_port.version))
+			host_sources = self._fetch_and_unpack(host_port, base, log)
+			extra['hostSourceDir_' + re.sub(r'\W', '_', name)] = str(host_sources['1'])
+		self._run_phase(port, work, sources, 'HOST_BUILD', log, host_extra=extra)
 
 	def _fetch_and_unpack(self, port, work, log):
 		"""Download, verify, unpack and patch every source; {index: dir}."""
@@ -1362,16 +1427,19 @@ class Builder:
 			# one version themselves from it (flac: "git-709e212 <date>")
 			rmtree(sdir / '.git')
 
-	def _run_phase(self, port, work, sources, phase, log):
+	def _run_phase(self, port, work, sources, phase, log, host_extra=None):
 		if not port.keys.get('PHASE_' + phase):
 			return
 		install = phase == 'INSTALL'
+		host = host_extra is not None
 		destdir = work / 'destdir'
 		prefix = str(destdir) + '/boot/system' if install else '/boot/system'
 		extra = {'proseInInstall': '1' if install else '0',
 			'proseSubpackagesDir': str(work / 'sub'),
 			'portPackageLinksDir': str(work / 'package-links' / port.name),
-			'workDir': str(work)}
+			'workDir': str(work), 'hostPrefix': str(work / 'host' / 'prefix')}
+		if host:
+			extra.update(host_extra)
 		for index, sdir in sources.items():
 			extra['sourceDir' if index == '1' else 'sourceDir' + index] = str(sdir)
 		variables = shell_variables(port.name, port.version, port.revision, port.recipe,
@@ -1386,7 +1454,8 @@ class Builder:
 		script += 'declare -a PROSE_DEBUG_INFO_PATHS=()\n'
 		script += '. %s\n' % sh_quote(RUNTIME_SH)
 		script += 'PATCH() { true; }\nBUILD() { true; }\nINSTALL() { true; }\nTEST() { true; }\n'
-		script += 'cd %s\n' % sh_quote(sources.get('1', work))
+		cwd = work / 'host' if host else sources.get('1', work)
+		script += 'cd %s\n' % sh_quote(cwd)
 		script += '. %s >/dev/null\n' % sh_quote(port.recipe)
 		snippet = overlay_snippet(port.recipe)
 		if snippet:
@@ -1396,13 +1465,20 @@ class Builder:
 			script += 'proseStripDebugInfos\n'
 		path = work / ('phase-%s.sh' % phase)
 		write_file(path, script, 0o755)
-		env = build_env(work / 'sysroot', work)
+		if host:
+			# the Mac's own tools and compiler: no cross wrappers on the PATH
+			(work / 'tmp').mkdir(exist_ok=True)
+			env = {'PATH': ':'.join([str(HOSTTOOLS / 'bin')] + HOST_PATH),
+				'HOME': os.environ.get('HOME', '/tmp'), 'LANG': 'en_US.UTF-8',
+				'TMPDIR': str(work / 'tmp')}
+		else:
+			env = build_env(work / 'sysroot', work)
 		if install:
 			env['DESTDIR'] = str(destdir)
 			env['PROSE_STAGING_ROOT'] = str(destdir)
 		log.write('\n==== %s ====\n' % phase)
 		log.flush()
-		proc = subprocess.run([BASH, path], cwd=sources.get('1', work), env=env,
+		proc = subprocess.run([BASH, path], cwd=cwd, env=env,
 			stdout=log, stderr=subprocess.STDOUT)
 		if proc.returncode != 0:
 			raise BuildError('%s phase failed (exit %d)' % (phase, proc.returncode))
@@ -1561,7 +1637,10 @@ def build_env(sysroot, work):
 	mimedb.mkdir(parents=True, exist_ok=True)
 	env = {
 		# "." last: Haiku's default PATH has it, and recipes run "configure"
-		'PATH': ':'.join([str(ENV_DIR / 'bin'), str(HOSTTOOLS / 'bin')] + HOST_PATH + ['.']),
+		# a port's own host tools (PROSE_HOST_TOOLS) first, then the wrappers
+		'PATH': ':'.join(([str(Path(work) / 'host' / 'prefix' / 'bin')]
+				if (Path(work) / 'host' / 'prefix' / 'bin').is_dir() else [])
+			+ [str(ENV_DIR / 'bin'), str(HOSTTOOLS / 'bin')] + HOST_PATH + ['.']),
 		'HOME': os.environ.get('HOME', '/tmp'),
 		'USER': os.environ.get('USER', 'prose'),
 		'TMPDIR': str(tmp),

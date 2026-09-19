@@ -54,6 +54,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | catkeyseditor | 0.1.2-3 | built | catkeyseditor-0.1.2-3-arm64.hpkg |
 | cdplayer | 1.0-1 | built | cdplayer-1.0-1-arm64.hpkg |
 | cdrtools | 3.02~a09-2 | failed | BUILD phase failed (exit 2) |
+| check | 0.15.2-1 | built | check-0.15.2-1-arm64.hpkg, check_devel-0.15.2-1-arm64.hpkg |
 | cherry_blossom | 1.0-4 | built | cherry_blossom-1.0-4-arm64.hpkg |
 | clipdinger | 1.2.4-2 | built | clipdinger-1.2.4-2-arm64.hpkg |
 | clucene | 2.3.3.4-4 | failed | boost1.83 failed: INSTALL phase failed (exit 126) (log: /Volumes/HaikuSrc/prose-packages/logs/boost1.83.log) |
@@ -109,10 +110,13 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | helios | 1.7.2-4 | built | helios-1.7.2-4-arm64.hpkg |
 | helpviewer | 1.6.2.1-1 | failed | BUILD phase failed (exit 9) |
 | hexvexed | 1.8-1 | built | hexvexed-1.8-1-arm64.hpkg |
+| html_parser | 3.83-2 | failed | BUILD phase failed (exit 2) |
+| hubbub | 0.3.8-1 | built | hubbub-0.3.8-1-arm64.hpkg, hubbub_devel-0.3.8-1-arm64.hpkg |
 | ideam | 0.7.7-1 | failed | BUILD phase failed (exit 2) |
 | interface_elements | 1.0-2 | built | interface_elements-1.0-2-arm64.hpkg, interface_elements_devel-1.0-2-arm64.hpkg |
 | internalmidi | 2.5.3-2 | built | internalmidi-2.5.3-2-arm64.hpkg |
 | joystickutilizer | 2.0.1-2 | failed | BUILD phase failed (exit 1) |
+| json_c | 0.15-4 | built | json_c-0.15-4-arm64.hpkg, json_c_devel-0.15-4-arm64.hpkg |
 | keycursor | 1.2-1 | built | keycursor-1.2-1-arm64.hpkg |
 | keymapswitcher | 1.2.7.16-1 | failed | BUILD phase failed (exit 2) |
 | koder | 0.6.0-2 | failed | yaml_cpp0.8 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/yaml_cpp0.8.log) |
@@ -126,6 +130,8 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | lib3ds | 2.0.0-2 | failed | cannot download d477b7dc451ec88a739cc28e6d9a7564123569d0.tar.gz |
 | libbson | 1.1.10-4 | failed | pkgconfig failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/pkgconfig.log) |
 | libburndevice | 1.0-2 | built | libburndevice-1.0-2-arm64.hpkg, libburndevice_devel-1.0-2-arm64.hpkg |
+| libcss | 0.9.2-1 | built | libcss-0.9.2-1-arm64.hpkg, libcss_devel-0.9.2-1-arm64.hpkg |
+| libdom | 0.4.2-1 | built | libdom-0.4.2-1-arm64.hpkg, libdom_devel-0.4.2-1-arm64.hpkg |
 | libedit | 20230828_3.1-1 | built | libedit-20230828_3.1-1-arm64.hpkg, libedit_devel-20230828_3.1-1-arm64.hpkg |
 | libexif | 0.6.22-1 | built | libexif-0.6.22-1-arm64.hpkg, libexif_devel-0.6.22-1-arm64.hpkg |
 | libffi | 3.4.6-1 | built | libffi-3.4.6-1-arm64.hpkg, libffi_devel-3.4.6-1-arm64.hpkg |
@@ -135,7 +141,13 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | libiptcdata | 1.0.4-4 | built | libiptcdata-1.0.4-4-arm64.hpkg, libiptcdata_devel-1.0.4-4-arm64.hpkg |
 | libjpeg_turbo | 3.1.4.1-1 | built | libjpeg_turbo-3.1.4.1-1-arm64.hpkg, libjpeg_turbo_devel-3.1.4.1-1-arm64.hpkg, libjpeg_turbo_tools-3.1.4.1-1-arm64.hpkg |
 | liblayout | 1.4.1-10 | failed | checksum mismatch for 1f9119e3dee5ff582d0e7b673be4f8d614f403ad.tar.gz |
+| libnsbmp | 0.1.7-1 | built | libnsbmp-0.1.7-1-arm64.hpkg, libnsbmp_devel-0.1.7-1-arm64.hpkg |
+| libnsgif | 1.0.0-1 | built | libnsgif-1.0.0-1-arm64.hpkg, libnsgif_devel-1.0.0-1-arm64.hpkg |
+| libnslog | 0.1.3-2 | built | libnslog-0.1.3-2-arm64.hpkg, libnslog_devel-0.1.3-2-arm64.hpkg |
+| libnspsl | 0.1.7-1 | built | libnspsl-0.1.7-1-arm64.hpkg, libnspsl_devel-0.1.7-1-arm64.hpkg |
+| libnsutils | 0.1.1-1 | built | libnsutils-0.1.1-1-arm64.hpkg, libnsutils_devel-0.1.1-1-arm64.hpkg |
 | libogg | 1.3.6-2 | built | libogg-1.3.6-2-arm64.hpkg, libogg_devel-1.3.6-2-arm64.hpkg |
+| libparserutils | 0.2.5-1 | built | libparserutils-0.2.5-1-arm64.hpkg, libparserutils_devel-0.2.5-1-arm64.hpkg |
 | libpcre | 8.45-3 | built | libpcre-8.45-3-arm64.hpkg, libpcre_devel-8.45-3-arm64.hpkg |
 | libpng16 | 1.6.53-1 | built | libpng16-1.6.53-1-arm64.hpkg, libpng16_devel-1.6.53-1-arm64.hpkg |
 | libprefs | 1.2.5-6 | failed | gcc failed: gmp failed: cannot download gmp-6.3.0.tar.xz (log: /Volumes/HaikuSrc/prose-packages/logs/gmp.log) (log: /Volumes/HaikuSrc/prose-packages/logs/gcc.lo |
@@ -145,12 +157,15 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | libsdl | 1.2.15-19 | failed | mesa failed earlier in this run |
 | libsndfile | 1.2.2-2 | built | libsndfile-1.2.2-2-arm64.hpkg, libsndfile_devel-1.2.2-2-arm64.hpkg, libsndfile_tools-1.2.2-2-arm64.hpkg |
 | libssh2 | 1.11.1-1 | built | libssh2-1.11.1-1-arm64.hpkg, libssh2_devel-1.11.1-1-arm64.hpkg |
+| libsvgtiny | 0.1.8-1 | built | libsvgtiny-0.1.8-1-arm64.hpkg, libsvgtiny_devel-0.1.8-1-arm64.hpkg |
 | libtheora | 1.1.1-8 | built | libtheora-1.1.1-8-arm64.hpkg, libtheora_devel-1.1.1-8-arm64.hpkg |
 | libtool | 2.5.4-1 | built | libtool-2.5.4-1-arm64.hpkg, libtool_libltdl-2.5.4-1-arm64.hpkg |
 | libunistring | 1.3-1 | built | libunistring-1.3-1-arm64.hpkg, libunistring_devel-1.3-1-arm64.hpkg, libunistring_doc-1.3-1-any.hpkg |
+| libutf8proc | 2.11.3-1 | built | libutf8proc-2.11.3-1-arm64.hpkg, libutf8proc_devel-2.11.3-1-arm64.hpkg |
 | libvorbis | 1.3.7-1 | built | libvorbis-1.3.7-1-arm64.hpkg, libvorbis_devel-1.3.7-1-arm64.hpkg |
 | libvpx | 1.13.1-1 | built | libvpx-1.13.1-1-arm64.hpkg, libvpx_bin-1.13.1-1-arm64.hpkg, libvpx_devel-1.13.1-1-arm64.hpkg |
 | libwalter | 102-1 | built | libwalter-102-1-arm64.hpkg |
+| libwapcaplet | 0.4.3-2 | built | libwapcaplet-0.4.3-2-arm64.hpkg, libwapcaplet_devel-0.4.3-2-arm64.hpkg |
 | libwebp | 1.6.0-3 | built | libwebp-1.6.0-3-arm64.hpkg, libwebp_devel-1.6.0-3-arm64.hpkg, libwebp_tools-1.6.0-3-arm64.hpkg |
 | libxml2 | 2.15.3-1 | failed | python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) |
 | lightsoff | 1.1-1 | built | lightsoff-1.1-1-arm64.hpkg |
@@ -175,6 +190,8 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | nanodot | 1.1b-1 | failed | BUILD phase failed (exit 2) |
 | neon | 0.36.0-2 | failed | libxml2 failed: python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) (log: /Volumes/HaikuSrc/prose-package |
 | netpulse | 0.2.3-9 | built | netpulse-0.2.3-9-arm64.hpkg |
+| netsurf | 3.11-3 | built | netsurf-3.11-3-arm64.hpkg |
+| netsurf_buildsystem | 1.10-1 | built | netsurf_buildsystem-1.10-1-any.hpkg |
 | nghttp2 | 1.63.0-1 | built | nghttp2-1.63.0-1-arm64.hpkg, nghttp2_devel-1.63.0-1-arm64.hpkg |
 | nightandday | 0.1.2-7 | built | nightandday-0.1.2-7-arm64.hpkg |
 | niue | 20140701-1 | failed | BUILD phase failed (exit 2) |
@@ -280,6 +297,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | wonderbrush | 2.1.2-12 | failed | liblayout failed: checksum mismatch for 1f9119e3dee5ff582d0e7b673be4f8d614f403ad.tar.gz (log: /Volumes/HaikuSrc/prose-packages/logs/liblayout.log) |
 | wordclock | 0.1.1-1 | built | wordclock-0.1.1-1-arm64.hpkg |
 | workspacenumber | 0.2-1 | failed | BUILD phase failed (exit 2) |
+| xml_parser | 2.47-2 | failed | BUILD phase failed (exit 2) |
 | xmlbmessage | 1.0-1 | failed | INSTALL phase failed (exit 1) |
 | xpmtranslator | 1.1.1~git-1 | failed | command failed (1): /Volumes/HaikuSrc/prose-packages/hosttools/bin/package create /Volumes/HaikuSrc/prose-packages/repo/xpmtranslator-1.1.1~git-1-arm64.hpkg |
 | xrs | 1.9.1-1 | built | xrs-1.9.1-1-arm64.hpkg |

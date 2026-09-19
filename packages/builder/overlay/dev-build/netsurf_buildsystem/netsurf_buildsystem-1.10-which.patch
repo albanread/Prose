@@ -1,0 +1,16 @@
+NetSurf buildsystem 1.10: Makefile.tools finds the compiler with /bin/which,
+which macOS does not have (Haiku does). With an empty answer it assumes a
+NetSurf cross toolchain under /opt/netsurf and stops. "which" on the PATH
+is the same command on Haiku.
+
+--- a/makefiles/Makefile.tools
++++ b/makefiles/Makefile.tools
+@@ -135,7 +135,7 @@
+   endif
+ 
+   # Search the path for the compiler
+-  toolpath_ := $(shell /bin/which $(CC__))
++  toolpath_ := $(shell which $(CC__))
+   ifeq ($(toolpath_),)
+     toolpath_ := /opt/netsurf/$(HOST)/cross/bin/
+     CC__  := $(toolpath_)$(HOST)-gcc

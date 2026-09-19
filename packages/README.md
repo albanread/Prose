@@ -214,6 +214,22 @@ helper functions (`runConfigure`, `packageEntries`,
   ones the Haiku build compiled for macOS. `linkcatkeys -tr` (embedding a
   catalog into a binary) is emulated with `xres`, because the host build
   cannot do it itself.
+* **Tools a port runs while building** are Haiku binaries in a native
+  build and cannot run here. Two ways out, both in overlays:
+  `host-be-c++` (the bootstrap's `hostsdk` step: the build-host Be API
+  headers and `libbe_build`, as Haiku compiles `rc` and `xres`) builds a
+  port's own tool for the Mac -- Pe's resource compiler `rez`; and
+  `PROSE_HOST_TOOLS="<ports>"` with a `HOST_BUILD()` function fetches those
+  ports' sources and builds them for the Mac before the real build, with
+  `$hostPrefix/bin` on the PATH after -- NetSurf's `nsgenbind`, with the
+  NetSurf build system. A Makefile that hard-codes its build compiler
+  (`BUILD_CC := cc`) gets `BUILD_CC=/usr/bin/clang` on the command line.
+* `make` recipes run in bash 5, as on Haiku (`SHELL=`): macOS's `/bin/sh`
+  is bash 3.2 in POSIX mode, whose `echo -n` prints the `-n`.
+* A `BUILD_PREREQUIRES` entry that is a port (a Perl module, say) is
+  built for the target if it can be; if not, that is a note in the log,
+  not a failure: prerequisites are build-time tools, and the Mac often has
+  them (`XML::Parser`, `HTML::Parser`).
 * After INSTALL, text files and symlinks are scrubbed. Recipes that write
   files during INSTALL (e.g. a `.pc` file from a heredoc over `$prefix`)
   saw staging paths, so every staging root is mapped back to `/boot/system`,
