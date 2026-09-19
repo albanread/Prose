@@ -1,0 +1,18 @@
+NetSurf 3.11, Haiku front end: gui_quit() frees the cookie_file and cookie_jar
+option strings but leaves them in the option table, which nsoption_finalise()
+in main() then frees again -- "double free" from libroot at every exit. The
+GTK front end frees nothing there. Leave it to nsoption_finalise().
+
+--- a/frontends/beos/gui.cpp
++++ b/frontends/beos/gui.cpp
+@@ -803,8 +803,8 @@
+ 	urldb_save(nsoption_charp(url_file));
+ 	//options_save_tree(hotlist,nsoption_charp(hotlist_file),messages_get("TreeHotlist"));
+ 
+-	free(nsoption_charp(cookie_file));
+-	free(nsoption_charp(cookie_jar));
++	/* cookie_file and cookie_jar are freed by nsoption_finalise() in main();
++	 * freeing them here as well was a double free at every exit */
+ 	beos_fetch_filetype_fin();
+ 	fetch_rsrc_unregister();
+ }

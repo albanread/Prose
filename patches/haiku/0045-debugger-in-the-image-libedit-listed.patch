@@ -1,0 +1,31 @@
+From 9b6d7abfb978ab1da2c222212010fe74b672f177 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 07:43:24 +0100
+Subject: [PATCH] Debugger in the image: libedit listed
+
+Haiku builds and ships Debugger only with the libedit build feature, and
+debug_server needs Debugger to write a crash report ("Failed to start
+debugger: No such file or directory" when NetSurf crashed on exit and a
+report was asked for). libedit is built by prosepkg; listed, the feature
+is on, Debugger is in, and the library comes along through dependency
+resolution.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0045-debugger-in-the-image-libedit-listed.patch f04b96bbaae72ead6e22c9f5acd9007c9f36922955d42b4dfe3ac7b75e6865f5
+---
+ build/jam/repositories/HaikuPorts/arm64 | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 160ce7b021..6de0bff221 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -110,6 +110,8 @@ RemotePackageRepository HaikuPorts
+ 	lcms_devel-2.19.1-1
+ 	libcss-0.9.2-1
+ 	libdom-0.4.2-1
++	libedit-20230828_3.1-1
++	libedit_devel-20230828_3.1-1
+ 	libexif-0.6.22-1
+ 	libiconv-1.18-1
+ 	libiconv_devel-1.18-1
