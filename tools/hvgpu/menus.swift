@@ -73,6 +73,13 @@ func makeMainMenu(_ controller: Controller) -> NSMenu {
     machine.addItem(.separator())
     add(machine, "Take Screenshot", #selector(Controller.takeScreenshot(_:)), "s")
     add(machine, "Open Guest Log", #selector(Controller.openGuestLog(_:)), "l")
+    machine.addItem(.separator())
+    let automation = add(machine, "Allow Automation and Testing",
+                         #selector(Controller.toggleAutomation(_:)))
+    automation.state = Automation.enabled ? .on : .off
+    automation.toolTip = "Let other applications on this Mac start and stop this machine, "
+        + "send it keyboard and pointer input, capture its screen, and run commands inside it. "
+        + "macOS asks before each application may do so."
 
     // View
     let view = menu("View")

@@ -23,6 +23,10 @@ protocol PresentSource: AnyObject {
     func vmDidStart()
     /// The VM is off (the window stays): nothing to show; the next start maps afresh.
     func vmDidStop()
+    /// Bytes copied into the display buffer since the device was made. Drawing
+    /// is measured by area, not by commit count: an idle Haiku desktop commits
+    /// constantly (the Deskbar's CPU meter) but almost nothing of it.
+    var committedBytes: Int { get }
 }
 
 extension PresentSource {
@@ -30,6 +34,7 @@ extension PresentSource {
     func windowResized(width: Int, height: Int) {}
     func vmDidStart() {}
     func vmDidStop() {}
+    var committedBytes: Int { 0 }
 }
 
 extension CustomVirtioGPU: PresentSource {}
@@ -88,6 +93,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
     private var prefWidth: Int, prefHeight: Int
     private var vsyncSeq: UInt64 = 0, hintSeq: UInt64 = 0, redrawSeq: UInt64 = 0
     private var commits = 0, commitRects = 0, commitBytes = 0, droppedEvents = 0
+    var committedBytes: Int { commitBytes }
     private var copyNanos: UInt64 = 0, copyMaxNanos: UInt64 = 0
     private let commitStats = args.contains("--commit-stats")
     private var rectHistogram: [String: Int] = [:]

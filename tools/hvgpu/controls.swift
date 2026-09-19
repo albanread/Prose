@@ -300,6 +300,18 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         chrome.content.setStatusBar(shown: show, growing: chrome.window)
     }
 
+    /// Machine ▸ Allow Automation and Testing. The guest-side channel is added to
+    /// the VM's configuration only while this is on, so turning it off takes the
+    /// path away at the next start rather than refusing to use it.
+    @objc func toggleAutomation(_ sender: Any?) {
+        let allow = !Automation.enabled
+        Automation.enabled = allow
+        (sender as? NSMenuItem)?.state = allow ? .on : .off
+        chrome?.content.statusBar.show(message: allow
+            ? "Automation and testing allowed" : "Automation and testing off")
+        log("automation: \(allow ? "allowed" : "off")")
+    }
+
     @objc func toggleFullScreen(_ sender: Any?) {
         presenter.window?.toggleFullScreen(sender)
     }
@@ -544,6 +556,12 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
 
     private func scriptStep(_ step: String) {
         log("script: \(step) (state \(vm.state.rawValue))")
+        // Anything the core knows is a script step: one implementation, and the
+        // step now says what happened instead of disappearing (docs/automation.md).
+        if let command = Automation.command(for: step) {
+            automation.perform(command) { result in log("script: \(step) -> \(result.line)") }
+            return
+        }
         let parts = step.split(separator: "=", maxSplits: 1).map(String.init)
         let value = parts.count > 1 ? parts[1] : ""
         switch parts[0] {

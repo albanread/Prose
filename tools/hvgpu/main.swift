@@ -34,7 +34,9 @@
 //   --no-statusbar          start without the status bar (View > Show Status Bar)
 //   --exit-on-stop          quit when the guest powers off (the default with --headless, --seconds
 //                           and --input-test); --stay-on-stop keeps the window, with a Start button
-//   --script "T:step,..."   drive the window's controls T seconds after launch (tests; controls.swift)
+//   --script "T:step,..."   run an automation command T seconds after launch; a step is a
+//                           command line ("capture path=/tmp/a.png"), tests; docs/automation.md
+//   --automation            allow automation for this run without the menu item
 //   --no-sound              no virtio-snd device (default: output+input to the Mac's audio devices)
 //   --no-midi               no Prose MIDI device (default: guest MIDI -> Mac's GM synth + CoreMIDI)
 //   --no-synth              keep the CoreMIDI endpoints but don't play guest MIDI on the Mac's synth
@@ -1190,6 +1192,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     let prds = PRDSDevice(width: initialGuestSize().width, height: initialGuestSize().height,
                           poolMiB: Int(option("--pool-mib") ?? "128") ?? 128)
     lazy var router = InputRouter(presenter: presenter)
+    lazy var automation = Automation(controller: self)      // automation.swift
     let midi = ProseMIDIDevice()
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
