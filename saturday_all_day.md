@@ -81,7 +81,7 @@ all. With `HAIKU_NO_DOWNLOADS=1` the build synthesises the repository from
 whatever is in `generated/download/`. `private_workspace/addpkg.sh` imports a
 package from the colleague's tree in one command.
 
-That unlocked the image formats: **14 translators** now ship — BMP, GIF, HVIF,
+That unlocked the image formats: **15 translators** now ship — BMP, GIF, HVIF,
 ICO, PCX, PPM, PSD, RTF, SGI, STXT, TGA (which needed nothing but listing and
 were simply absent), plus JPEG, PNG, TIFF and WebP from the colleague's
 libjpeg-turbo, libpng16, tiff, libwebp and giflib.

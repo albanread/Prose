@@ -74,9 +74,9 @@ I used to run BeOS on a Power Mac. I have been watching the Haiku project ever
 since, and trying to run it, for years.
 
 Two things changed recently. Haiku's developers brought up an arm64 port. And
-macOS 26 and 27 added enough to Virtualization.framework — custom virtio devices,
-shared memory regions — that a Mac can host that port properly, with its display
-backed by the host GPU rather than emulated.
+macOS 27 added what Virtualization.framework was missing — custom virtio devices
+and shared memory regions, both new in that release — so a Mac can host that
+port properly, with its display backed by the host GPU rather than emulated.
 
 *The stars aligned when beta6 met macOS 27.*
 
