@@ -12,16 +12,20 @@ HOST_BUILD()
 
 # The Makefile sets BUILD_CC := cc for the tools it runs while building
 # (its xxd); "cc" here is the cross compiler, so the Mac's is named on the
-# command line. Same as the recipe's BUILD and INSTALL otherwise.
+# command line. NETSURF_HOMEPAGE is the built-in default homepage, used until
+# the user sets one of their own: point it at the Haiku project rather than
+# NetSurf's about:welcome. Same as the recipe's BUILD and INSTALL otherwise.
 BUILD()
 {
 	make TARGET=beos PREFIX=$prefix/ DESTDIR=$appsDir NETSURF_BEOS_BIN="/" \
+		NETSURF_HOMEPAGE="https://www.haiku-os.org/" \
 		BUILD=release BUILD_CC=/usr/bin/clang $jobArgs
 }
 
 INSTALL()
 {
 	make TARGET=beos PREFIX=$prefix/ DESTDIR=$appsDir NETSURF_BEOS_BIN="/" \
+		NETSURF_HOMEPAGE="https://www.haiku-os.org/" \
 		BUILD=release BUILD_CC=/usr/bin/clang install
 
 	# Resources not needed since 3.6
