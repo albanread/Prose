@@ -67,6 +67,9 @@ or forums.
 
 ## Why this exists
 
+*I do this sort of thing for the joy of computing, to run software I love on my
+own computers — that's the essence of it.*
+
 I used to run BeOS on a Power Mac. I have been watching the Haiku project ever
 since, and trying to run it, for years.
 
