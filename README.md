@@ -153,6 +153,18 @@ the control case when something else looks broken. `--disk virtio` and
 the whole path from firmware to mounted `/boot`, and how to read and write the
 image from macOS with `bfs_shell`.
 
+### Automation and testing
+
+Prose can be driven from outside — started, resized, typed into, photographed,
+and asked to run a command inside the guest and hand back its output — once the
+owner of the machine turns it on. It is off by default, macOS gates every caller
+through Privacy & Security ▸ Automation, and nothing it offers reaches the Mac.
+
+The design is in [docs/automation.md](docs/automation.md). The short version is
+that Haiku did most of it already: BeOS's scripting system is message-based, so
+every application in the guest is scriptable without being modified, and a
+`BMessage` flattens straight onto the wire.
+
 ### What works
 
 | | |
@@ -254,7 +266,7 @@ table there also records why each one exists.
 | `packages` | `prosepkg`, the arm64 recipe builder, and its results |
 | `scripts` | Build the image, apply and export patches, local packages |
 | `private_workspace` | Run and probe a VM: display, network, sound, MIDI, HostFS |
-| `docs` | The display device specification, the disk image and NVMe, design notes |
+| `docs` | The display device specification, the disk image and NVMe, automation, design notes |
 
 ## Licence
 
