@@ -2084,6 +2084,58 @@ def deskbar_categories(tree):
 	return categories
 
 
+def blocked_apps(tree):
+	"""The applications a Haiku tree's build/jam/ProseBlocklist leaves out
+	(PROSE_BLOCKED_APPS): Haiku's own, which the tree's build handles, and
+	ones inside a port's package, which local-packages takes out of the
+	package (its program in apps/ and its Deskbar entries); the rest of the
+	package stays."""
+	path = Path(tree) / 'build' / 'jam' / 'ProseBlocklist'
+	if not path.exists():
+		return set()
+	tokens = jam_tokens(path.read_text())
+	if 'PROSE_BLOCKED_APPS' not in tokens:
+		return set()
+	start = tokens.index('PROSE_BLOCKED_APPS') + 2
+	return set(tokens[start:tokens.index(';', start)])
+
+
+def remove_blocked_apps(root, blocked):
+	"""Take the blocked applications out of an extracted package (root):
+	apps/<name>, and Deskbar menu entries so named. What was removed."""
+	removed = []
+	apps = Path(root) / 'apps'
+	for name in sorted(blocked):
+		target = apps / name
+		if target.is_symlink() or target.exists():
+			rmtree(target)
+			removed.append('apps/' + name)
+	menu = Path(root) / 'data' / 'deskbar' / 'menu'
+	if menu.is_dir():
+		for entry in sorted(menu.rglob('*')):
+			if entry.name in blocked and (entry.is_symlink() or entry.is_file()):
+				entry.unlink()
+				removed.append(str(entry.relative_to(root)))
+	return removed
+
+
+def unblocked_listing(listing, blocked):
+	"""A package_listing() as remove_blocked_apps() leaves the package."""
+	attributes, contents = listing
+	if not blocked:
+		return listing
+	keep = {}
+	for path, value in contents.items():
+		parts = path.split('/')
+		if len(parts) >= 2 and parts[0] == 'apps' and parts[1] in blocked:
+			continue
+		if path.startswith('data/deskbar/menu/') and parts[-1] in blocked \
+				and not value[1].startswith('d'):
+			continue
+		keep[path] = value
+	return attributes, keep
+
+
 def deskbar_category_icons(tree, categories):
 	"""{folder: HVIF icon} from a Haiku tree's
 	src/data/directory_attrs/deskbar-applications-<folder>.rdef, the icons
@@ -2170,7 +2222,7 @@ def categorized_listing(listing, categories, icons=None):
 	return attributes, moved
 
 
-def copy_with_vendor(src, dst, vendor, categories=None, icons=None):
+def copy_with_vendor(src, dst, vendor, categories=None, icons=None, blocked=None):
 	"""Write the package src to dst with another vendor, and its Deskbar
 	Applications entries in their folders (categorize_deskbar_entries()). A
 	Haiku build's repository accepts only its own vendor ("Haiku Project");
@@ -2187,6 +2239,10 @@ def copy_with_vendor(src, dst, vendor, categories=None, icons=None):
 		if count != 1:
 			raise BuildError('%s: %d vendor lines in its .PackageInfo' % (src.name, count))
 		info.write_text(text)
+		if blocked:
+			removed = remove_blocked_apps(tmp, blocked)
+			if removed:
+				say('%s: left out (ProseBlocklist): %s' % (src.name, ', '.join(removed)))
 		categorize_deskbar_entries(tmp, categories, icons)
 		if new.exists():
 			new.unlink()
@@ -2230,6 +2286,7 @@ def cmd_local_packages(args):
 
 	categories = deskbar_categories(tree)
 	icons = deskbar_category_icons(tree, categories)
+	blocked = blocked_apps(tree)
 	download = tree / 'generated' / 'download'
 	missing, todo, foreign = [], [], []
 	for leaf in ours:
@@ -2243,8 +2300,8 @@ def cmd_local_packages(args):
 			if listing[0].get('packager') != [PACKAGER]:
 				foreign.append(leaf)
 			elif listing[0].get('vendor') != [vendor] \
-					or not same_package_but_vendor(listing,
-						categorized_listing(package_listing(src), categories, icons)):
+					or not same_package_but_vendor(listing, categorized_listing(
+						unblocked_listing(package_listing(src), blocked), categories, icons)):
 				todo.append(('update', leaf))
 	if missing:
 		results = load_json(RESULTS, {})
@@ -2282,7 +2339,7 @@ def cmd_local_packages(args):
 		return
 	download.mkdir(parents=True, exist_ok=True)
 	for action, leaf in todo:
-		copy_with_vendor(REPO / leaf, download / leaf, vendor, categories, icons)
+		copy_with_vendor(REPO / leaf, download / leaf, vendor, categories, icons, blocked)
 	if new_config is not None:
 		write_file(config_file, new_config)
 	if todo or new_config is not None:

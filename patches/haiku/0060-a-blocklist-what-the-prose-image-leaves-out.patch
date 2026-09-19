@@ -1,0 +1,174 @@
+From b22cd70fce8784fb734c646046b3ee809d2f588b Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 19:32:26 +0100
+Subject: [PATCH] A blocklist: what the Prose image leaves out
+
+Some of the ported applications, and some of Haiku's own, are of no use
+on Prose, or crash. build/jam/ProseBlocklist lists them, one name a
+line, in two lists, and no image gets them:
+
+- PROSE_BLOCKED_PACKAGES, packages by package name. AddHaikuImagePackages
+  skips a blocked package wherever a profile or definition lists it,
+  with a line in the build's output, and build_haiku_image stops if a
+  package in the image needs a blocked one (dependency resolution would
+  bring it back otherwise): unblock it, or block what needs it too.
+- PROSE_BLOCKED_APPS, single programs by name: Haiku's own applications,
+  preferences, demos and Deskbar applets, which are part of the haiku
+  package rather than packages of their own -- build/jam/images/
+  HaikuImage takes them off the lists the haiku package is built from
+  (ProseUnblocked), and so out of the Deskbar menu -- and one that shares
+  a port's package with others, which HaikuArmQemu's prosepkg takes out
+  of that package when local-packages copies it in.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0060-a-blocklist-what-the-prose-image-leaves-out.patch 2e717b919bd946dec6db0ec34fccf8a5743612ff09460cb12554af6b3ad4903a
+---
+ build/jam/DefaultBuildProfiles  |  4 +++
+ build/jam/ImageRules            |  9 ++++++
+ build/jam/ProseBlocklist        | 57 +++++++++++++++++++++++++++++++++
+ build/jam/images/HaikuImage     |  8 +++++
+ build/scripts/build_haiku_image |  9 ++++++
+ 5 files changed, 87 insertions(+)
+ create mode 100644 build/jam/ProseBlocklist
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index a15813595b..1b6ccdfb58 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -1,3 +1,7 @@
++# PROSE fork: packages no image of ours gets (build/jam/ProseBlocklist), known
++# before any profile adds a package
++include [ FDirName $(HAIKU_BUILD_RULES_DIR) ProseBlocklist ] ;
++
+ # set HAIKU_BUILD_TYPE early
+ switch $(HAIKU_BUILD_PROFILE) {
+ 	case "bootstrap-*" : {
+diff --git a/build/jam/ImageRules b/build/jam/ImageRules
+index 52a724f86c..fccb777342 100644
+--- a/build/jam/ImageRules
++++ b/build/jam/ImageRules
+@@ -896,6 +896,9 @@ rule AddPackagesAndRepositoryVariablesToContainerScript script : container
+ 
+ 	AddVariableToScript $(script) : noDownloads : $(HAIKU_NO_DOWNLOADS) ;
+ 
++	# PROSE fork: packages that must not come in as a dependency either
++	AddVariableToScript $(script) : blockedPackages : $(PROSE_BLOCKED_PACKAGES) ;
++
+ 	AddVariableToScript $(script) : updateAllPackages
+ 		: $(HAIKU_UPDATE_ALL_PACKAGES) ;
+ 
+@@ -1132,6 +1135,12 @@ rule AddHaikuImagePackages packages : directory
+ 
+ 	local package ;
+ 	for package in $(packages) {
++		if $(package) in $(PROSE_BLOCKED_PACKAGES) {
++			Echo "AddHaikuImagePackages: package" $(package)
++				"blocked (build/jam/ProseBlocklist)" ;
++			continue ;
++		}
++
+ 		local resolvedPackage = [ IsPackageAvailable $(package) ] ;
+ 		if ! $(resolvedPackage) {
+ 			Echo "AddHaikuImagePackages: package" $(package)
+diff --git a/build/jam/ProseBlocklist b/build/jam/ProseBlocklist
+new file mode 100644
+index 0000000000..f8871f9abe
+--- /dev/null
++++ b/build/jam/ProseBlocklist
+@@ -0,0 +1,57 @@
++# What the Prose image leaves out (Prose fork): of no use on Prose, or
++# crashing. Two lists, one name a line, with what it is.
++#
++# PROSE_BLOCKED_PACKAGES: packages, by package name (the package file's, not
++# the name in the Deskbar menu). The build leaves a blocked package out
++# wherever a profile or definition lists it (AddHaikuImagePackages,
++# build/jam/ImageRules), and stops if a package in the image needs one
++# (build_haiku_image, "Resolving package dependencies"): unblock it, or block
++# what needs it too.
++#
++# PROSE_BLOCKED_APPS: single programs, by their names in /boot/system
++# (SerialConnect, not serialconnect), for those that are not a package of
++# their own. Haiku's applications, preferences, demos and Deskbar applets are
++# part of the haiku package: build/jam/images/HaikuImage takes them off the
++# lists it is built from, and so out of the Deskbar menu. One that shares a
++# port's package with others (as FastTraX did TraX's): HaikuArmQemu's
++# prosepkg takes it out of the package -- apps/<name> and its Deskbar
++# entries -- when scripts/local-packages.sh copies the package in, and the
++# rest of the package stays.
++
++PROSE_BLOCKED_PACKAGES =
++	bdhcalc				# BDH Calc
++	flyingtroll			# FlyingTroll
++	timebomb			# TimeBomb
++	tipster				# Tipster
++	wakeup				# WakeUp
++	foldershaper		# FolderShaper
++	querywatcher		# QueryWatcher
++	trax				# TraX and FastTraX
++	2048				# 2048, the tile game
++	bebattle			# BeBattle
++	becheckers			# BeCheckers
++	bong				# Bong
++	w6					# W6
++	;
++
++PROSE_BLOCKED_APPS =
++	DiskProbe			# a hex editor for files and disks
++	DiskUsage			# which files take up a disk
++	SerialConnect		# a terminal for serial ports
++	;
++
++
++rule ProseUnblocked list
++{
++	# ProseUnblocked <list> : <list> without what PROSE_BLOCKED_APPS names
++	# (compared without grist: <preference>Deskbar is Deskbar)
++	local result item ;
++	for item in $(list) {
++		if $(item:G=) in $(PROSE_BLOCKED_APPS) {
++			Echo "Prose: leaving out" $(item:G=) "(build/jam/ProseBlocklist)" ;
++		} else {
++			result += $(item) ;
++		}
++	}
++	return $(result) ;
++}
+diff --git a/build/jam/images/HaikuImage b/build/jam/images/HaikuImage
+index bd52abf0bf..86b537fd1f 100644
+--- a/build/jam/images/HaikuImage
++++ b/build/jam/images/HaikuImage
+@@ -13,6 +13,14 @@ if $(HAIKU_BUILD_TYPE) = bootstrap {
+ 	include [ FDirName $(HAIKU_BUILD_RULES_DIR) images definitions regular ] ;
+ }
+ 
++# PROSE fork: Haiku's own programs that no image of ours gets
++# (build/jam/ProseBlocklist), off the lists the haiku package is built from
++SYSTEM_APPS = [ ProseUnblocked $(SYSTEM_APPS) ] ;
++SYSTEM_PREFERENCES = [ ProseUnblocked $(SYSTEM_PREFERENCES) ] ;
++SYSTEM_DEMOS = [ ProseUnblocked $(SYSTEM_DEMOS) ] ;
++DESKBAR_APPLICATIONS = [ ProseUnblocked $(DESKBAR_APPLICATIONS) ] ;
++DESKBAR_DESKTOP_APPLETS = [ ProseUnblocked $(DESKBAR_DESKTOP_APPLETS) ] ;
++
+ # build the haiku system packages and add them
+ include [ FDirName $(HAIKU_BUILD_RULES_DIR) HaikuPackages ] ;
+ 
+diff --git a/build/scripts/build_haiku_image b/build/scripts/build_haiku_image
+index af227dbe6c..8597319005 100755
+--- a/build/scripts/build_haiku_image
++++ b/build/scripts/build_haiku_image
+@@ -349,6 +349,15 @@ if [ -n "$resolvePackageDependencies" ]; then
+ 	packageUrls=`$getPackageDependencies $repositories -- $systemPackages`
+ 	for packageUrl in $packageUrls; do
+ 		packageFileName=`basename $packageUrl`
++		packageName="${packageFileName%%-*}"
++		for blocked in $blockedPackages; do
++			if [ "$packageName" = "$blocked" ]; then
++				echo "ERROR: $packageName is blocked (build/jam/ProseBlocklist)," \
++					"but a package in the image needs it: unblock it, or block" \
++					"what needs it too"
++				exit 1
++			fi
++		done
+ 		if [ "$otherPackages" != "${otherPackages#*$packageFileName}" ]; then
+ 			echo "ERROR: $packageFileName is a dependency of a package installed in /system/packages," \
+ 				"but it is in another (i.e. unactivated) package directory!"

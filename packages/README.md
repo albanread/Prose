@@ -35,6 +35,10 @@ into the folder the tree's `build/jam/DeskbarCategories` gives them (patch
 (`src/data/directory_attrs/deskbar-applications-<folder>.rdef`, patch 0055);
 the packages in `repo/` keep their entries where their recipes put them. A new
 application goes into a folder by adding its menu name to that file's list.
+What the image leaves out is the Haiku tree's `build/jam/ProseBlocklist` (patch
+0060): whole packages by package name, and single programs by name -- Haiku's
+own, or one that shares a port's package with others, which `local-packages`
+takes out of the package on the way in.
 `install` is for everything else, and for trying packages without rebuilding
 the image:
 
