@@ -1,0 +1,445 @@
+From 1e79df381369abc7d71da31c775acf26af7036ac Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 12:45:58 +0100
+Subject: [PATCH] Prose Portal: the guest answers the host
+
+The host can type at this machine and photograph the result, and learn
+nothing from it: a screenshot has no exit status in it, and every
+host-side guess at "has it booted" is either true at 2.4 s -- when the
+display driver sets the mode and the boot splash draws -- or true again
+whenever the machine pauses for breath. Two fresh boots measured 18 s
+apart under the best guess available from outside.
+
+prose_portal answers instead. PING, RUN (a command line, returning its
+exit status with stdout and stderr kept apart) and INFO (uptime, memory,
+and whether Tracker and the Deskbar are running, which is what a caller
+means by "booted").
+
+Framed so the transport can change: a 16-byte header with a magic, a
+version, a type, an id echoed in the reply, and a length. Today it is
+carried by TCP on this machine's own network, which under
+Virtualization.framework reaches no further than the Mac hosting it; a
+virtio device is the eventual home and only the read and write calls move.
+
+The switch is the wrong way round on purpose. The host cannot write a
+file into this machine's disk before it has a channel to it, so a marker
+the host must create first could never be created. The gate that matters
+is on the host -- nothing connects unless the owner allowed automation --
+and /boot/home/config/settings/prose/no-automation stops it listening
+from the inside.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0054-prose-portal-the-guest-answers-the-host.patch 7829fac6b3ce0bb415705ddd3e5044a4390d0dabb531ae637541164aae79fbfe
+---
+ build/jam/images/definitions/minimum      |   1 +
+ data/launch/system                        |   6 +
+ headers/private/prose/prose_portal.h      |  54 +++++
+ src/servers/Jamfile                       |   1 +
+ src/servers/prose_portal/Jamfile          |   8 +
+ src/servers/prose_portal/prose_portal.cpp | 281 ++++++++++++++++++++++
+ 6 files changed, 351 insertions(+)
+ create mode 100644 headers/private/prose/prose_portal.h
+ create mode 100644 src/servers/prose_portal/Jamfile
+ create mode 100644 src/servers/prose_portal/prose_portal.cpp
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index de833a860f..26255dbae0 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -241,6 +241,7 @@ SYSTEM_SERVERS = [ FFilterByBuildFeatures
+ 	package_daemon
+ 	power_daemon
+ 	prose_display_agent
++	prose_portal
+ 	registrar
+ 	syslog_daemon
+ ] ;
+diff --git a/data/launch/system b/data/launch/system
+index 5945770512..d8983b0fd2 100644
+--- a/data/launch/system
++++ b/data/launch/system
+@@ -67,6 +67,12 @@ service x-vnd.Haiku-prose_display_agent {
+ 	legacy
+ }
+ 
++service x-vnd.Haiku-prose_portal {
++	launch /system/servers/prose_portal
++	no_safemode
++	legacy
++}
++
+ job x-vnd.Haiku-cddb_lookup {
+ 	launch /system/bin/cddb_lookup
+ 	no_safemode
+diff --git a/headers/private/prose/prose_portal.h b/headers/private/prose/prose_portal.h
+new file mode 100644
+index 0000000000..aabb4ff31a
+--- /dev/null
++++ b/headers/private/prose/prose_portal.h
+@@ -0,0 +1,54 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * The Prose Portal wire protocol: how the host asks the guest to do something
++ * and hears what happened. docs/automation.md.
++ *
++ * Framed so it does not care what carries it. Today that is a TCP connection
++ * on the host-only NAT bridge; a virtio device is the eventual home, and only
++ * the read and write calls at either end change.
++ *
++ * Every frame is a 16-byte header and then its payload. A request carries an
++ * id; its reply carries the same id, so a caller never has to assume replies
++ * arrive in order.
++ */
++#ifndef PROSE_PORTAL_H
++#define PROSE_PORTAL_H
++
++#include <SupportDefs.h>
++
++#define PROSE_PORTAL_MAGIC		'PRPT'
++#define PROSE_PORTAL_VERSION	1
++#define PROSE_PORTAL_PORT		7654
++#define PROSE_PORTAL_MAX		(8 * 1024 * 1024)
++
++enum {
++	// host -> guest
++	PROSE_PORTAL_PING		= 1,	// no payload
++	PROSE_PORTAL_RUN		= 2,	// the command line, UTF-8, no terminator
++	PROSE_PORTAL_INFO		= 3,	// no payload
++
++	// guest -> host
++	PROSE_PORTAL_HELLO		= 0x81,	// sent once, unasked, when the daemon starts
++	PROSE_PORTAL_PONG		= 0x82,
++	PROSE_PORTAL_RESULT		= 0x83,	// prose_portal_result, then stdout, then stderr
++	PROSE_PORTAL_INFO_REPLY	= 0x84,	// key=value lines, \n separated
++	PROSE_PORTAL_ERROR		= 0xFF	// a message, UTF-8
++};
++
++typedef struct {
++	uint32	magic;
++	uint16	version;
++	uint16	type;
++	uint32	id;
++	uint32	length;			// payload bytes following this header
++} prose_portal_header;
++
++typedef struct {
++	int32	status;			// the command's exit status, or -1 if it could not run
++	uint32	out_length;
++	uint32	error_length;
++} prose_portal_result;
++
++#endif	/* PROSE_PORTAL_H */
+diff --git a/src/servers/Jamfile b/src/servers/Jamfile
+index 3f9b525fea..0c76d84c93 100644
+--- a/src/servers/Jamfile
++++ b/src/servers/Jamfile
+@@ -19,5 +19,6 @@ SubInclude HAIKU_TOP src servers power ;
+ SubInclude HAIKU_TOP src servers print ;
+ SubInclude HAIKU_TOP src servers print_addon ;
+ SubInclude HAIKU_TOP src servers prose_display ;
++SubInclude HAIKU_TOP src servers prose_portal ;
+ SubInclude HAIKU_TOP src servers registrar ;
+ SubInclude HAIKU_TOP src servers syslog_daemon ;
+diff --git a/src/servers/prose_portal/Jamfile b/src/servers/prose_portal/Jamfile
+new file mode 100644
+index 0000000000..48cb323e52
+--- /dev/null
++++ b/src/servers/prose_portal/Jamfile
+@@ -0,0 +1,8 @@
++SubDir HAIKU_TOP src servers prose_portal ;
++
++UsePrivateHeaders prose ;
++
++Application prose_portal :
++	prose_portal.cpp
++	: be network [ TargetLibsupc++ ]
++	;
+diff --git a/src/servers/prose_portal/prose_portal.cpp b/src/servers/prose_portal/prose_portal.cpp
+new file mode 100644
+index 0000000000..38f549a5f0
+--- /dev/null
++++ b/src/servers/prose_portal/prose_portal.cpp
+@@ -0,0 +1,281 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Prose Portal: lets the host ask this machine to do something and hear what
++ * happened. Without it the host can only type at the screen and photograph the
++ * result, which is enough to drive a machine and not enough to know anything
++ * about it -- there is no exit status in a screenshot.
++ *
++ * It listens only on the virtual machine's own network, which under
++ * Virtualization.framework reaches no further than the Mac hosting it, and it
++ * does not start unless the owner of that Mac allowed automation: hvgpu writes
++ * the marker file this looks for when the machine starts.
++ */
++
++
++#include <errno.h>
++#include <netinet/in.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/wait.h>
++#include <syslog.h>
++#include <unistd.h>
++
++#include <OS.h>
++#include <Roster.h>
++#include <String.h>
++
++#include <prose_portal.h>
++
++
++// Create this to stop the portal listening. It is the wrong way round on
++// purpose: the host cannot write into this machine's disk before it has a
++// channel to it, so a file the host must create first could never be created.
++// The host's own setting is the gate that matters -- nothing connects unless
++// the owner of the Mac allowed automation -- and this is the switch on the
++// inside, for someone using the guest who would rather it did not listen.
++static const char* kStopFile = "/boot/home/config/settings/prose/no-automation";
++static const char* kTrackerSignature = "application/x-vnd.Be-TRAK";
++static const char* kDeskbarSignature = "application/x-vnd.Be-TSKB";
++
++
++static bool
++read_exactly(int socket, void* into, size_t length)
++{
++	uint8* at = (uint8*)into;
++	while (length > 0) {
++		ssize_t got = recv(socket, at, length, 0);
++		if (got <= 0)
++			return false;
++		at += got;
++		length -= got;
++	}
++	return true;
++}
++
++
++static bool
++write_exactly(int socket, const void* from, size_t length)
++{
++	const uint8* at = (const uint8*)from;
++	while (length > 0) {
++		ssize_t sent = send(socket, at, length, 0);
++		if (sent <= 0)
++			return false;
++		at += sent;
++		length -= sent;
++	}
++	return true;
++}
++
++
++/*!	One frame out: a header, then up to three payload pieces. */
++static bool
++send_frame(int socket, uint16 type, uint32 id,
++	const void* a = NULL, size_t aLength = 0,
++	const void* b = NULL, size_t bLength = 0,
++	const void* c = NULL, size_t cLength = 0)
++{
++	prose_portal_header header;
++	header.magic = PROSE_PORTAL_MAGIC;
++	header.version = PROSE_PORTAL_VERSION;
++	header.type = type;
++	header.id = id;
++	header.length = aLength + bLength + cLength;
++	if (!write_exactly(socket, &header, sizeof(header)))
++		return false;
++	if (aLength > 0 && !write_exactly(socket, a, aLength))
++		return false;
++	if (bLength > 0 && !write_exactly(socket, b, bLength))
++		return false;
++	return cLength == 0 || write_exactly(socket, c, cLength);
++}
++
++
++static void
++send_error(int socket, uint32 id, const char* message)
++{
++	send_frame(socket, PROSE_PORTAL_ERROR, id, message, strlen(message));
++}
++
++
++/*!	Run a command line, collecting what it writes. stderr is kept apart from
++	stdout: a caller that cannot see the screen needs to tell a result from a
++	complaint. */
++static void
++run_command(int socket, uint32 id, const char* command)
++{
++	char errorFile[64];
++	snprintf(errorFile, sizeof(errorFile), "/tmp/prose_portal_%" B_PRIu32 ".err", id);
++
++	BString line(command);
++	line << " 2>" << errorFile;
++
++	BString out;
++	FILE* pipe = popen(line.String(), "r");
++	if (pipe == NULL) {
++		send_error(socket, id, strerror(errno));
++		return;
++	}
++	char buffer[4096];
++	size_t got;
++	while ((got = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
++		out.Append(buffer, got);
++		if (out.Length() > PROSE_PORTAL_MAX)
++			break;
++	}
++	int status = pclose(pipe);
++
++	BString error;
++	FILE* errors = fopen(errorFile, "r");
++	if (errors != NULL) {
++		while ((got = fread(buffer, 1, sizeof(buffer), errors)) > 0) {
++			error.Append(buffer, got);
++			if (error.Length() > PROSE_PORTAL_MAX)
++				break;
++		}
++		fclose(errors);
++	}
++	unlink(errorFile);
++
++	prose_portal_result result;
++	result.status = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
++	result.out_length = out.Length();
++	result.error_length = error.Length();
++	send_frame(socket, PROSE_PORTAL_RESULT, id, &result, sizeof(result),
++		out.String(), out.Length(), error.String(), error.Length());
++}
++
++
++/*!	What the host cannot see from outside. "desktop" is the one that matters:
++	the host's own guesses at it -- a picture, a DHCP lease, drawing settling --
++	are all true long before there is a desktop, or true again whenever the
++	machine pauses for breath. */
++static void
++send_info(int socket, uint32 id)
++{
++	system_info system;
++	get_system_info(&system);
++
++	BRoster roster;
++	bool tracker = roster.IsRunning(kTrackerSignature);
++	bool deskbar = roster.IsRunning(kDeskbarSignature);
++
++	char host[128];
++	if (gethostname(host, sizeof(host)) != 0)
++		strcpy(host, "?");
++
++	BString info;
++	info << "hostname=" << host << "\n";
++	info << "uptime=" << (system_time() / 1000000) << "\n";
++	info << "cpus=" << system.cpu_count << "\n";
++	info << "memory=" << (int64)system.max_pages * B_PAGE_SIZE << "\n";
++	info << "used=" << (int64)system.used_pages * B_PAGE_SIZE << "\n";
++	info << "tracker=" << (tracker ? "yes" : "no") << "\n";
++	info << "deskbar=" << (deskbar ? "yes" : "no") << "\n";
++	info << "desktop=" << ((tracker && deskbar) ? "yes" : "no") << "\n";
++	send_frame(socket, PROSE_PORTAL_INFO_REPLY, id, info.String(), info.Length());
++}
++
++
++static void
++serve(int socket)
++{
++	send_frame(socket, PROSE_PORTAL_HELLO, 0);
++
++	while (true) {
++		prose_portal_header header;
++		if (!read_exactly(socket, &header, sizeof(header)))
++			return;
++		if (header.magic != PROSE_PORTAL_MAGIC
++			|| header.version != PROSE_PORTAL_VERSION
++			|| header.length > PROSE_PORTAL_MAX) {
++			syslog(LOG_ERR, "prose_portal: a frame that is not one; closing\n");
++			return;
++		}
++
++		char* payload = NULL;
++		if (header.length > 0) {
++			payload = (char*)malloc(header.length + 1);
++			if (payload == NULL || !read_exactly(socket, payload, header.length)) {
++				free(payload);
++				return;
++			}
++			payload[header.length] = '\0';
++		}
++
++		switch (header.type) {
++			case PROSE_PORTAL_PING:
++				send_frame(socket, PROSE_PORTAL_PONG, header.id);
++				break;
++			case PROSE_PORTAL_INFO:
++				send_info(socket, header.id);
++				break;
++			case PROSE_PORTAL_RUN:
++				if (payload == NULL)
++					send_error(socket, header.id, "no command");
++				else
++					run_command(socket, header.id, payload);
++				break;
++			default:
++				send_error(socket, header.id, "unknown request");
++				break;
++		}
++		free(payload);
++	}
++}
++
++
++int
++main()
++{
++	openlog("prose_portal", 0, LOG_DAEMON);
++
++	struct stat stopFile;
++	if (stat(kStopFile, &stopFile) == 0) {
++		syslog(LOG_INFO, "prose_portal: %s is there; not listening\n", kStopFile);
++		return 0;
++	}
++
++	int listener = socket(AF_INET, SOCK_STREAM, 0);
++	if (listener < 0) {
++		syslog(LOG_ERR, "prose_portal: socket: %s\n", strerror(errno));
++		return 1;
++	}
++	int one = 1;
++	setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
++
++	struct sockaddr_in address;
++	memset(&address, 0, sizeof(address));
++	address.sin_family = AF_INET;
++	address.sin_port = htons(PROSE_PORTAL_PORT);
++	address.sin_addr.s_addr = htonl(INADDR_ANY);
++	if (bind(listener, (struct sockaddr*)&address, sizeof(address)) != 0
++		|| listen(listener, 4) != 0) {
++		syslog(LOG_ERR, "prose_portal: cannot listen on %d: %s\n",
++			PROSE_PORTAL_PORT, strerror(errno));
++		close(listener);
++		return 1;
++	}
++	syslog(LOG_INFO, "prose_portal: listening on %d\n", PROSE_PORTAL_PORT);
++
++	// One host, one conversation at a time: the caller is a program waiting for
++	// an answer, and serialising is what it expects anyway.
++	while (true) {
++		int connection = accept(listener, NULL, NULL);
++		if (connection < 0) {
++			if (errno == EINTR)
++				continue;
++			syslog(LOG_ERR, "prose_portal: accept: %s\n", strerror(errno));
++			break;
++		}
++		serve(connection);
++		close(connection);
++	}
++	close(listener);
++	return 0;
++}
