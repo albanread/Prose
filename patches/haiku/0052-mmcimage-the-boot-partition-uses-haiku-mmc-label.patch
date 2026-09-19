@@ -1,0 +1,50 @@
+From a3b1c0da226d1fd599e138714824af8b2e81e332 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 11:43:25 +0100
+Subject: [PATCH] MMCImage: the boot partition uses HAIKU_MMC_LABEL
+
+HAIKU_MMC_LABEL is declared at the top of MMCImage and then never read:
+both image actions pass a hardcoded 'Haiku Boot' to the FAT initializer,
+so setting the variable did nothing. Pass it through on the target, as
+EFINAME already is.
+
+With the prose-* profile the EFI System Partition is now labelled
+"Prose Boot" -- the label Finder shows when the image is attached on the
+Mac, and DriveSetup in the guest.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0052-mmcimage-the-boot-partition-uses-haiku-mmc-label.patch 9cfa83112865bcd8d84983f78c5a09699b01916cc44fb069e52e7c5bd13fd891
+---
+ build/jam/images/MMCImage | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/build/jam/images/MMCImage b/build/jam/images/MMCImage
+index adac1b9676..7cb22a7030 100644
+--- a/build/jam/images/MMCImage
++++ b/build/jam/images/MMCImage
+@@ -18,6 +18,7 @@ rule BuildSDImage image : files
+ 
+ 	SDIMAGE_OS_SIZE on $(image) = $(HAIKU_IMAGE_SIZE) ;
+ 	SDIMAGE_BEGIN on $(image) = $(HAIKU_BOOT_SDIMAGE_BEGIN:E=63) ;
++	MMCLABEL on $(image) = $(HAIKU_MMC_LABEL) ;
+ 
+ 	if $(TARGET_BOOT_PLATFORM) = efi {
+ 		switch $(TARGET_ARCH) {
+@@ -80,7 +81,7 @@ actions BuildUBootSDImage1
+ 
+ 	# format the image
+ 	${FATFS} --end-offset `expr ${BOOT_SIZE} \* 1024` \
+-		--initialize "$(1)" 'Haiku Boot'
++		--initialize "$(1)" '$(MMCLABEL) Boot'
+ 
+ 	# populate
+ 	for i in $(2[4-]) ; do
+@@ -137,7 +138,7 @@ actions BuildEfiSDImage1
+ 
+ 	# format the image
+ 	${FATFS} --end-offset `expr ${BOOT_SIZE} \* 1024` \
+-		--initialize "$(1)" 'Haiku Boot'
++		--initialize "$(1)" '$(MMCLABEL) Boot'
+ 
+ 	# populate
+ 	echo "mkdir -p myfs/EFI/BOOT" | ${FATFS} $(1)

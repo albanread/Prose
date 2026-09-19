@@ -104,7 +104,7 @@ their work produced, and everything that makes it good is theirs.
   Virtualization.framework VM with custom virtio devices of its own — a
   shared-surface display, keyboard and tablet, a MIDI port — plus networking,
   sound, and a Mac folder shared into the guest.
-- **`patches/haiku`** — 49 patches against Haiku at hrev60122, applied to a
+- **`patches/haiku`** — 52 patches against Haiku at hrev60122, applied to a
   local tree to build the guest.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
@@ -133,6 +133,19 @@ tears, and that design is gone.
 resolution — one guest pixel per screen pixel — or at the window's point size,
 magnified. Either way its screen follows the window: drag the corner and it
 changes mode.
+
+### Storage
+
+One file on the Mac is the guest's whole disk: an MBR image with a 32 MiB FAT
+EFI System Partition holding Haiku's EFI loader, and a 650 MiB BFS partition
+holding the system. It is attached over **NVMe** by default, which is the one
+storage path that needs no patch of ours — stock Haiku drives it, so it stays
+the control case when something else looks broken. `--disk virtio` and
+`--disk usb` are there too.
+
+[docs/storage.md](docs/storage.md) covers the partition layout, the NVMe driver,
+the whole path from firmware to mounted `/boot`, and how to read and write the
+image from macOS with `bfs_shell`.
 
 ### What works
 
@@ -221,6 +234,9 @@ table there also records why each one exists.
 | 0047 | Three demo tunes in `data/music` |
 | 0048 | MidiPlayer: an Output menu, its own Standard MIDI File player, and a 16-channel view |
 | 0049 | The volume Tracker shows on the desktop is called Prose |
+| 0050 | Midi Kit: a player's destructor waits for its run thread, so a player can be deleted while it plays |
+| 0051 | Midi Kit: the file player starts on time and stops at once, and loads the soundfont it was given |
+| 0052 | The image's boot partition takes its label from the build profile |
 
 ## Layout
 
@@ -232,7 +248,7 @@ table there also records why each one exists.
 | `packages` | `prosepkg`, the arm64 recipe builder, and its results |
 | `scripts` | Build the image, apply and export patches, local packages |
 | `private_workspace` | Run and probe a VM: display, network, sound, MIDI, HostFS |
-| `docs` | The display device specification and design notes |
+| `docs` | The display device specification, the disk image and NVMe, design notes |
 
 ## Licence
 
