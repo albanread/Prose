@@ -1790,6 +1790,7 @@ def install_closure(specs, image_names):
 			system_provides.setdefault(entry_name(p), name)
 	results = load_json(RESULTS, {})
 	todo = []
+	files = []
 	expanded = []
 	for spec in specs:
 		if spec.startswith('@'):
@@ -1798,7 +1799,11 @@ def install_closure(specs, image_names):
 		else:
 			expanded.append(spec)
 	for spec in expanded:
-		if spec in packages or spec in system:
+		if spec.endswith('.hpkg') and os.path.isfile(spec):
+			# a package file (haiku_devel of the image's own build, say):
+			# installed as it is, its requirements left to the image
+			files.append(Path(spec).resolve())
+		elif spec in packages or spec in system:
 			# a built package, or a system package the image may lack (grep)
 			todo.append(spec)
 		elif results.get(spec, {}).get('status') == 'built':
@@ -1824,7 +1829,13 @@ def install_closure(specs, image_names):
 				todo.append(system_provides[n])
 			else:
 				raise BuildError('%s requires %s, which nothing built provides' % (name, n))
-	return [packages[n][0] if n in packages else system[n][0] for n in closure]
+	return files + [packages[n][0] if n in packages else system[n][0] for n in closure]
+
+
+def hpkg_stem(file_name):
+	"""The package name of an .hpkg file name: name-version-revision-arch.hpkg,
+	or name.hpkg as the Haiku build names its own."""
+	return file_name.split('-')[0].removesuffix('.hpkg')
 
 
 def bfs_partition(image):
@@ -1871,9 +1882,9 @@ def cmd_install(args):
 	activation = packages_dir + '/administrative/activated-packages'
 	existing = bfs_listing(image, packages_dir)
 	hpkgs = install_closure(args.packages,
-		{f.split('-')[0] for f in existing if f.endswith('.hpkg')})
-	ours = {h.name.split('-')[0] for h in hpkgs}
-	stale = sorted(f for f in existing if f.endswith('.hpkg') and f.split('-')[0] in ours)
+		{hpkg_stem(f) for f in existing if f.endswith('.hpkg')})
+	ours = {hpkg_stem(h.name) for h in hpkgs}
+	stale = sorted(f for f in existing if f.endswith('.hpkg') and hpkg_stem(f) in ours)
 	if stale:
 		# never cp over an existing file: fs_shell leaks a reference then
 		# and cannot unmount cleanly
@@ -1899,8 +1910,8 @@ def cmd_install(args):
 	say('installed into %s (%s)%s:' % (image, 'verified', ', activation file updated'
 		if has_activation else ''))
 	for h in hpkgs:
-		print('  %s%s' % (h.name, '  (replaced an older version)' if h.name.split('-')[0] in
-			{s.split('-')[0] for s in stale} and h.name not in stale else ''))
+		print('  %s%s' % (h.name, '  (replaced an older version)' if hpkg_stem(h.name) in
+			{hpkg_stem(s) for s in stale} and h.name not in stale else ''))
 
 
 def cmd_audit(args):
@@ -2196,7 +2207,8 @@ def main():
 	b.set_defaults(func=cmd_info)
 	b = sub.add_parser('install', help='install built packages (+ requirements) into a Haiku image')
 	b.add_argument('image')
-	b.add_argument('packages', nargs='+', help='package or port names, @set (packages/sets/<set>)')
+	b.add_argument('packages', nargs='+', help='package or port names, @set (packages/sets/<set>), '
+		'or .hpkg files (installed as they are)')
 	b.set_defaults(func=cmd_install)
 	b = sub.add_parser('local-packages', help='put the packages a Haiku tree lists beyond '
 		'upstream into its generated/download/, downloads off')

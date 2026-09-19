@@ -1,0 +1,913 @@
+From 9be8b979e3c4ae47608a397a33efa7abffde90bd Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 10:49:06 +0100
+Subject: [PATCH] Midi Kit: its players can be deleted while they play
+
+The legacy Midi Kit (libmidi) has two threads working for a BMidi
+object, and the destructors waited for neither:
+
+- The run thread (BMidiStore plays a song from it, and BMidiSynthFile is
+  built on that). BMidi::Stop() only asks it to stop -- it clears
+  fThreadId -- and ~BMidi then waited for thread -1, which returns at
+  once. The thread went on in the freed store and called the song hook
+  for an owner that was gone: a crash, a double free, or a hook call
+  after the delete (the old MidiPlayer's crash at quit). The thread is
+  now remembered (fRunThread, in a reserved slot), and ~BMidiStore and
+  ~BMidi wait for it to leave Run() (_StopRunThread()), the hook cleared
+  first. Not waited for: a song hook that deletes its own player -- the
+  run thread deleting its object -- and a thread that has not stopped
+  within 5 s (a hook waiting for a lock the deleting thread holds), which
+  gets a message on stderr rather than a deadlock. Either way the thread
+  no longer writes fIsRunning into the freed object after Run().
+
+- The input glue (BMidiGlue, BMidiPortGlue), a consumer whose thread
+  calls the object's hooks. For a BMidiSynth they play into be_synth,
+  and the soft synth sleeps in them until each note is due; the last
+  BMidiSynth deleted be_synth under a sleeping delivery, which then
+  crashed in fluid_synth_noteon(). The glues now deliver under a lock,
+  and Detach() waits for a delivery in progress and drops the ones
+  after. ~BMidiSynth detaches before it may delete be_synth (and keeps
+  be_synth if a delivery does not end: a leak rather than a crash),
+  ~BMidiStore before it frees its events, ~BMidiPort before it releases
+  its endpoints, and ~BMidi in any case.
+
+MidiPlayer's SynthBridge had the second problem as a Midi Kit 2
+consumer that owns a BMidiSynth: its members go before the consumer's
+thread stops. It gets the same lock and Detach(), called before
+Release().
+
+Tested with midikit_check (HaikuArmQemu, prose-tests): 16 players
+deleted while they play, half of them after Stop(), and 4 whose song
+hook deletes them; again on the guarded heap.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0050-midi-kit-its-players-can-be-deleted-while-they-play.patch 7968c2a79da311c06f00b121f3553e625ca8915e4e05c549cb72670b288f3cd9
+---
+ headers/os/midi/Midi.h                   |  10 +-
+ src/apps/midiplayer/MidiPlayerWindow.cpp |   4 +-
+ src/apps/midiplayer/SynthBridge.cpp      |  75 ++++++++--
+ src/apps/midiplayer/SynthBridge.h        |  13 +-
+ src/kits/midi/Midi.cpp                   |  98 ++++++++++++-
+ src/kits/midi/MidiGlue.cpp               | 174 +++++++++++++++++++----
+ src/kits/midi/MidiGlue.h                 |  21 +++
+ src/kits/midi/MidiPort.cpp               |   6 +
+ src/kits/midi/MidiStore.cpp              |  13 +-
+ src/kits/midi/MidiSynth.cpp              |   7 +-
+ 10 files changed, 372 insertions(+), 49 deletions(-)
+
+diff --git a/headers/os/midi/Midi.h b/headers/os/midi/Midi.h
+index fcada5b26a..c840f365af 100644
+--- a/headers/os/midi/Midi.h
++++ b/headers/os/midi/Midi.h
+@@ -101,6 +101,9 @@ protected:
+ private:
+ 
+ 	friend status_t _run_thread(void* data);
++	friend class BMidiPort;
++	friend class BMidiStore;
++	friend class BMidiSynth;
+ 
+ 	virtual void _ReservedMidi1();
+ 	virtual void _ReservedMidi2();
+@@ -111,11 +114,16 @@ private:
+ 	BMidiLocalProducer* fProducer;
+ 	BMidiLocalConsumer* fConsumer;
+ 
++	bool _StopRunThread();
++	bool _DetachConsumer();
++
+ 	BList* fConnections;
+ 	volatile thread_id fThreadId;
+ 	volatile bool fIsRunning;
++	thread_id fRunThread;
++		// the run thread, also after Stop(), which clears fThreadId
+ 
+-	uint32 _reserved2[5];
++	uint32 _reserved2[4];
+ };
+ 
+ #endif // _MIDI_H
+diff --git a/src/apps/midiplayer/MidiPlayerWindow.cpp b/src/apps/midiplayer/MidiPlayerWindow.cpp
+index b4c6f0a06d..b4f3dae9a2 100644
+--- a/src/apps/midiplayer/MidiPlayerWindow.cpp
++++ b/src/apps/midiplayer/MidiPlayerWindow.cpp
+@@ -129,7 +129,9 @@ MidiPlayerWindow::~MidiPlayerWindow()
+ 	delete fOpenPanel;
+ 
+ 	// The built-in synthesizer goes away with the application: nothing to
+-	// silence there. Other outputs get "all notes off" as the player goes.
++	// silence there, and no more notes into it (they arrive on the bridge's
++	// own thread). Other outputs get "all notes off" as the player goes.
++	fSynthBridge->Detach();
+ 	if (fOutputId == -1)
+ 		fPlayer->SetOutput(NULL, false);
+ 	delete fPlayer;
+diff --git a/src/apps/midiplayer/SynthBridge.cpp b/src/apps/midiplayer/SynthBridge.cpp
+index 91dff66c93..1468319dfa 100644
+--- a/src/apps/midiplayer/SynthBridge.cpp
++++ b/src/apps/midiplayer/SynthBridge.cpp
+@@ -24,14 +24,45 @@
+ 
+ #include "SynthBridge.h"
+ 
++#include <Autolock.h>
++
+ 
+ //	#pragma mark - SynthBridge
+ 
+ 
+ SynthBridge::SynthBridge()
+ 	:
+-	BMidiLocalConsumer("Internal Synthesizer")
++	BMidiLocalConsumer("Internal Synthesizer"),
++	fLock("synth bridge"),
++	fDetached(false)
++{
++}
++
++
++SynthBridge::~SynthBridge()
++{
++	Detach();
++}
++
++
++void
++SynthBridge::Detach()
++{
++	BAutolock _(fLock);
++	fDetached = true;
++}
++
++
++bool
++SynthBridge::_Lock()
+ {
++	if (!fLock.Lock())
++		return false;
++	if (fDetached) {
++		fLock.Unlock();
++		return false;
++	}
++	return true;
+ }
+ 
+ 
+@@ -57,14 +88,20 @@ SynthBridge::MidiSynth()
+ void
+ SynthBridge::NoteOff(uchar channel, uchar note, uchar velocity, bigtime_t time)
+ {
+-	fMidiSynth.NoteOff(channel + 1, note, velocity, time / 1000);
++	if (_Lock()) {
++		fMidiSynth.NoteOff(channel + 1, note, velocity, time / 1000);
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ void
+ SynthBridge::NoteOn(uchar channel, uchar note, uchar velocity, bigtime_t time)
+ {
+-	fMidiSynth.NoteOn(channel + 1, note, velocity, time / 1000);
++	if (_Lock()) {
++		fMidiSynth.NoteOn(channel + 1, note, velocity, time / 1000);
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -72,7 +109,10 @@ void
+ SynthBridge::KeyPressure(uchar channel, uchar note, uchar pressure,
+ 	bigtime_t time)
+ {
+-	fMidiSynth.KeyPressure(channel + 1, note, pressure, time / 1000);
++	if (_Lock()) {
++		fMidiSynth.KeyPressure(channel + 1, note, pressure, time / 1000);
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -80,34 +120,49 @@ void
+ SynthBridge::ControlChange(uchar channel, uchar controlNumber,
+ 	uchar controlValue, bigtime_t time)
+ {
+-	fMidiSynth.ControlChange(channel + 1, controlNumber, controlValue,
+-		time / 1000);
++	if (_Lock()) {
++		fMidiSynth.ControlChange(channel + 1, controlNumber, controlValue,
++			time / 1000);
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ void
+ SynthBridge::ProgramChange(uchar channel, uchar programNumber, bigtime_t time)
+ {
+-	fMidiSynth.ProgramChange(channel + 1, programNumber, time / 1000);
++	if (_Lock()) {
++		fMidiSynth.ProgramChange(channel + 1, programNumber, time / 1000);
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ void
+ SynthBridge::ChannelPressure(uchar channel, uchar pressure, bigtime_t time)
+ {
+-	fMidiSynth.ChannelPressure(channel + 1, pressure, time / 1000);
++	if (_Lock()) {
++		fMidiSynth.ChannelPressure(channel + 1, pressure, time / 1000);
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ void
+ SynthBridge::PitchBend(uchar channel, uchar lsb, uchar msb, bigtime_t time)
+ {
+-	fMidiSynth.PitchBend(channel + 1, lsb, msb, time / 1000);
++	if (_Lock()) {
++		fMidiSynth.PitchBend(channel + 1, lsb, msb, time / 1000);
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ void
+ SynthBridge::AllNotesOff(bool justChannel, bigtime_t time)
+ {
+-	fMidiSynth.AllNotesOff(justChannel, time / 1000);
++	if (_Lock()) {
++		fMidiSynth.AllNotesOff(justChannel, time / 1000);
++		fLock.Unlock();
++	}
+ }
+diff --git a/src/apps/midiplayer/SynthBridge.h b/src/apps/midiplayer/SynthBridge.h
+index ddaf9ac232..f2e1a8453f 100644
+--- a/src/apps/midiplayer/SynthBridge.h
++++ b/src/apps/midiplayer/SynthBridge.h
+@@ -24,6 +24,7 @@
+ #define _SYNTH_BRIDGE_H
+ 
+ 
++#include <Locker.h>
+ #include <MidiConsumer.h>
+ #include <MidiSynth.h>
+ 
+@@ -36,6 +37,11 @@ public:
+ 
+ 	BMidiSynth* MidiSynth();
+ 
++	// No more deliveries into the synthesizer: they run on the consumer's
++	// thread, which outlives the synthesizer as the bridge is destroyed.
++	// Waits for one in progress. Call it before Release().
++	void Detach();
++
+ 	virtual void NoteOff(uchar channel, uchar note, uchar velocity,
+ 		bigtime_t time);
+ 
+@@ -60,9 +66,14 @@ public:
+ 	virtual void AllNotesOff(bool justChannel, bigtime_t time);
+ 
+ protected:
+-	virtual ~SynthBridge() {}
++	virtual ~SynthBridge();
+ 
+ private:
++	bool _Lock();
++
++	// fLock before fMidiSynth: it goes after it
++	BLocker fLock;
++	bool fDetached;
+ 	BMidiSynth fMidiSynth;
+ };
+ 
+diff --git a/src/kits/midi/Midi.cpp b/src/kits/midi/Midi.cpp
+index 6df0ef7117..2f957001c0 100644
+--- a/src/kits/midi/Midi.cpp
++++ b/src/kits/midi/Midi.cpp
+@@ -18,18 +18,47 @@
+ #include <Midi.h>
+ #include <MidiProducer.h>
+ 
++#include <pthread.h>
++#include <stdio.h>
++
+ #include "MidiGlue.h"
+ #include "debug.h"
+ 
+ using namespace BPrivate;
+ 
+ 
++// Run threads whose object was deleted while they were still in Run(): by
++// a song hook that deletes its own player, or after they did not stop in
++// time (see _StopRunThread()). They must not touch the object again. Plain
++// data, so that it outlives the static destructors at exit.
++static pthread_mutex_t sOrphanLock = PTHREAD_MUTEX_INITIALIZER;
++static BList* sOrphans = NULL;
++
++
++static void
++orphan_run_thread(thread_id thread)
++{
++	pthread_mutex_lock(&sOrphanLock);
++	if (sOrphans == NULL)
++		sOrphans = new BList;
++	if (!sOrphans->HasItem((void*)(addr_t)thread))
++		sOrphans->AddItem((void*)(addr_t)thread);
++	pthread_mutex_unlock(&sOrphanLock);
++}
++
++
+ status_t 
+ _run_thread(void* data)
+ {
+ 	BMidi* midi = (BMidi*)data;
+ 	midi->Run();
+-	midi->fIsRunning = false;
++
++	pthread_mutex_lock(&sOrphanLock);
++	if (sOrphans == NULL
++		|| !sOrphans->RemoveItem((void*)(addr_t)find_thread(NULL))) {
++		midi->fIsRunning = false;
++	}
++	pthread_mutex_unlock(&sOrphanLock);
+ 	return 0;
+ }
+ 
+@@ -39,6 +68,7 @@ BMidi::BMidi()
+ 	fConnections = new BList;
+ 	fThreadId    = -1;
+ 	fIsRunning   = false;
++	fRunThread   = -1;
+ 
+ 	fProducer = new BMidiLocalProducer("MidiGlue(out)");
+ 	fConsumer = new BMidiGlue(this, "MidiGlue(in)");
+@@ -47,10 +77,8 @@ BMidi::BMidi()
+ 
+ BMidi::~BMidi()
+ {
+-	Stop();
+-
+-	status_t result;
+-	wait_for_thread(fThreadId, &result);
++	_DetachConsumer();
++	_StopRunThread();
+ 
+ 	fProducer->Release();
+ 	fConsumer->Release();
+@@ -166,11 +194,13 @@ BMidi::Start()
+ 		return err;
+ 
+ 	fThreadId  = err;
++	fRunThread = err;
+ 	fIsRunning = true;
+ 
+ 	err = resume_thread(fThreadId);
+ 	if (err != B_OK) {
+ 		fThreadId  = -1;
++		fRunThread = -1;
+ 		fIsRunning = false;
+ 	}
+ 
+@@ -247,6 +277,64 @@ BMidi::KeepRunning()
+ }
+ 
+ 
++// Stops the run thread and waits until it has left Run(): destructors do
++// this before they free what Run() uses. Stop() only asks the thread to
++// stop -- it clears fThreadId, which KeepRunning() looks at -- and returns;
++// the thread goes on until its current message is taken, so waiting for
++// fThreadId after Stop() (as ~BMidi did) waited for nothing, and the
++// thread ran on in a freed object. It is remembered in fRunThread instead.
++// Two threads are not waited for: the run thread itself (a song hook that
++// deletes its player), and one that has not stopped after kMidiStopTimeout
++// (one in a song hook waiting for a lock the caller holds) -- rather than
++// deadlock on it. Both become orphans: _run_thread() leaves the object
++// alone after Run().
++bool
++BMidi::_StopRunThread()
++{
++	thread_id thread = fRunThread;
++	Stop();
++	if (thread < 0)
++		return true;
++	if (thread == find_thread(NULL)) {
++		orphan_run_thread(thread);
++		return false;
++	}
++
++	status_t result;
++	status_t status;
++	do {
++		status = wait_for_thread_etc(thread, B_RELATIVE_TIMEOUT,
++			kMidiStopTimeout, &result);
++	} while (status == B_INTERRUPTED);
++
++	if (status == B_TIMED_OUT) {
++		fprintf(stderr, "BMidi: the run thread %" B_PRId32 " did not stop "
++			"within %" B_PRIdBIGTIME " s\n", thread,
++			kMidiStopTimeout / 1000000);
++		orphan_run_thread(thread);
++		return false;
++	}
++	fRunThread = -1;
++	return true;
++}
++
++
++// Stops the input -- the glue that other BMidi objects spray to, which
++// calls the hooks from its own thread -- delivering to this object: waits
++// for a delivery in progress, and drops the ones after. Destructors do this
++// before they take down what the hooks use (be_synth, for a BMidiSynth).
++bool
++BMidi::_DetachConsumer()
++{
++	if (static_cast<BMidiGlue*>(fConsumer)->Detach(kMidiStopTimeout))
++		return true;
++
++	fprintf(stderr, "BMidi: a delivery to %p did not end within %"
++		B_PRIdBIGTIME " s\n", this, kMidiStopTimeout / 1000000);
++	return false;
++}
++
++
+ void BMidi::_ReservedMidi1() {}
+ void BMidi::_ReservedMidi2() {}
+ void BMidi::_ReservedMidi3() {}
+diff --git a/src/kits/midi/MidiGlue.cpp b/src/kits/midi/MidiGlue.cpp
+index ed7acb7a1d..31e3a5be44 100644
+--- a/src/kits/midi/MidiGlue.cpp
++++ b/src/kits/midi/MidiGlue.cpp
+@@ -18,17 +18,46 @@ using namespace BPrivate;
+ 
+ 
+ BMidiGlue::BMidiGlue(BMidi* midiObject_, const char* name)
+-	: BMidiLocalConsumer(name)
++	: BMidiLocalConsumer(name),
++	fLock("midi glue")
+ {
+ 	fMidiObject = midiObject_;
+ }
++
++
++bool
++BMidiGlue::Detach(bigtime_t timeout)
++{
++	if (fLock.LockWithTimeout(timeout) != B_OK)
++		return false;
++			// a delivery that does not end: left alone, not deadlocked on
++	fMidiObject = NULL;
++	fLock.Unlock();
++	return true;
++}
++
++
++BMidi*
++BMidiGlue::_LockObject()
++{
++	if (!fLock.Lock())
++		return NULL;
++	if (fMidiObject == NULL) {
++		fLock.Unlock();
++		return NULL;
++	}
++	return fMidiObject;
++}
+ 	
+ 
+ void 
+ BMidiGlue::NoteOff(
+ 	uchar channel, uchar note, uchar velocity, bigtime_t time)
+ {
+-	fMidiObject->NoteOff(channel + 1, note, velocity, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->NoteOff(channel + 1, note, velocity, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -36,7 +65,10 @@ void
+ BMidiGlue::NoteOn(
+ 	uchar channel, uchar note, uchar velocity, bigtime_t time)
+ {
+-	fMidiObject->NoteOn(channel + 1, note, velocity, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->NoteOn(channel + 1, note, velocity, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -44,7 +76,10 @@ void
+ BMidiGlue::KeyPressure(
+ 	uchar channel, uchar note, uchar pressure, bigtime_t time)
+ {
+-	fMidiObject->KeyPressure(channel + 1, note, pressure, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->KeyPressure(channel + 1, note, pressure, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -52,8 +87,11 @@ void
+ BMidiGlue::ControlChange(
+ 	uchar channel, uchar controlNumber, uchar controlValue, bigtime_t time)
+ {
+-	fMidiObject->ControlChange(
+-		channel + 1, controlNumber, controlValue, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->ControlChange(
++			channel + 1, controlNumber, controlValue, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -61,7 +99,10 @@ void
+ BMidiGlue::ProgramChange(
+ 	uchar channel, uchar programNumber, bigtime_t time)
+ {
+-	fMidiObject->ProgramChange(channel + 1, programNumber, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->ProgramChange(channel + 1, programNumber, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -69,7 +110,10 @@ void
+ BMidiGlue::ChannelPressure(
+ 	uchar channel, uchar pressure, bigtime_t time)
+ {
+-	fMidiObject->ChannelPressure(channel + 1, pressure, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->ChannelPressure(channel + 1, pressure, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -77,7 +121,10 @@ void
+ BMidiGlue::PitchBend(
+ 	uchar channel, uchar lsb, uchar msb, bigtime_t time)
+ {
+-	fMidiObject->PitchBend(channel + 1, lsb, msb, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->PitchBend(channel + 1, lsb, msb, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -85,7 +132,10 @@ void
+ BMidiGlue::SystemExclusive(
+ 	void* data, size_t length, bigtime_t time)
+ {
+-	fMidiObject->SystemExclusive(data, length, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->SystemExclusive(data, length, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -93,36 +143,74 @@ void
+ BMidiGlue::SystemCommon(
+ 	uchar status, uchar data1, uchar data2, bigtime_t time)
+ {
+-	fMidiObject->SystemCommon(status, data1, data2, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->SystemCommon(status, data1, data2, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ void 
+ BMidiGlue::SystemRealTime(uchar status, bigtime_t time)
+ {
+-	fMidiObject->SystemRealTime(status, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->SystemRealTime(status, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ void 
+ BMidiGlue::TempoChange(int32 beatsPerMinute, bigtime_t time)
+ {
+-	fMidiObject->TempoChange(beatsPerMinute, MAKE_TIME(time));
++	if (BMidi* object = _LockObject()) {
++		object->TempoChange(beatsPerMinute, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ BMidiPortGlue::BMidiPortGlue(BMidiPort* midiObject_, const char* name)
+-	: BMidiLocalConsumer(name)
++	: BMidiLocalConsumer(name),
++	fLock("midi glue")
+ {
+ 	fMidiObject = midiObject_;
+ }
++
++
++bool
++BMidiPortGlue::Detach(bigtime_t timeout)
++{
++	if (fLock.LockWithTimeout(timeout) != B_OK)
++		return false;
++			// a delivery that does not end: left alone, not deadlocked on
++	fMidiObject = NULL;
++	fLock.Unlock();
++	return true;
++}
++
++
++BMidiPort*
++BMidiPortGlue::_LockObject()
++{
++	if (!fLock.Lock())
++		return NULL;
++	if (fMidiObject == NULL) {
++		fLock.Unlock();
++		return NULL;
++	}
++	return fMidiObject;
++}
+ 	
+ 
+ void 
+ BMidiPortGlue::NoteOff(
+ 	uchar channel, uchar note, uchar velocity, bigtime_t time)
+ {
+-	fMidiObject->SprayNoteOff(channel + 1, note, velocity, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SprayNoteOff(channel + 1, note, velocity, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -130,7 +218,10 @@ void
+ BMidiPortGlue::NoteOn(
+ 	uchar channel, uchar note, uchar velocity, bigtime_t time)
+ {
+-	fMidiObject->SprayNoteOn(channel + 1, note, velocity, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SprayNoteOn(channel + 1, note, velocity, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -138,8 +229,11 @@ void
+ BMidiPortGlue::KeyPressure(
+ 	uchar channel, uchar note, uchar pressure, bigtime_t time)
+ {
+-	fMidiObject->SprayKeyPressure(
+-		channel + 1, note, pressure, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SprayKeyPressure(
++			channel + 1, note, pressure, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -147,8 +241,11 @@ void
+ BMidiPortGlue::ControlChange(
+ 	uchar channel, uchar controlNumber, uchar controlValue, bigtime_t time)
+ {
+-	fMidiObject->SprayControlChange(
+-		channel + 1, controlNumber, controlValue, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SprayControlChange(
++			channel + 1, controlNumber, controlValue, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -156,8 +253,11 @@ void
+ BMidiPortGlue::ProgramChange(
+ 	uchar channel, uchar programNumber, bigtime_t time)
+ {
+-	fMidiObject->SprayProgramChange(
+-		channel + 1, programNumber, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SprayProgramChange(
++			channel + 1, programNumber, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -165,7 +265,10 @@ void
+ BMidiPortGlue::ChannelPressure(
+ 	uchar channel, uchar pressure, bigtime_t time)
+ {
+-	fMidiObject->SprayChannelPressure(channel + 1, pressure, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SprayChannelPressure(channel + 1, pressure, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -173,7 +276,10 @@ void
+ BMidiPortGlue::PitchBend(
+ 	uchar channel, uchar lsb, uchar msb, bigtime_t time)
+ {
+-	fMidiObject->SprayPitchBend(channel + 1, lsb, msb, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SprayPitchBend(channel + 1, lsb, msb, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -181,7 +287,10 @@ void
+ BMidiPortGlue::SystemExclusive(
+ 	void* data, size_t length, bigtime_t time)
+ {
+-	fMidiObject->SpraySystemExclusive(data, length, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SpraySystemExclusive(data, length, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+@@ -189,20 +298,29 @@ void
+ BMidiPortGlue::SystemCommon(
+ 	uchar status, uchar data1, uchar data2, bigtime_t time)
+ {
+-	fMidiObject->SpraySystemCommon(status, data1, data2, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SpraySystemCommon(status, data1, data2, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ void 
+ BMidiPortGlue::SystemRealTime(uchar status, bigtime_t time)
+ {
+-	fMidiObject->SpraySystemRealTime(status, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SpraySystemRealTime(status, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+ 
+ void 
+ BMidiPortGlue::TempoChange(int32 beatsPerMinute, bigtime_t time)
+ {
+-	fMidiObject->SprayTempoChange(beatsPerMinute, MAKE_TIME(time));
++	if (BMidiPort* object = _LockObject()) {
++		object->SprayTempoChange(beatsPerMinute, MAKE_TIME(time));
++		fLock.Unlock();
++	}
+ }
+ 
+diff --git a/src/kits/midi/MidiGlue.h b/src/kits/midi/MidiGlue.h
+index 97e6cc18b5..99c12f94bf 100644
+--- a/src/kits/midi/MidiGlue.h
++++ b/src/kits/midi/MidiGlue.h
+@@ -14,11 +14,16 @@
+ #define _MIDI_GLUE_H
+ 
+ #include <MidiPort.h>
++#include <Locker.h>
+ #include <MidiConsumer.h>
+ 
+ #define MAKE_TIME(t)    (t / (bigtime_t)1000)
+ #define MAKE_BIGTIME(t) (t * (bigtime_t)1000)
+ 
++// How long the legacy objects' destructors wait for their threads -- the run
++// thread, a delivery in progress -- before they give up on them
++static const bigtime_t kMidiStopTimeout = 5000000;
++
+ namespace BPrivate {
+ 
+ class BMidiGlue: public BMidiLocalConsumer {
+@@ -26,6 +31,11 @@ public:
+ 
+ 	BMidiGlue(BMidi* midiObject, const char* name = NULL);
+ 	
++	// Stops delivering to the object: waits (at most timeout) for a
++	// delivery in progress, and drops the ones after. The object's
++	// destructors call this before they take down what it uses.
++	bool Detach(bigtime_t timeout);
++
+ 	virtual void NoteOff(
+ 		uchar channel, uchar note, uchar velocity, bigtime_t time);
+ 
+@@ -59,6 +69,9 @@ public:
+ 	virtual void TempoChange(int32 beatsPerMinute, bigtime_t time);
+ 
+ private:
++	BMidi* _LockObject();
++
++	BLocker fLock;
+ 	BMidi* fMidiObject;
+ };
+ 
+@@ -68,6 +81,11 @@ public:
+ 
+ 	BMidiPortGlue(BMidiPort* midiObject, const char* name = NULL);
+ 	
++	// Stops delivering to the object: waits (at most timeout) for a
++	// delivery in progress, and drops the ones after. The object's
++	// destructors call this before they take down what it uses.
++	bool Detach(bigtime_t timeout);
++
+ 	virtual void NoteOff(
+ 		uchar channel, uchar note, uchar velocity, bigtime_t time);
+ 
+@@ -101,6 +119,9 @@ public:
+ 	virtual void TempoChange(int32 beatsPerMinute, bigtime_t time);
+ 
+ private:
++	BMidiPort* _LockObject();
++
++	BLocker fLock;
+ 	BMidiPort* fMidiObject;
+ };
+ 
+diff --git a/src/kits/midi/MidiPort.cpp b/src/kits/midi/MidiPort.cpp
+index 78b6d0ab83..6860b9ed1d 100644
+--- a/src/kits/midi/MidiPort.cpp
++++ b/src/kits/midi/MidiPort.cpp
+@@ -44,6 +44,12 @@ BMidiPort::BMidiPort(const char* name)
+ 
+ BMidiPort::~BMidiPort()
+ {
++	// No more deliveries: from the port's input, which we spray on, and from
++	// the BMidi objects connected to us, which we send to the port -- both
++	// use the endpoints that go below.
++	static_cast<BMidiPortGlue*>(fLocalSink)->Detach(kMidiStopTimeout);
++	_DetachConsumer();
++
+ 	Close();
+ 
+ 	EmptyDeviceList();
+diff --git a/src/kits/midi/MidiStore.cpp b/src/kits/midi/MidiStore.cpp
+index 51ec5a56b7..e0110aa470 100644
+--- a/src/kits/midi/MidiStore.cpp
++++ b/src/kits/midi/MidiStore.cpp
+@@ -80,6 +80,13 @@ BMidiStore::BMidiStore()
+ 
+ BMidiStore::~BMidiStore()
+ {
++	// Run() reads the events and calls the song hook, and the input adds
++	// events: both must have ended before the events go. The owner is going
++	// away too, so no more hook calls.
++	fHookFunc = NULL;
++	_StopRunThread();
++	_DetachConsumer();
++
+ 	for (int32 t = 0; t < fEvents->CountItems(); ++t) {
+ 		delete EventAt(t);
+ 	}
+@@ -451,8 +458,10 @@ BMidiStore::Run()
+ 	fFinished = true;
+ 	fPaused = false;
+ 
+-	if (fHookFunc != NULL)
+-		(*fHookFunc)(fHookArg);
++	// once: the destructor may clear it meanwhile
++	synth_file_hook hook = fHookFunc;
++	if (hook != NULL)
++		(*hook)(fHookArg);
+ }
+ 
+ 
+diff --git a/src/kits/midi/MidiSynth.cpp b/src/kits/midi/MidiSynth.cpp
+index 3525004768..ae198f02fa 100644
+--- a/src/kits/midi/MidiSynth.cpp
++++ b/src/kits/midi/MidiSynth.cpp
+@@ -35,8 +35,13 @@ BMidiSynth::BMidiSynth()
+ 
+ BMidiSynth::~BMidiSynth()
+ {
++	// Our input delivers into be_synth, from its own thread, and be_synth
++	// may go below: no more deliveries first. If one does not end, be_synth
++	// stays -- a leak rather than a crash.
++	bool detached = _DetachConsumer();
++
+ 	be_synth->fClientCount--;
+-	if (be_synth->fClientCount == 0) {
++	if (be_synth->fClientCount == 0 && detached) {
+ 		delete be_synth;
+ 		be_synth = NULL;
+ 	}

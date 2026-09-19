@@ -180,6 +180,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | mev | 0.9.0-4 | failed | BUILD phase failed (exit 2) |
 | microbe | 20130728-2 | built | microbe-20130728-2-arm64.hpkg |
 | midikeyboard | 1.0.0-5 | built | midikeyboard-1.0.0-5-arm64.hpkg |
+| midikit_check | 1.0-3 | built | midikit_check-1.0-3-arm64.hpkg |
 | midisynth | 1.8.1-1 | failed | BUILD phase failed (exit 2) |
 | minesweeper | 20150109-5 | built | minesweeper-20150109-5-arm64.hpkg |
 | mkdepend | 1.7-5 | failed | command failed (128): git add -A -f . |

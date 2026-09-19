@@ -1,0 +1,67 @@
+From 1e917ac9ae039da81abad8602c17a9cbf7effad3 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 11:01:14 +0100
+Subject: [PATCH] Midi Kit: the file player starts on time and stops at once
+
+Two things made BMidiSynthFile play a song wrong, both seen in the
+Midi Kit test (midikit_check) as a Stop() or delete that took 10 s:
+
+- BMidi::Stop() sent "all notes off" and only then told the run thread
+  to stop. The thread went on spraying the song between those 16
+  messages, each note waited for until it was due, so Stop() took as
+  long as 16 notes of the song, and the notes sent after the last "all
+  notes off" went on sounding. The run thread is stopped first now.
+
+- The soft synth loads its soundfont when first needed, and
+  BMidiSynthFile::LoadFile() asked for the song's instruments through
+  LoadInstrument(), which the soft synth does not implement (it printed
+  UNIMPLEMENTED for each). So the soundfont was loaded at the first
+  note, from the input's thread: the song was held up for as long as
+  that took -- seconds on a slow disk -- and the notes due meanwhile
+  then played all at once. LoadFile() loads it (LoadAllInstruments()).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0051-midi-kit-the-file-player-starts-on-time-and-stops-at-once.patch 0c20979b92d496520fa7cfe71174bc2defc3387b4ac09568b0519232b065d4fa
+---
+ src/kits/midi/Midi.cpp          |  5 ++++-
+ src/kits/midi/MidiSynthFile.cpp | 10 +++++-----
+ 2 files changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/src/kits/midi/Midi.cpp b/src/kits/midi/Midi.cpp
+index 2f957001c0..9c7108929c 100644
+--- a/src/kits/midi/Midi.cpp
++++ b/src/kits/midi/Midi.cpp
+@@ -211,8 +211,11 @@ BMidi::Start()
+ void 
+ BMidi::Stop()
+ {
+-	AllNotesOff();
++	// The run thread first: it would go on spraying the song between the
++	// "all notes off" messages, each note waited for until it is due, and
++	// leave the notes it sent after them sounding.
+ 	fThreadId = -1;
++	AllNotesOff();
+ }
+     
+ 
+diff --git a/src/kits/midi/MidiSynthFile.cpp b/src/kits/midi/MidiSynthFile.cpp
+index 43e961d790..306feec7a1 100644
+--- a/src/kits/midi/MidiSynthFile.cpp
++++ b/src/kits/midi/MidiSynthFile.cpp
+@@ -44,11 +44,11 @@ BMidiSynthFile::LoadFile(const entry_ref* midi_entry_ref)
+ 	status_t err = fStore->Import(midi_entry_ref);
+ 
+ 	if (err == B_OK) {
+-		for (int t = 0; t < 128; ++t) {
+-			if (fStore->fInstruments[t]) {
+-				be_synth->fSynth->LoadInstrument(t);
+-			}
+-		}
++		// The soft synth has all instruments in one soundfont: load it now.
++		// Loaded at the first note instead, from the input's thread, it held
++		// up the song for as long as that took, and the notes due meanwhile
++		// then played all at once.
++		be_synth->fSynth->LoadAllInstruments();
+ 	}
+ 	
+ 	return err;

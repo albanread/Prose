@@ -62,8 +62,14 @@ and exits 0 if the last line is `PASS`. Boot to power-off takes about 7 s.
 The probes are `tests/codecs.sh` (codec_check), `tests/openssl.sh`,
 `tests/minimum.sh` (OpenSSL with its certificates, bc, wget: patch 0041) and
 `tests/apps.sh` (the Prose profile's applications and demos: patch 0042),
-`tests/netsurf.sh`, `tests/network.sh` (HTTPS from the target) and
-`tests/midiplayer.sh` (patch 0048: plays a demo tune, quits cleanly).
+`tests/netsurf.sh`, `tests/network.sh` (HTTPS from the target),
+`tests/midiplayer.sh` (patch 0048: plays a demo tune, quits cleanly) and
+`tests/midikit.sh` (patches 0050, 0051: the Midi Kit's file player deleted
+while it plays and by its own song hook, and stopped at once; midikit_check,
+also on the guarded heap). `BOOT_TEST_SOUND=1` gives the target a sound card,
+recorded to `<work>/out.wav` -- the built-in synthesizer only keeps time with
+one. Packages can be `.hpkg` files too, installed as they are: midikit.sh
+needs `haiku_devel.hpkg` of the image's own build for `libroot_debug.so`.
 The minimum image has no grep, sed or awk, so probes use bash and coreutils.
 
 ## Rules (the incident, turned into design)

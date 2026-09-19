@@ -1,0 +1,40 @@
+SUMMARY="Checks that the Midi Kit's file player can be deleted while it plays"
+DESCRIPTION="midikit_check loads a MIDI song into BMidiSynthFile, plays it for \
+a while, and deletes it -- many times, sometimes after Stop(), sometimes while \
+it plays, sometimes as the synthesizer's last client; and it plays a short \
+song whose song hook deletes its own player. Before the fixes in the Prose \
+fork (patches 0050, 0051), the player's threads outlived it and went on in \
+freed memory -- a crash, a double free, or a song hook called after the \
+delete -- and Stop() let the song play on for seconds. Exit status: the \
+failures."
+COPYRIGHT="2026 Prose"
+LICENSE="MIT"
+REVISION="3"
+ARCHITECTURES="arm64"
+
+PROVIDES="
+	midikit_check = $portVersion
+	cmd:midikit_check = $portVersion
+	"
+REQUIRES="
+	haiku
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	"
+BUILD_PREREQUIRES="
+	cmd:gcc
+	"
+
+BUILD()
+{
+	g++ -O2 -Wall -o midikit_check \
+		$portDir/additional-files/midikit_check.cpp -lbe -lmidi
+}
+
+INSTALL()
+{
+	mkdir -p $binDir
+	cp midikit_check $binDir/
+}

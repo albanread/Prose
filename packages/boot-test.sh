@@ -6,6 +6,7 @@
 # output in /boot/home/probe.txt, powers off, and prints that file. Exit
 # status 0 when the probe's last line is "PASS".
 #   PW_IMAGE: the image to clone (default: the image scripts/build-image.sh built)
+#   BOOT_TEST_SOUND=1: a sound card, its output recorded to <work>/out.wav
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/private_workspace/env.sh"
@@ -52,12 +53,23 @@ bfs "cp :$WORK/UserBootscript $BOOT/UserBootscript" "cp :$WORK/probe.sh /myfs/ho
 # a regular image would otherwise wait in FirstBootPrompt for a click
 "$ROOT/private_workspace/skip-first-boot-prompt.sh" "$IMG" > /dev/null
 
+# BOOT_TEST_SOUND=1: a sound card whose output is recorded to $WORK/out.wav
+# (silent here), for probes that need one -- the built-in synthesizer only
+# paces its notes when it has an audio output
+SOUND=()
+if [ "${BOOT_TEST_SOUND:-}" = 1 ]; then
+	rm -f "$WORK/out.wav"
+	SOUND=(-audiodev "wav,id=snd0,path=$WORK/out.wav,out.frequency=48000"
+		-device virtio-sound-pci,audiodev=snd0)
+fi
+
 echo ">>> booting $IMG (headless QEMU, serial: $WORK/serial.log)"
 gtimeout 300 qemu-system-aarch64 -M virt -cpu host -accel hvf -smp 4 -m 2G \
 	-bios /opt/homebrew/share/qemu/edk2-aarch64-code.fd -no-reboot \
 	-drive "if=none,file=$IMG,format=raw,id=hd0" -device virtio-blk-pci,drive=hd0 \
 	-device virtio-keyboard-pci -device virtio-tablet-pci -device ramfb \
 	-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+	${SOUND[@]+"${SOUND[@]}"} \
 	-serial "file:$WORK/serial.log" -display none || echo ">>> (qemu ended: $?)"
 
 rm -f "$WORK/probe.txt"
