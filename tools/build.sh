@@ -77,23 +77,6 @@ build_installer() {
 	sed "s/@VERSION@/$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)/" \
 		"$src/Info.plist" > "$app/Contents/Info.plist"
 	cp "$ROOT/build/Prose.app/Contents/Resources/Prose.icns" "$app/Contents/Resources/Prose.icns"
-	# the guest portal, so the installer can put it into a file system that
-	# already exists, and the tool that writes into one (bfs_shell needs the
-	# build library beside it, hence the install-name change)
-	local H="${PROSE_HAIKU:-/Volumes/HaikuSrc/haiku}/generated/objects"
-	if [ -f "$H/haiku/arm64/release/servers/prose_portal/prose_portal" ]; then
-		mkdir -p "$app/Contents/Resources/portal" "$app/Contents/Resources/bfs"
-		cp "$H/haiku/arm64/release/add-ons/kernel/drivers/misc/prose_portal/prose_portal" \
-			"$app/Contents/Resources/portal/driver"
-		cp "$H/haiku/arm64/release/servers/prose_portal/prose_portal" \
-			"$app/Contents/Resources/portal/daemon"
-		cp "$H/darwin/arm64/release/tools/bfs_shell/bfs_shell" "$app/Contents/Resources/bfs/bfs_shell"
-		cp "$H/darwin/lib/libroot_build.so" "$app/Contents/Resources/bfs/libroot_build.so"
-		install_name_tool -change "$H/darwin/lib/libroot_build.so" \
-			"@executable_path/libroot_build.so" "$app/Contents/Resources/bfs/bfs_shell" 2>/dev/null || true
-	else
-		echo "  (no Haiku build: the installer will not offer to update a guest portal)"
-	fi
 	codesign --force -s - "$app"
 }
 

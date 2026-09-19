@@ -28,7 +28,6 @@ enum Paths {
     static var machines: URL { support.appendingPathComponent("Machines", isDirectory: true) }
     static var machine: URL { machines.appendingPathComponent("Prose.image") }
     static var templateStamp: URL { machines.appendingPathComponent(".template") }
-    static var portalStamp: URL { machines.appendingPathComponent(".portal") }
     static var logs: URL {
         FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/Prose", isDirectory: true)
@@ -106,8 +105,6 @@ struct State {
     let machineSize: Int64
     let machineUsed: Date?
     let machineIsCurrent: Bool          // made from the machine this installer carries
-    let canGraftPortal: Bool           // this installer carries the pieces and the tool
-    let portalIsCurrent: Bool          // ... and has already put them in this one
     let settingsExist: Bool
     let shareExists: Bool
     let shareItems: Int
@@ -130,14 +127,6 @@ struct State {
         let used = (try? Paths.machine.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         let shareItems = (try? FileManager.default.contentsOfDirectory(atPath: Paths.share.path).count) ?? 0
 
-        let carried = ["portal/driver", "portal/daemon", "bfs/bfs_shell"].allSatisfy {
-            Bundle.main.url(forResource: ($0 as NSString).lastPathComponent, withExtension: nil,
-                            subdirectory: ($0 as NSString).deletingLastPathComponent) != nil
-        }
-
-        let ours = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        let grafted = (try? String(contentsOf: Paths.portalStamp, encoding: .utf8)) == ours
-
         return State(source: source,
                      sourceVersion: source.flatMap(version),
                      sourceMachine: sourceMachine.flatMap { exists($0) ? $0 : nil },
@@ -147,8 +136,6 @@ struct State {
                      machineSize: exists(Paths.machine) ? size(of: Paths.machine) : 0,
                      machineUsed: used,
                      machineIsCurrent: current,
-                     canGraftPortal: carried,
-                     portalIsCurrent: grafted,
                      settingsExist: exists(Paths.preferences),
                      shareExists: exists(Paths.share),
                      shareItems: shareItems)
@@ -385,8 +372,8 @@ final class InstallerWindow: NSObject, NSWindowDelegate {
                         detail: state.machineIsCurrent
                             ? "Yours is already this version. Replacing it loses everything in it — "
                               + "files, settings, anything you installed. Last used \(when)."
-                            : "Yours was made by an earlier version of Prose, so it has that version's "
-                              + "drivers and portal: automation may not work until it is replaced. "
+                            : "Yours was made by an earlier version of Prose and has that version's "
+                              + "drivers and portal, so automation may not work until it is replaced. "
                               + "Replacing it loses everything in it — files, settings, anything you "
                               + "installed. Last used \(when).",
                         on: false, warning: !state.machineIsCurrent))
@@ -396,15 +383,6 @@ final class InstallerWindow: NSObject, NSWindowDelegate {
                               + "talks to it through. Goes in Application Support.",
                         on: true))
                 }
-            }
-
-            if state.machineExists && state.canGraftPortal && !state.machineIsCurrent
-                && !state.portalIsCurrent {
-                add("portal", Choice("Update guest portal",
-                    detail: "Puts this version's portal into the file system you already have, "
-                          + "without replacing it. Automation works again and your files stay. "
-                          + "The rest of that system stays as it was.",
-                    on: true))
             }
 
             if state.settingsExist {
@@ -552,10 +530,6 @@ final class InstallerWindow: NSObject, NSWindowDelegate {
                 try? FileManager.default.removeItem(at: Paths.app)
                 try FileManager.default.copyItem(at: source, to: Paths.app)
             }
-            if picked.contains("portal"), !picked.contains("machine") {
-                step("Updating the guest portal…", 0.1)
-                if let trouble = graftPortal() { return trouble }
-            }
             if picked.contains("machine"), let machineSource = state.sourceMachine {
                 // the EFI variables belong to the machine that is going
                 try? FileManager.default.removeItem(at: Paths.machines.appendingPathComponent("Prose.image.efivars"))
@@ -576,100 +550,6 @@ final class InstallerWindow: NSObject, NSWindowDelegate {
         } catch {
             return (error as NSError).localizedDescription
         }
-    }
-
-    /// Where the BFS partition begins and ends in the image, from its partition
-    /// table: type 0xEB is Haiku's.
-    private func bfsPartition(of image: URL) -> (UInt64, UInt64)? {
-        guard let handle = try? FileHandle(forReadingFrom: image),
-              let mbr = try? handle.read(upToCount: 512), mbr.count == 512 else { return nil }
-        try? handle.close()
-        for i in 0..<4 {
-            let entry = mbr.subdata(in: (446 + 16 * i)..<(462 + 16 * i))
-            guard entry[4] == 0xEB else { continue }
-            let lba = UInt64(entry.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt32.self) })
-            let count = UInt64(entry.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 12, as: UInt32.self) })
-            return (lba * 512, (lba + count) * 512)
-        }
-        return nil
-    }
-
-    /// Put this version's portal into a file system without replacing it.
-    ///
-    /// The driver and the daemon go into non-packaged, the writable half of a
-    /// Haiku system, and a launch job in system settings starts that daemon
-    /// instead of the one the system was built with -- settings are read after
-    /// the package's own, so the later definition wins. Everything else in that
-    /// system stays exactly as it was, which is the point: the owner keeps
-    /// their files and gets a portal that answers.
-    private func graftPortal() -> String? {
-        guard let driver = Bundle.main.url(forResource: "driver", withExtension: nil, subdirectory: "portal"),
-              let daemon = Bundle.main.url(forResource: "daemon", withExtension: nil, subdirectory: "portal"),
-              let shell = Bundle.main.url(forResource: "bfs_shell", withExtension: nil, subdirectory: "bfs")
-        else { return "This installer has no portal to put in." }
-        guard let (start, end) = bfsPartition(of: Paths.machine) else {
-            return "The file system does not look like one Prose made."
-        }
-
-        // Its own service name, not the one the system already defines. Redefining
-        // that one does not override it -- launch_daemon fails the job outright
-        // ("Init failed: General system error") and neither portal runs. Under a
-        // name of its own both start, and the driver's one-opener rule settles
-        // which keeps the device; the loser logs "busy" and exits.
-        let job = """
-        service x-vnd.Prose-portal_update {
-        \tlaunch /boot/system/non-packaged/servers/prose_portal
-        \tno_safemode
-        \tlegacy
-        }
-        """
-        let jobFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("prose_portal.launch")
-        try? job.write(to: jobFile, atomically: true, encoding: .utf8)
-
-        let drivers = "/myfs/system/non-packaged/add-ons/kernel/drivers/audio/hmulti"
-        var script = ""
-        for directory in ["/myfs/system/non-packaged", "/myfs/system/non-packaged/add-ons",
-                          "/myfs/system/non-packaged/add-ons/kernel",
-                          "/myfs/system/non-packaged/add-ons/kernel/drivers",
-                          "/myfs/system/non-packaged/add-ons/kernel/drivers/audio", drivers,
-                          "/myfs/system/non-packaged/servers", "/myfs/system/settings/launch"] {
-            script += "mkdir \(directory)\n"         // already there is fine; bfs_shell says so and carries on
-        }
-        for (from, to) in [(driver.path, "\(drivers)/prose_portal"),
-                           (daemon.path, "/myfs/system/non-packaged/servers/prose_portal"),
-                           (jobFile.path, "/myfs/system/settings/launch/prose_portal")] {
-            script += "rm \(to)\n"
-            script += "cp :\(from) \(to)\n"
-            script += "chmod 755 \(to)\n"
-        }
-        script += "ls \(drivers)\nsync\nquit\n"
-
-        let task = Process()
-        task.executableURL = shell
-        task.arguments = ["--start-offset", "\(start)", "--end-offset", "\(end)", Paths.machine.path]
-        // the tool is built against Haiku's host library, which travels beside it
-        task.environment = ProcessInfo.processInfo.environment.merging(
-            ["DYLD_LIBRARY_PATH": shell.deletingLastPathComponent().path]) { _, new in new }
-        let input = Pipe(), output = Pipe()
-        task.standardInput = input
-        task.standardOutput = output
-        task.standardError = output
-        do { try task.run() } catch { return "Could not run the file system tool: \(error.localizedDescription)" }
-        input.fileHandleForWriting.write(script.data(using: .utf8)!)
-        input.fileHandleForWriting.closeFile()
-        let said = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        task.waitUntilExit()
-        try? FileManager.default.removeItem(at: jobFile)
-
-        if task.terminationStatus == 0, said.contains("prose_portal"),
-           let ours = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
-            try? ours.write(to: Paths.portalStamp, atomically: true, encoding: .utf8)
-        }
-        guard task.terminationStatus == 0, said.contains("prose_portal") else {
-            return "The portal could not be written into the file system."
-                + (said.isEmpty ? "" : "\n\n" + said.split(separator: "\n").suffix(3).joined(separator: "\n"))
-        }
-        return nil
     }
 
     private func remove(_ picked: [String]) -> String? {

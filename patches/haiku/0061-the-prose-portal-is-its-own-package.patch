@@ -1,0 +1,162 @@
+From 66648fbac8fc56dc6d6b6e70a1182b84589b8915 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 20:28:52 +0100
+Subject: [PATCH] The Prose Portal is its own package
+
+It was part of haiku.hpkg -- the driver, the daemon and a service in the
+system's launch script -- which made updating it mean replacing the whole
+system. packagefs resolves one file per path, so a second package cannot
+supply what the base one already does: the only way to make the portal
+replaceable on its own is for the base package not to carry it.
+
+So prose_portal.hpkg carries all three, and the image gets it beside
+haiku.hpkg. A newer Prose can then drop in a newer one; nothing else in
+the system has to move.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0061-the-prose-portal-is-its-own-package.patch f711c727155be2aed3d9f2a9aafe6e85347edc2d1b239d1a438954f5ba2f0003
+---
+ build/jam/HaikuPackages                     |  1 +
+ build/jam/images/HaikuImage                 |  1 +
+ build/jam/images/definitions/minimum        |  1 -
+ build/jam/packages/Haiku                    |  1 -
+ build/jam/packages/ProsePortal              | 18 +++++++++++++++++
+ data/launch/prose_portal                    |  8 ++++++++
+ data/launch/system                          |  6 ------
+ src/data/package_infos/generic/prose_portal | 22 +++++++++++++++++++++
+ 8 files changed, 50 insertions(+), 8 deletions(-)
+ create mode 100644 build/jam/packages/ProsePortal
+ create mode 100644 data/launch/prose_portal
+ create mode 100644 src/data/package_infos/generic/prose_portal
+
+diff --git a/build/jam/HaikuPackages b/build/jam/HaikuPackages
+index 904ff108f0..b155f016b4 100644
+--- a/build/jam/HaikuPackages
++++ b/build/jam/HaikuPackages
+@@ -8,6 +8,7 @@ local packages = [ FFilterByBuildFeatures
+ 	HaikuSource
+ 	MakefileEngine
+ 	NetFS
++	ProsePortal
+ 	UserlandFS
+ 	]
+ 	;
+diff --git a/build/jam/images/HaikuImage b/build/jam/images/HaikuImage
+index 86b537fd1f..59a07d975d 100644
+--- a/build/jam/images/HaikuImage
++++ b/build/jam/images/HaikuImage
+@@ -28,6 +28,7 @@ AddPackageFilesToHaikuImage system packages :
+ 	haiku_loader.hpkg
+ 	haiku.hpkg
+ 	haiku_datatranslators.hpkg
++	prose_portal.hpkg
+ 	haiku_$(TARGET_PACKAGING_ARCHS[2-]).hpkg
+ 	:
+ 	nameFromMetaInfo
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 26255dbae0..de833a860f 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -241,7 +241,6 @@ SYSTEM_SERVERS = [ FFilterByBuildFeatures
+ 	package_daemon
+ 	power_daemon
+ 	prose_display_agent
+-	prose_portal
+ 	registrar
+ 	syslog_daemon
+ ] ;
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index f449f3f95f..50bd0ca464 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -156,7 +156,6 @@ AddNewDriversToPackage display :
+ 	;
+ AddNewDriversToPackage audio hmulti :
+ 	prose_midi
+-	<driver>prose_portal
+ 	virtio_sound
+ 	;
+ AddNewDriversToPackage hyperv :
+diff --git a/build/jam/packages/ProsePortal b/build/jam/packages/ProsePortal
+new file mode 100644
+index 0000000000..e6ef8ec1cd
+--- /dev/null
++++ b/build/jam/packages/ProsePortal
+@@ -0,0 +1,18 @@
++# The Prose Portal: the device the host drives this machine through.
++#
++# A package of its own, not part of haiku.hpkg, so that updating it does not
++# mean replacing the whole system. packagefs resolves one file per path, so a
++# second package cannot supply what the base one already does -- which is why
++# the driver, the daemon and the launch job all live here and nowhere else.
++local prosePortalPackage = prose_portal.hpkg ;
++HaikuPackage $(prosePortalPackage) ;
++
++AddNewDriversToPackage audio hmulti : <driver>prose_portal ;
++AddFilesToPackage servers : prose_portal ;
++
++local portalLaunch = prose_portal ;
++portalLaunch = $(portalLaunch:G=launch) ;
++SEARCH on $(portalLaunch) = [ FDirName $(HAIKU_TOP) data launch ] ;
++AddFilesToPackage data launch : $(portalLaunch) ;
++
++BuildHaikuPackage $(prosePortalPackage) : prose_portal ;
+diff --git a/data/launch/prose_portal b/data/launch/prose_portal
+new file mode 100644
+index 0000000000..ba2cd3f20b
+--- /dev/null
++++ b/data/launch/prose_portal
+@@ -0,0 +1,8 @@
++# The Prose Portal's daemon. In the prose_portal package, not the system's own
++# launch script, so the portal can be replaced on its own: a newer Prose drops
++# in a newer prose_portal.hpkg and need not bring a whole new system with it.
++service x-vnd.Haiku-prose_portal {
++	launch /system/servers/prose_portal
++	no_safemode
++	legacy
++}
+diff --git a/data/launch/system b/data/launch/system
+index d8983b0fd2..5945770512 100644
+--- a/data/launch/system
++++ b/data/launch/system
+@@ -67,12 +67,6 @@ service x-vnd.Haiku-prose_display_agent {
+ 	legacy
+ }
+ 
+-service x-vnd.Haiku-prose_portal {
+-	launch /system/servers/prose_portal
+-	no_safemode
+-	legacy
+-}
+-
+ job x-vnd.Haiku-cddb_lookup {
+ 	launch /system/bin/cddb_lookup
+ 	no_safemode
+diff --git a/src/data/package_infos/generic/prose_portal b/src/data/package_infos/generic/prose_portal
+new file mode 100644
+index 0000000000..8057b8f39f
+--- /dev/null
++++ b/src/data/package_infos/generic/prose_portal
+@@ -0,0 +1,22 @@
++name			prose_portal
++version			%HAIKU_VERSION%
++architecture	HAIKU_PACKAGING_ARCH
++summary			"The portal the host drives this machine through"
++
++description		"A driver for the Prose Portal device and the daemon that \
++answers on it: the host asks this machine to do something and hears what \
++happened. Its own package so it can be replaced on its own."
++
++packager		"The Haiku build system"
++vendor			"Prose"
++
++copyrights		"2026 HaikuArmQemu (PROSE fork)"
++licenses		"MIT"
++
++provides {
++	prose_portal = %HAIKU_VERSION%
++}
++
++requires {
++	haiku >= R1~beta1
++}
