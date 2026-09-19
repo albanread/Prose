@@ -1,0 +1,95 @@
+From 67610695e59ea2e75a81b7d55daa7fc9bddf1b89 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 09:30:53 +0100
+Subject: [PATCH] Demo tunes in data/music, so MidiPlayer has something to play
+
+Nothing in the image was a .mid, so MidiPlayer opened to an empty file
+picker -- and until the soundfont went in (patch 0046) it could not have
+played one anyway.
+
+Three short arrangements, written by HaikuArmQemu's tools/music/tunes.py
+rather than downloaded, so their provenance is plain and they can be
+regenerated: Beethoven's Fur Elise (1810) and the Ode to Joy theme
+(1824), and Pachelbel's Canon in D (before 1706) with its ground bass and
+three canonic entries. All are long out of copyright.
+
+They are arrangements by ear, not urtext transcriptions: enough to
+recognise the tune, to exercise the General MIDI soundfont, and -- with
+MidiPlayer's output switched to /dev/midi/prose/0 -- to play through the
+Mac's synth instead.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0047-demo-tunes-in-data-music-so-midiplayer-has-something-to-play.patch 253901be5d2ff79be7c8cd134e70b8d7217973b3c2aae1e28954349023e53a86
+---
+ build/jam/packages/Haiku              |  10 ++++++++++
+ data/music/Beethoven - Fur Elise.mid  | Bin 0 -> 983 bytes
+ data/music/Beethoven - Ode to Joy.mid | Bin 0 -> 517 bytes
+ data/music/Pachelbel - Canon in D.mid | Bin 0 -> 2689 bytes
+ 4 files changed, 10 insertions(+)
+ create mode 100644 data/music/Beethoven - Fur Elise.mid
+ create mode 100644 data/music/Beethoven - Ode to Joy.mid
+ create mode 100644 data/music/Pachelbel - Canon in D.mid
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 5843b0b90e..06104f23df 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -286,6 +286,16 @@ local logoArtwork =
+ SEARCH on $(logoArtwork) = [ FDirName $(HAIKU_TOP) data artwork ] ;
+ AddFilesToPackage data artwork : $(logoArtwork) ;
+ 
++# PROSE fork: demo tunes for MidiPlayer, which otherwise opens to an empty
++# file picker -- nothing else in the image is a .mid. Written by
++# HaikuArmQemu's tools/music/tunes.py; every piece is long out of copyright.
++local demoTunes =
++	"Beethoven - Fur Elise.mid"
++	"Beethoven - Ode to Joy.mid"
++	"Pachelbel - Canon in D.mid" ;
++SEARCH on $(demoTunes) = [ FDirName $(HAIKU_TOP) data music ] ;
++AddFilesToPackage data music : $(demoTunes) ;
++
+ # Mail spell check dictionaries
+ local spellFiles = words geekspeak ;
+ spellFiles = $(spellFiles:G=spell) ;
+diff --git a/data/music/Beethoven - Fur Elise.mid b/data/music/Beethoven - Fur Elise.mid
+new file mode 100644
+index 0000000000000000000000000000000000000000..e420bf5dd9cb644c2604bc65031b146fdf8581b8
+GIT binary patch
+literal 983
+zcmeYb$w*;fU|?flWMF1|;2Tnu4df{>{AcELD=kuR&B-iIW%wV+%w4#F;eP}RGqVH-
+z!+(7Sh&rY~pgOLg%=C;Bg^a|!6ovx~3=@0;DjIx%v^S9U#>009%DV&Qy@0eAkoEx5
+z9zfbPps}FAm7!vS4N$-aDBu939l#P5Kyii%?jQy3Km{-f7oY+cumr?J50C;6Bn9+$
+z63jC&Pr3%Q27nz;f2Rzg(19l`Mh8#=^hr&FrmKSt?G6)l?J62|85ky-0BI8-Z3(0;
+n8JaRCY5*A;ND>x6z6D4EyN(VE91^4()ull-qp0XAPzD76tA{9h
+
+literal 0
+HcmV?d00001
+
+diff --git a/data/music/Beethoven - Ode to Joy.mid b/data/music/Beethoven - Ode to Joy.mid
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f42f6e8f267f7bd8a39441ebdd4f7b76ebbb368
+GIT binary patch
+literal 517
+zcmeYb$w*;fU|?flWMF1|;2Tnu4df{@{AcF!Pf1lM$ye~ouVnZi$jqsJfZ=}x3k#D3
+z2g84T28cpNd7wfz-_)G^luCvJ1`HD%f|?T=92k%ojvx_7polYw;f&0HOTl&7fz;Rm
+z)!2X-HpmRP6kM@GP-_6#F1w({0<bQ-pmql^14#|g9FTk9c2V6Kb|7a!+zfOE#LYlw
+x02%OLVwevMCKji};$nt_1`HDo?Ajd~4H&R7v_VqZ$Wm|-Oa_JKz_bIM2>?mJl{f$Z
+
+literal 0
+HcmV?d00001
+
+diff --git a/data/music/Pachelbel - Canon in D.mid b/data/music/Pachelbel - Canon in D.mid
+new file mode 100644
+index 0000000000000000000000000000000000000000..0da6b04462bd04b6655847fbb4cc3289a030562e
+GIT binary patch
+literal 2689
+zcmeIyy-LGi6vpwVA4<`|)iEv|Qc7aHfl!SxAq@yYTq_+cN&+qJehgXrrmL6Y;KyA!
+zIe86k@i_=d1~(U>@Am8A^b9Y5GEOe105;LWM(bmo%&+)s4`pZTaFS-JF-wgjl&77Y
+zk&E)Y+imamP+Is|Y(H|bcQ(texwemI`w7c9&fVJ>SVn?~2n8V#2m-<v_=G3$nv-fr
+z-_h^$hkoitlSZQsUhH?M_#}7l*r<vGY*d8;HmU*v8&$r5jVe#TM(atnqwlQc`~2S4
+z0bcDd6!9o`@7Y!n3D{N<3fNW=2-sHP3)oiS3D{OWsdn_8wS1qttxtZpw*7f_lTM9`
+t$zp*w6D#L9cOM*JH53d9OJEVEz$6BO0nr!qo0IBa`i_2|f6xzW{{|C)6Pf@3
+
+literal 0
+HcmV?d00001
+
