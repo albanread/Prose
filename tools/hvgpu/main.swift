@@ -52,6 +52,7 @@
 // The window is the Prose app (tools/build.sh bundles hvgpu as build/Prose.app): a menu
 // bar (menus.swift), a toolbar with the VM controls and a status bar with activity lights
 // (chrome.swift, controls.swift, monitor.swift). Its shortcuts are ⌃⌘ chords; ⌘ is the guest's.
+import CryptoKit
 import AppKit
 import Metal
 import QuartzCore
@@ -66,58 +67,107 @@ func option(_ name: String) -> String? {
     guard let i = args.lastIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
+/// What a machine was copied from: the bundled image's size and a hash of the
+/// first 4 MiB of its system partition. That part differs between builds; the
+/// front of the file -- the partition table, the boot partition -- does not.
+func templateIdentity(_ url: URL) -> String? {
+    guard let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int,
+          let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    guard let mbr = try? handle.read(upToCount: 512), mbr.count == 512 else { return nil }
+    var start: UInt64 = 36 << 20
+    for i in 0..<4 {
+        let entry = mbr.subdata(in: (446 + 16 * i)..<(462 + 16 * i))
+        if entry[4] == 0xEB {
+            start = UInt64(entry.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt32.self) }) * 512
+            break
+        }
+    }
+    try? handle.seek(toOffset: start)
+    guard let sample = try? handle.read(upToCount: 4 << 20) else { return nil }
+    return "\(size)-" + SHA256.hash(data: sample).map { String(format: "%02x", $0) }.joined().prefix(16)
+}
+
+/// This version of Prose carries a different machine from the installed one.
+/// The owner decides: replacing loses everything in the old machine, keeping
+/// runs the old system under the new Prose. Asked once per bundled machine.
+func offerReplacement() -> Bool {
+    _ = NSApplication.shared
+    let alert = NSAlert()
+    alert.messageText = "This version of Prose includes a newer machine."
+    alert.informativeText = "The machine you have was made by an earlier version of Prose. "
+        + "Replacing it installs the new system; everything in the old machine — files, "
+        + "settings, anything you installed — is lost. Keeping it runs the old system with "
+        + "this version of Prose."
+    alert.addButton(withTitle: "Replace Machine")
+    alert.addButton(withTitle: "Keep Mine")
+    alert.alertStyle = .warning
+    return alert.runModal() == .alertFirstButtonReturn
+}
+
 /// The installed machine: ~/Library/Application Support/Prose/Machines/Prose.image.
 ///
 /// An installed copy is double-clicked, not given a disk on a command line, and
 /// an application that exits 64 when launched that way is not an application --
 /// it also cannot be scripted or opened by anything that asks the system to
-/// launch it. The first run copies the machine out of the bundle; after that it
-/// is the user's, and reinstalling does not touch it.
+/// launch it. The first run copies the machine out of the bundle. After that it
+/// is the owner's; a reinstall does not touch it, and a newer bundled machine is
+/// offered, not imposed (.template records which one was last decided about).
 func installedMachine() -> String? {
     let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     let folder = support.appendingPathComponent("Prose/Machines", isDirectory: true)
     let disk = folder.appendingPathComponent("Prose.image")
-    if FileManager.default.fileExists(atPath: disk.path) { return disk.path }
-    guard let template = Bundle.main.url(forResource: "prose", withExtension: "image") else { return nil }
+    let stamp = folder.appendingPathComponent(".template")
+    let template = Bundle.main.url(forResource: "prose", withExtension: "image")
+    let identity = template.flatMap(templateIdentity)
+
+    if FileManager.default.fileExists(atPath: disk.path) {
+        let decided = try? String(contentsOf: stamp, encoding: .utf8)
+        if let template, let identity, decided != identity {
+            if offerReplacement() {
+                for name in ["Prose.image", "Prose.image.efivars", ".firstrun"] {
+                    try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
+                }
+                guard (try? FileManager.default.copyItem(at: template, to: disk)) != nil else { return nil }
+                FileManager.default.createFile(atPath: folder.appendingPathComponent(".firstrun").path, contents: nil)
+                log("machine: replaced with this version's (\(identity))")
+            } else {
+                log("machine: kept; this version's (\(identity)) declined")
+            }
+            try? identity.write(to: stamp, atomically: true, encoding: .utf8)
+        }
+        return disk.path
+    }
+    guard let template else { return nil }
     do {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: template, to: disk)
         FileManager.default.createFile(atPath: folder.appendingPathComponent(".firstrun").path, contents: nil)
+        if let identity { try? identity.write(to: stamp, atomically: true, encoding: .utf8) }
+        log("machine: made from this version's (\(identity ?? "?"))")
         return disk.path
     } catch {
         return nil
     }
 }
 
-/// --write-iconset DIR: the Finder icon, from the same drawing as the Dock icon.
-/// The build turns the set into Contents/Resources/Prose.icns; one drawing, one
-/// look everywhere, and no image file to keep in step with the code.
-if let dir = option("--write-iconset") {
-    _ = NSApplication.shared
-    let folder = URL(fileURLWithPath: dir, isDirectory: true)
-    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    for points in [16, 32, 128, 256, 512] {
-        for scale in [1, 2] {
-            let pixels = points * scale
-            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
-                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
-                  let context = NSGraphicsContext(bitmapImageRep: rep) else { continue }
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = context
-            ProseIcon.image(size: CGFloat(pixels)).draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
-            NSGraphicsContext.restoreGraphicsState()
-            let name = "icon_\(points)x\(points)\(scale == 2 ? "@2x" : "").png"
-            try? rep.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent(name))
-        }
-    }
-    exit(0)
-}
-
 var diskArgument: String? = args.count >= 2 && !args[1].hasPrefix("--") ? args[1] : nil
 /// No disk on the command line: this is an installed copy, opened rather than run
 /// by a script. It sets up its own folders (hostfs.swift shares one by default).
 let usingInstalledMachine = diskArgument == nil
+/// An installed copy has no terminal. Its log and the guest's RAM console go to
+/// ~/Library/Logs/Prose, or there is nothing at all to read when it goes wrong --
+/// as there was not, the first time it did.
+let installedLogs: URL? = usingInstalledMachine ? {
+    let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Logs/Prose", isDirectory: true)
+    try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+    let path = logs.appendingPathComponent("prose.log").path
+    if freopen(path, "a", stdout) != nil { setvbuf(stdout, nil, _IOLBF, 0) }
+    _ = freopen(path, "a", stderr)
+    return logs
+}() : nil
+if let installedLogs { log("prose: launched by the system; logging to \(installedLogs.path)") }
 if diskArgument == nil { diskArgument = installedMachine() }
 guard let diskPath = diskArgument else {
     print("usage: hvgpu <disk.img> [--size WxH] [--efivars path] [--cpus n] "
@@ -754,7 +804,8 @@ final class RAMConsole {
     var searchWait = 1.0                            // seconds from the last search to the next
     var attempts = 0
     var logHandle: FileHandle?
-    let logURL = URL(fileURLWithPath: option("--ramconsole-log") ?? "ramconsole.log")
+    let logURL = URL(fileURLWithPath: option("--ramconsole-log")
+            ?? installedLogs?.appendingPathComponent("ramconsole.log").path ?? "ramconsole.log")
 
     static var logStarted = false       // one log per run: a restarted VM's boot is appended
     static weak var current: RAMConsole?    // the console to flush when hvgpu exits
