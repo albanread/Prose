@@ -104,7 +104,7 @@ their work produced, and everything that makes it good is theirs.
   Virtualization.framework VM with custom virtio devices of its own — a
   shared-surface display, keyboard and tablet, a MIDI port — plus networking,
   sound, and a Mac folder shared into the guest.
-- **`patches/haiku`** — 56 patches against Haiku at hrev60122, applied to a
+- **`patches/haiku`** — 58 patches against Haiku at hrev60122, applied to a
   local tree to build the guest.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
@@ -259,6 +259,8 @@ table there also records why each one exists.
 | 0054 | `prose_portal`: the guest answers the host — run a command, report whether the desktop is up |
 | 0055 | An icon for each folder of the Deskbar's Applications menu |
 | 0056 | A gigabyte of disk in the image |
+| 0057 | The portal daemon serves connections on threads, with timeouts |
+| 0058 | The Prose Portal is a virtio device — no network: a kernel driver, `/dev/misc/prose/portal/0`, and the daemon answering on it |
 
 ## Layout
 

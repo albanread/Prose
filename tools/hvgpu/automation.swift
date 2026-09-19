@@ -152,13 +152,10 @@ final class Automation {
     unowned let controller: Controller
     private var waiters: [Waiter] = []
 
-    // The portal answers over a socket, which must not be touched from the main
-    // thread: a waiter asks the cached answer, a background poll keeps it fresh.
-    private let portalQueue = DispatchQueue(label: "hvgpu.portal")
+    // What the guest last said about itself, for waiters: kept fresh by a poll
+    // that runs only while something is waiting on it.
     private let portalLock = NSLock()
     private var portalInfo: [String: String] = [:]
-    private var portalAnswered = false
-    private var portalAddress: String?
     private var polling = false
 
     init(controller: Controller) { self.controller = controller }
@@ -323,16 +320,19 @@ final class Automation {
             guard let command = args["command"] ?? args["text"], !command.isEmpty else {
                 return .failed(.badArgument, "run command=…")
             }
-            portal(completion) { client in try client.send(Portal.run, payload: Data(command.utf8)) } handle: { reply in
+            portal(completion, Portal.run, Data(command.utf8),
+                   timeout: Double(args["timeout"] ?? "") ?? 600) { reply in
                 // the command's own exit status, kept apart from "the portal
                 // could not be reached", which is an error and not a status
-                .done(["status": Int(reply.status), "stdout": reply.out, "stderr": reply.error],
-                      reply.status == 0 ? "" : "exit \(reply.status)")
+                var values: [String: Any] = ["status": Int(reply.status), "stdout": reply.out, "stderr": reply.error,
+                                             "bytes": reply.out.utf8.count + reply.error.utf8.count]
+                if reply.truncated { values["truncated"] = true }
+                return .done(values, reply.status == 0 ? "" : "exit \(reply.status)")
             }
             return nil
 
         case "info":
-            portal(completion) { client in try client.send(Portal.info) } handle: { reply in
+            portal(completion, Portal.info, timeout: 5) { reply in
                 var values: [String: Any] = [:]
                 for line in reply.text.split(separator: "\n") {
                     let pair = line.split(separator: "=", maxSplits: 1)
@@ -343,7 +343,7 @@ final class Automation {
             return nil
 
         case "ping":
-            portal(completion) { client in try client.send(Portal.ping) } handle: { _ in .done() }
+            portal(completion, Portal.ping, timeout: 5) { _ in .done() }
             return nil
 
         case "wait":
@@ -439,60 +439,45 @@ final class Automation {
 
     // MARK: the portal
 
-    /// Run a portal request off the main thread and answer on it.
+    /// Ask the guest through the portal device and answer on the main thread.
     private func portal(_ completion: @escaping (AutomationResult) -> Void,
-                        _ request: @escaping (PortalClient) throws -> PortalReply,
+                        _ type: UInt16, _ payload: Data = Data(), timeout: TimeInterval,
                         handle: @escaping (PortalReply) -> AutomationResult) {
-        guard let address = controller.monitor?.guestIP() else {
-            return completion(.failed(.guestNotAnswering, "the guest has no address yet"))
-        }
-        portalQueue.async {
-            let client = PortalClient(address: address)
+        controller.portal.send(type, payload: payload, timeout: timeout) { outcome in
             let result: AutomationResult
-            do {
-                result = handle(try request(client))
-            } catch PortalClient.Failure.guestError(let message) {
-                result = .failed(.failed, message)
-            } catch {
-                result = .failed(.guestNotAnswering, "\(address): \(error)")
+            switch outcome {
+            case .success(let reply): result = handle(reply)
+            case .failure(.guestError(let message)): result = .failed(.failed, message)
+            case .failure(let failure): result = .failed(.guestNotAnswering, "\(failure)")
             }
             DispatchQueue.main.async { completion(result) }
         }
     }
 
-    /// Keep a cached answer from the guest, so a waiter's question is cheap.
-    /// Started by the first waiter that needs it and stopped when none do.
+    /// Keep a cached answer from the guest so a waiter's question is cheap:
+    /// an INFO a second while anything is waiting, and nothing otherwise.
     private func pollPortal() {
         guard !polling else { return }
         polling = true
-        portalQueue.async { [weak self] in
-            while true {
-                guard let self else { return }
-                self.portalLock.lock()
-                let address = self.portalAddress
-                self.portalLock.unlock()
-                if let address {
-                    let client = PortalClient(address: address, timeout: 2)
-                    if let reply = try? client.send(Portal.info) {
-                        var info: [String: String] = [:]
-                        for line in reply.text.split(separator: "\n") {
-                            let pair = line.split(separator: "=", maxSplits: 1)
-                            if pair.count == 2 { info[String(pair[0])] = String(pair[1]) }
-                        }
-                        self.portalLock.lock()
-                        self.portalInfo = info
-                        self.portalAnswered = true
-                        self.portalLock.unlock()
-                    }
+        // Not straight away: the operation that asked has not registered its
+        // waiter yet, and a poll that finds no waiters stops. By the time the
+        // main queue gets to this, `watch` has run.
+        DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+    }
+
+    private func pollOnce() {
+        guard !waiters.isEmpty else { polling = false; return }
+        controller.portal.send(Portal.info, timeout: 2) { [weak self] outcome in
+            guard let self else { return }
+            if case .success(let reply) = outcome {
+                var info: [String: String] = [:]
+                for line in reply.text.split(separator: "\n") {
+                    let pair = line.split(separator: "=", maxSplits: 1)
+                    if pair.count == 2 { info[String(pair[0])] = String(pair[1]) }
                 }
-                Thread.sleep(forTimeInterval: 1)
-                var wanted = false
-                DispatchQueue.main.sync { wanted = !(self.waiters.isEmpty) }
-                if !wanted {
-                    DispatchQueue.main.async { self.polling = false }
-                    return
-                }
+                self.portalLock.lock(); self.portalInfo = info; self.portalLock.unlock()
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.pollOnce() }
         }
     }
 
@@ -502,11 +487,7 @@ final class Automation {
         return portalInfo[key] == value
     }
 
-    private var portalIsAnswering: Bool {
-        portalLock.lock()
-        defer { portalLock.unlock() }
-        return portalAnswered
-    }
+    private var portalIsAnswering: Bool { controller.portal.alive.withLock { $0 } }
 
     // MARK: waiting
 
@@ -635,9 +616,6 @@ final class Automation {
     private func tick() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self, !self.waiters.isEmpty else { return }
-            self.portalLock.lock()
-            self.portalAddress = self.controller.monitor?.guestIP()
-            self.portalLock.unlock()
             let now = Date()
             var remaining: [Waiter] = []
             for waiter in self.waiters {

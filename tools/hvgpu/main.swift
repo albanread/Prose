@@ -39,6 +39,7 @@
 //   --automation            allow automation for this run without the menu item
 //   --no-sound              no virtio-snd device (default: output+input to the Mac's audio devices)
 //   --no-midi               no Prose MIDI device (default: guest MIDI -> Mac's GM synth + CoreMIDI)
+//   --no-portal             no Prose Portal device even with automation allowed (docs/automation.md)
 //   --no-synth              keep the CoreMIDI endpoints but don't play guest MIDI on the Mac's synth
 //   --midi-log              log every MIDI message from the guest
 //   --share PATH            HostFS: share a macOS directory read-write; the guest mounts it
@@ -86,6 +87,31 @@ func installedMachine() -> String? {
     } catch {
         return nil
     }
+}
+
+/// --write-iconset DIR: the Finder icon, from the same drawing as the Dock icon.
+/// The build turns the set into Contents/Resources/Prose.icns; one drawing, one
+/// look everywhere, and no image file to keep in step with the code.
+if let dir = option("--write-iconset") {
+    _ = NSApplication.shared
+    let folder = URL(fileURLWithPath: dir, isDirectory: true)
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    for points in [16, 32, 128, 256, 512] {
+        for scale in [1, 2] {
+            let pixels = points * scale
+            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                  let context = NSGraphicsContext(bitmapImageRep: rep) else { continue }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            ProseIcon.image(size: CGFloat(pixels)).draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
+            NSGraphicsContext.restoreGraphicsState()
+            let name = "icon_\(points)x\(points)\(scale == 2 ? "@2x" : "").png"
+            try? rep.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent(name))
+        }
+    }
+    exit(0)
 }
 
 var diskArgument: String? = args.count >= 2 && !args[1].hasPrefix("--") ? args[1] : nil
@@ -1224,6 +1250,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     lazy var router = InputRouter(presenter: presenter)
     lazy var automation = Automation(controller: self)      // automation.swift
     let midi = ProseMIDIDevice()
+    let portal = ProsePortalDevice()           // portal.swift: the guest answers the host
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
     let presenter = Presenter()
@@ -1370,6 +1397,12 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         } else if !args.contains("--no-custom-gpu") {   // --no-custom-gpu: VZ's GPU only
             config.customVirtioDevices = [displaySource.configuration]
         }
+        // The Prose Portal (portal.swift) is attached only when the owner allowed
+        // automation: absent, the guest has no device and its daemon exits. A
+        // change to the setting takes effect at the next start, like any device.
+        if Automation.enabled && !args.contains("--no-portal") {
+            config.customVirtioDevices += [portal.configuration]
+        }
         if !args.contains("--no-midi") {
             // the Prose MIDI port (midi.swift): the guest's MIDI played by the Mac
             config.customVirtioDevices += [midi.configuration]
@@ -1425,6 +1458,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     func stopVM(reason: String) {
         if let router = inputRouter { log(router.stats) }
         if !args.contains("--no-midi") { log(midi.stats) }
+        if portal.attached { log(portal.stats) }
         guard !stopping else { return }
         stopping = true
         log("stopping: \(reason)")
