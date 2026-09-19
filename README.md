@@ -5,6 +5,9 @@ running under macOS 27's Virtualization.framework with a host-GPU-backed display
 
 ![The prose desktop](docs/images/prose-desktop.png)
 
+> **This is not Haiku.** Haiku itself — the real thing, and very much worth your
+> time — is at **[haiku-os.org](https://www.haiku-os.org)**.
+
 ---
 
 ## Why "prose"?
@@ -38,6 +41,24 @@ To be clear:
   [haiku-os.org](https://www.haiku-os.org).
 
 Thank you to everyone who has worked on Haiku over the years.
+
+## The Haiku project
+
+Everything underneath prose that makes it an operating system is their work.
+If you want Haiku itself, or want to help with it:
+
+| | |
+|---|---|
+| The operating system | [haiku-os.org](https://www.haiku-os.org) |
+| Download — currently R1/beta6 | [haiku-os.org/get-haiku](https://www.haiku-os.org/get-haiku/) |
+| User guide | [haiku-os.org/docs/userguide](https://www.haiku-os.org/docs/userguide/en/contents.html) |
+| Source and code review | [review.haiku-os.org](https://review.haiku-os.org) · [github.com/haiku/haiku](https://github.com/haiku/haiku) |
+| Forums | [discuss.haiku-os.org](https://discuss.haiku-os.org) |
+| Bug tracker | [dev.haiku-os.org](https://dev.haiku-os.org) |
+| Haiku, Inc. — the non-profit behind it | [haiku-inc.org](https://www.haiku-inc.org) |
+
+Bugs in prose are mine, not theirs. Please don't report them in Haiku's tracker
+or forums.
 
 ## Why this exists
 
