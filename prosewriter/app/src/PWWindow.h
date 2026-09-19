@@ -11,6 +11,8 @@
 #include "PWLayout.h"
 
 class BCheckBox;
+class PWHeaderWindow;
+class PWPageSetupWindow;
 class BMenu;
 class BTextControl;
 class PWPageView;
@@ -47,6 +49,12 @@ public:
 		ZOOM_MSG		= 'pWzm',
 		FIT_WIDTH_MSG		= 'pWzw',
 		MARGIN_MSG		= 'pWmg',
+		PAGE_SETUP_MSG		= 'pWpg',
+		PRINT_MSG		= 'pWpr',
+		HEADER_MSG		= 'pWhd',
+		APPLY_SETUP_MSG	= 'pWpA',
+		APPLY_HEADER_MSG	= 'pWhA',
+		RECENT_MSG		= 'pWrc',
 		EXPORT_RTF_MSG		= 'pWer',
 		EXPORT_RTF_DONE_MSG	= 'pWex',
 	};
@@ -62,8 +70,14 @@ private:
 	void	ReplaceAndFind();
 	void	ReplaceAll();
 	void	ApplyAlignment(int32 alignment);
+public:
+	void	ApplyPageSetup(const PWPageSetup& setup);
+private:
 	void	SetZoom(float zoom);
 	void	MarkZoomItem(float zoom);
+	void	Print();
+	void	AddRecentFile(const char* path);
+	void	BuildRecentMenu();
 
 	PWDocument		fDoc;
 	PWLayout		fLayout;
@@ -85,6 +99,9 @@ private:
 	BFilePanel*		fExportPanel;
 	BStringView*	fStatusView;
 	BMenu*			fZoomMenu;
+	BMenu*			fRecentMenu;
+	PWPageSetupWindow*	fSetupWin = NULL;
+	PWHeaderWindow*	fHeaderWin = NULL;
 };
 
 #endif	// PW_WINDOW_H

@@ -13,6 +13,9 @@
 // Deliberately tiny: plain BSD sockets, no threads, one request at a time.
 
 #include <arpa/inet.h>
+#include <signal.h>
+#include <sys/select.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -73,20 +76,70 @@ sendAll(int fd, const void* data, size_t len)
 static void
 handleRun(int fd, const std::string& cmd)
 {
-	std::string full = cmd + " 2>&1";
-	FILE* f = popen(full.c_str(), "r");
-	if (!f) {
-		sendAll(fd, "ERR popen\n", 10);
+	// The child runs through /bin/sh in its own session, stdout and stderr
+	// on one pipe. A deadline stops a stuck command from wedging the agent
+	// (learned the hard way: one hung selftest froze the harness for good).
+	int out[2];
+	if (pipe(out) != 0) {
+		sendAll(fd, "ERR pipe\n", 9);
 		return;
 	}
+	pid_t pid = fork();
+	if (pid < 0) {
+		sendAll(fd, "ERR fork\n", 10);
+		close(out[0]);
+		close(out[1]);
+		return;
+	}
+	if (pid == 0) {
+		setsid();
+		dup2(out[1], 1);
+		dup2(out[1], 2);
+		close(out[0]);
+		close(out[1]);
+		int devnull = open("/dev/null", O_RDONLY);
+		if (devnull >= 0)
+			dup2(devnull, 0);
+		execl("/bin/sh", "sh", "-c", cmd.c_str(), (char*)NULL);
+		_exit(127);
+	}
+	close(out[1]);	// the request socket is FD_CLOEXEC; the child keeps none
+
+	const bigtime_t kDeadline = system_time() + 1200000000LL;	// 120 s
 	char buf[4096];
-	size_t n;
-	while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
-		sendAll(fd, buf, n);
-	int rc = pclose(f);
-	char tail[32];
-	snprintf(tail, sizeof(tail), "\nEXIT %d\n",
-		WIFEXITED(rc) ? WEXITSTATUS(rc) : -WTERMSIG(rc));
+	bool timedOut = false;
+	while (true) {
+		fd_set set;
+		FD_ZERO(&set);
+		FD_SET(out[0], &set);
+		struct timeval tv { 1, 0 };
+		int r = select(out[0] + 1, &set, NULL, NULL, &tv);
+		if (r > 0) {
+			ssize_t n = read(out[0], buf, sizeof(buf));
+			if (n <= 0)
+				break;
+			sendAll(fd, buf, n);
+		} else if (r == 0) {
+			if (system_time() > kDeadline) {
+				timedOut = true;
+				kill(-pid, SIGKILL);
+				ssize_t n;
+				while ((n = read(out[0], buf, sizeof(buf))) > 0)
+					sendAll(fd, buf, n);
+				break;
+			}
+		} else
+			break;
+	}
+	close(out[0]);
+	int status = 0;
+	waitpid(pid, &status, 0);
+	char tail[40];
+	if (timedOut)
+		snprintf(tail, sizeof(tail), "\nEXIT TIMEOUT\n");
+	else
+		snprintf(tail, sizeof(tail), "\nEXIT %d\n",
+			WIFEXITED(status) ? WEXITSTATUS(status) : -WTERMSIG(status));
 	sendAll(fd, tail, strlen(tail));
 }
 

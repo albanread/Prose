@@ -98,9 +98,9 @@ def main():
         if r.strip() != "OK":
             print(r, file=sys.stderr)
             return 1
-        call(f"run cp {tmp} {dst}\n".encode())
+        call(f"run /bin/mv -f {tmp} {dst}\n".encode())
         if dst.endswith("proseagent"):
-            call(b"run killall proseagent\n")
+            call(b"run /boot/system/bin/killall proseagent\n")
             time.sleep(3)          # the bootscript wrapper restarts it
             while True:
                 try:

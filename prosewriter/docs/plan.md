@@ -87,6 +87,45 @@ correct on a 10-page doc; ruler dragging margins relayouts live.
 **Exit criteria:** prints a page from the guest; 100-page perf budget met;
 the app is pleasant for an afternoon of writing.
 
+*Sprint 3 status: complete. Printing verified to the ConfigJob boundary
+(the guest has no printer, so the honest test is the no-printer alert);
+packaging notes in `docs/packaging.md`.*
+
+### Sprint 4 — typography, structure, and scriptability
+
+The distance from "engine with menus" to a word processor people write in.
+
+1. **Paragraph typography**: first-line / left / right indents, line
+   spacing (1.0/1.15/1.5/2.0), space before/after — model, ruler handles,
+   Text menu, RTF round trip (`\li \ri \fi \sl \sb \sa`).
+2. **Real tab stops**: click-to-place tabs on the ruler, drag to move,
+   drag off to delete; left/centre/right tab kinds; rendering with
+   tab-advance in the layout engine.
+3. **Lists**: bulleted and numbered paragraphs (model + toolbar/menu).
+4. **Named styles**: a styles panel (paragraph + character styles) in the
+   Gobe tradition — define once, apply everywhere, stored in the document.
+5. **Scriptability**: `B_GET_PROPERTY`/`B_SET_PROPERTY`/`B_EXECUTE_PROPERTY`
+   suites (`Text`, `Selection`, `Header`, `Footer`) so `hey` — and the
+   repo's planned automation device — can drive ProseWriter. This also
+   replaces pixel-guessing in the guest tests with real assertions.
+6. **Measurements**: cold-launch time, keystroke-to-paint on a 50-page
+   document, scroll throughput; fix what they expose (incremental
+   relayout from the edited paragraph is the expected need).
+7. **Polish**: menu mnemonics, toolbar state (B/I/U reflect the caret's
+   format), document icon + MIME registration, window placement memory,
+   Esc closes the find bar.
+
+**Exit criteria:** a multi-page document with headings, lists, indents and
+tabs round-trips through `.prose` and RTF; `hey ProseWriter get Text of
+Window 1` returns the document text; the perf measurements are recorded
+and within budget. Printing on real paper stays open until a printer
+exists on a Prose machine.
+
+### Sprint 5+ (drawn from the GoBe research)
+
+Images and frames in text (anchored, with wrap), tables, spell-check as
+you type, .doc import via a converter — each sized when Sprint 4 lands.
+
 ## Test definitions (guest, automated via `vm/guest.sh`)
 
 | ID | Test | Method | Pass |

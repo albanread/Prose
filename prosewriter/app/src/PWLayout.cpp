@@ -219,8 +219,37 @@ PWLayout::Layout()
 	if (fDoc != NULL) {
 		for (int32 p = 0; p < fDoc->CountParagraphs(); p++)
 			LayoutParagraph(p);
+		CacheAbsoluteStarts();
 	}
 	AssignLinesToPages();
+}
+
+void
+PWLayout::CacheAbsoluteStarts()
+{
+	// Lines arrive grouped by paragraph in order; accumulate each
+	// paragraph's base offset as its first line is seen.
+	int32 paraBase = 0;
+	int32 lastPara = -1;
+	for (Line& l : fLines) {
+		if (l.para != lastPara) {
+			paraBase = fDoc->ParaStart(l.para);
+			lastPara = l.para;
+		}
+		l.startAbs = paraBase + l.startPara;
+	}
+}
+
+void
+PWLayout::PageLines(int32 page, int32* firstLine, int32* lineCount) const
+{
+	if (page < 0 || page >= (int32)fPages.size()) {
+		*firstLine = 0;
+		*lineCount = 0;
+		return;
+	}
+	*firstLine = fPages[page].firstLine;
+	*lineCount = fPages[page].lineCount;
 }
 
 BRect
@@ -233,31 +262,45 @@ PWLayout::PageBounds(int32 page) const
 int32
 PWLayout::LineStart(int32 lineIndex) const
 {
-	const Line& l = fLines[lineIndex];
-	return fDoc->ParaStart(l.para) + l.startPara;
+	return fLines[lineIndex].startAbs;
+}
+
+int32
+PWLayout::LineEndAbs(int32 lineIndex) const
+{
+	if (lineIndex + 1 < (int32)fLines.size())
+		return fLines[lineIndex + 1].startAbs;
+	return fDoc->Length() + 1;
 }
 
 int32
 PWLayout::LineEnd(int32 lineIndex) const
 {
-	const Line& l = fLines[lineIndex];
-	int32 paraLen = fDoc->ParagraphLength(l.para);
-	int32 end = l.startPara + l.length;
-	// The line "owns" the separator when the paragraph wraps to its end.
-	if (end >= paraLen && l.para + 1 < fDoc->CountParagraphs())
-		return fDoc->ParaStart(l.para) + paraLen + 1;
-	return fDoc->ParaStart(l.para) + end;
+	return LineEndAbs(lineIndex);
 }
 
 int32
 PWLayout::LineOfOffset(int32 offset) const
 {
-	// Linear scan; fine for sprint 1, becomes a binary search when profiled.
-	for (int32 i = 0; i < (int32)fLines.size(); i++) {
-		if (LineStart(i) <= offset && offset < LineEnd(i))
-			return i;
+	// Binary search over cached absolute starts against contiguous
+	// [startAbs, LineEndAbs) ownership: every offset has exactly one line.
+	if (fLines.empty())
+		return 0;
+	int32 lo = 0, hi = (int32)fLines.size() - 1;
+	while (lo < hi) {
+		int32 mid = (lo + hi) / 2;
+		if (offset < fLines[mid].startAbs)
+			hi = mid - 1;
+		else if (offset >= LineEndAbs(mid))
+			lo = mid + 1;
+		else
+			return mid;
 	}
-	return (int32)fLines.size() - 1;
+	if (lo < 0)
+		lo = 0;
+	if (lo >= (int32)fLines.size())
+		lo = (int32)fLines.size() - 1;
+	return lo;
 }
 
 int32
@@ -337,19 +380,30 @@ PWLayout::XYToOffset(BPoint p) const
 {
 	if (fLines.empty())
 		return 0;
-	// Find the line whose y band contains p (or nearest).
+	// Binary search by y (lines are sorted by y), then settle to the
+	// nearest band when the point falls between lines.
+	int32 lo = 0, hi = (int32)fLines.size() - 1;
 	int32 best = 0;
-	float bestDist = 1e30f;
-	for (int32 i = 0; i < (int32)fLines.size(); i++) {
-		float d;
-		if (p.y < fLines[i].y)
-			d = fLines[i].y - p.y;
-		else if (p.y > fLines[i].y + fLines[i].height)
-			d = p.y - (fLines[i].y + fLines[i].height);
-		else
-			d = -1;	// inside
-		if (d < 0) { best = i; break; }
-		if (d < bestDist) { bestDist = d; best = i; }
+	while (lo <= hi) {
+		int32 mid = (lo + hi) / 2;
+		const Line& l = fLines[mid];
+		if (p.y < l.y)
+			hi = mid - 1;
+		else if (p.y > l.y + l.height)
+			lo = mid + 1;
+		else {
+			best = mid;
+			break;
+		}
+	}
+	if (lo > hi) {
+		// between bands: pick the closer neighbour
+		int32 below = hi >= 0 ? hi : 0;
+		int32 above = lo < (int32)fLines.size() ? lo : (int32)fLines.size() - 1;
+		float dB = p.y < fLines[below].y ? fLines[below].y - p.y : 1e30f;
+		float dA = p.y > fLines[above].y + fLines[above].height
+			? p.y - (fLines[above].y + fLines[above].height) : 1e30f;
+		best = dA < dB ? above : below;
 	}
 	const Line& l = fLines[best];
 	const char* text = fDoc->ParagraphText(l.para);

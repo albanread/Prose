@@ -591,6 +591,8 @@ PWDocument::Redo()
 status_t
 PWDocument::SaveToMessage(BMessage* msg) const
 {
+	msg->AddString("header", fHeader);
+	msg->AddString("footer", fFooter);
 	status_t err = B_OK;
 	for (size_t i = 0; i < fParas.size() && err == B_OK; i++) {
 		const Para& p = fParas[i];
@@ -615,6 +617,7 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 	fParas.clear();
 	fUndo.clear();
 	fRedo.clear();
+	fHeader = fFooter = "";
 	PWCharFormat def = MakeDefaultFormat();
 	BMessage paraMsg;
 	for (int32 i = 0; msg->FindMessage("para", i, &paraMsg) == B_OK; i++) {
@@ -642,9 +645,32 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 	}
 	if (fParas.empty())
 		fParas.push_back(Para{ { PWRun{ 0, 0, def } }, "", PWParaFormat() });
+	msg->FindString("header", &fHeader);
+	msg->FindString("footer", &fFooter);
 	fModified = false;
 	fPlainTextValid = false;
 	return B_OK;
+}
+
+BString
+PWDocument::ComposeHeaderText(const char* pattern, int32 page, int32 pageCount)
+{
+	BString out;
+	if (!pattern)
+		return out;
+	for (const char* p = pattern; *p; ) {
+		if (strncmp(p, "{page}", 6) == 0) {
+			out << (int)page;
+			p += 6;
+		} else if (strncmp(p, "{pages}", 7) == 0) {
+			out << (int)pageCount;
+			p += 7;
+		} else {
+			out.Append(p, 1);
+			p++;
+		}
+	}
+	return out;
 }
 
 status_t

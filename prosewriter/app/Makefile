@@ -20,7 +20,7 @@ LIBS   := -L$(SYS)/develop/lib
 
 CXXFLAGS ?= -O2 -g -Wall -Wno-multichar -std=c++17
 LDFLAGS  ?=
-LDLIBS   := -lbe -lroot -ltracker -lstdc++ -lgcc_s
+LDLIBS   := -lbe -lroot -ltracker -lnetwork -lstdc++ -lgcc_s
 
 BINS := ProseWriter proseagent
 
@@ -38,7 +38,10 @@ proseagent: proseagent.cpp
 hello: hello.cpp
 	$(XGXX) $(CXXFLAGS) $(INCS) $(LIBS) -o $@ $< $(LDFLAGS) $(LDLIBS)
 
+probe: probe.cpp
+	$(XGXX) $(CXXFLAGS) $(INCS) $(LIBS) -o $@ $< $(LDFLAGS) $(LDLIBS)
+
 clean:
-	rm -f $(BINS) hello *.o
+	rm -f $(BINS) hello probe *.o
 
 .PHONY: all clean

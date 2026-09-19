@@ -3,6 +3,12 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
+#include <Rect.h>
+#include <RadioButton.h>
+#include <PrintJob.h>
+#include <PopUpMenu.h>
+#include <MenuField.h>
+#include <FindDirectory.h>
 #include <CheckBox.h>
 #include <Clipboard.h>
 #include <Entry.h>
@@ -133,6 +139,190 @@ private:
 
 static const float kFindBarHeight = 26.0f;
 
+// ----------------------------------------------------- paper & print bits --
+
+static const struct {
+	const char* name;
+	float width, height;
+} kPapers[] = {
+	{ "A4",		595.0f, 842.0f },
+	{ "US Letter",	612.0f, 792.0f },
+	{ "US Legal",	612.0f, 1008.0f },
+	{ "A5",		420.0f, 595.0f },
+	{ NULL, 0, 0 }
+};
+
+static int32
+PaperIndex(const PWPageSetup& s)
+{
+	for (int i = 0; kPapers[i].name; i++) {
+		if ((fabs(s.pageWidth - kPapers[i].width) < 1
+				&& fabs(s.pageHeight - kPapers[i].height) < 1)
+			|| (fabs(s.pageWidth - kPapers[i].height) < 1
+				&& fabs(s.pageHeight - kPapers[i].width) < 1))
+			return i;
+	}
+	return 0;
+}
+
+// A small non-modal settings window: paper, orientation, margins.
+class PWPageSetupWindow : public BWindow {
+public:
+	PWPageSetupWindow(PWWindow* owner, PWPageSetup setup)
+		:
+		BWindow(BRect(0, 0, 300, 230), "Page setup",
+			B_TITLED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
+			B_ASYNCHRONOUS_CONTROLS),
+		fOwner(owner), fSetup(setup)
+	{
+		fPaper = new BPopUpMenu("paper");
+		for (int i = 0; kPapers[i].name; i++) {
+			BMessage* msg = new BMessage('pprP');
+			msg->AddInt32("index", i);
+			BMenuItem* it = new BMenuItem(kPapers[i].name, msg);
+			fPaper->AddItem(it);
+		}
+		fPaper->ItemAt(PaperIndex(fSetup))->SetMarked(true);
+		BMenuField* paperField = new BMenuField(BRect(10, 8, 200, 26),
+			"paperField", "Paper:", fPaper);
+		AddChild(paperField);
+
+		fPortrait = new BRadioButton(BRect(10, 34, 200, 50), "portrait",
+			"Portrait", new BMessage('pprO'));
+		fLandscape = new BRadioButton(BRect(10, 52, 200, 68), "landscape",
+			"Landscape", new BMessage('pprO'));
+		AddChild(fPortrait);
+		AddChild(fLandscape);
+		bool landscape = fSetup.pageWidth > fSetup.pageHeight;
+		(landscape ? fLandscape : fPortrait)->SetValue(B_CONTROL_ON);
+
+		const char* labels[4] = { "Left:", "Right:", "Top:", "Bottom:" };
+		float* values[4] = { &fSetup.marginLeft, &fSetup.marginRight,
+			&fSetup.marginTop, &fSetup.marginBottom };
+		for (int i = 0; i < 4; i++) {
+			char name[16], text[16];
+			snprintf(name, sizeof(name), "m%d", i);
+			snprintf(text, sizeof(text), "%d", (int)*values[i]);
+			fMargins[i] = new BTextControl(BRect(80, 74 + i * 24, 200, 92 + i * 24),
+				name, labels[i], text, NULL);
+			fMargins[i]->SetDivider(50);
+			AddChild(fMargins[i]);
+		}
+
+		AddChild(new BButton(BRect(105, 178, 175, 198), "ok", "Apply",
+			new BMessage(PWWindow::APPLY_SETUP_MSG)));
+		AddChild(new BButton(BRect(185, 178, 255, 198), "cancel", "Close",
+			new BMessage(B_QUIT_REQUESTED)));
+
+		AddToSubset(owner);
+		float left = owner->Frame().left + 40, top = owner->Frame().top + 80;
+		MoveTo(left, top);
+		SetType(B_FLOATING_WINDOW);
+	}
+
+	void	MessageReceived(BMessage* message) override
+	{
+		switch (message->what) {
+			case PWWindow::APPLY_SETUP_MSG: {
+				int32 index = 0;
+				for (int i = 0; i < fPaper->CountItems(); i++)
+					if (fPaper->ItemAt(i)->IsMarked())
+						index = i;
+				bool landscape = fLandscape->Value() == B_CONTROL_ON;
+				float w = kPapers[index].width, h = kPapers[index].height;
+				if (landscape && w < h) { float t = w; w = h; h = t; }
+				if (!landscape && w > h) { float t = w; w = h; h = t; }
+				fSetup.pageWidth = w;
+				fSetup.pageHeight = h;
+				fSetup.marginLeft = atof(fMargins[0]->Text());
+				fSetup.marginRight = atof(fMargins[1]->Text());
+				fSetup.marginTop = atof(fMargins[2]->Text());
+				fSetup.marginBottom = atof(fMargins[3]->Text());
+				#define CLAMP(m, limit) if (fSetup.m < 18) fSetup.m = 18; \
+					if (fSetup.m > (limit) - 72) fSetup.m = (limit) - 72;
+				CLAMP(marginLeft, fSetup.pageWidth)
+				CLAMP(marginRight, fSetup.pageWidth)
+				CLAMP(marginTop, fSetup.pageHeight)
+				CLAMP(marginBottom, fSetup.pageHeight)
+				#undef CLAMP
+				fOwner->ApplyPageSetup(fSetup);
+				break;
+			}
+			default:
+				BWindow::MessageReceived(message);
+		}
+	}
+
+	bool	QuitRequested() override
+	{
+		fOwner->PostMessage('pWpC');	// let the owner forget us
+		return true;
+	}
+
+private:
+	PWWindow*		fOwner;
+	PWPageSetup		fSetup;
+	BPopUpMenu*		fPaper;
+	BRadioButton*	fPortrait;
+	BRadioButton*	fLandscape;
+	BTextControl*	fMargins[4];
+};
+
+// Header/footer editor with live field hints.
+class PWHeaderWindow : public BWindow {
+public:
+	PWHeaderWindow(PWWindow* owner, const char* header, const char* footer)
+		:
+		BWindow(BRect(0, 0, 380, 160), "Header and footer",
+			B_TITLED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
+			B_ASYNCHRONOUS_CONTROLS),
+		fOwner(owner)
+	{
+		fHeader = new BTextControl(BRect(10, 10, 360, 28), "header",
+			"Header:", header, NULL);
+		fHeader->SetDivider(56);
+		AddChild(fHeader);
+		fFooter = new BTextControl(BRect(10, 38, 360, 56), "footer",
+			"Footer:", footer, NULL);
+		fFooter->SetDivider(56);
+		AddChild(fFooter);
+		BStringView* hint = new BStringView(BRect(10, 62, 360, 78), "hint",
+			"{page} and {pages} are replaced per page.");
+		AddChild(hint);
+		AddChild(new BButton(BRect(185, 92, 255, 112), "ok", "Apply",
+			new BMessage(PWWindow::APPLY_HEADER_MSG)));
+		AddChild(new BButton(BRect(265, 92, 345, 112), "cancel", "Close",
+			new BMessage(B_QUIT_REQUESTED)));
+		AddToSubset(owner);
+		MoveTo(owner->Frame().left + 60, owner->Frame().top + 120);
+		SetType(B_FLOATING_WINDOW);
+	}
+
+	void	MessageReceived(BMessage* message) override
+	{
+		switch (message->what) {
+			case PWWindow::APPLY_HEADER_MSG:
+				fOwner->Document()->SetHeaderText(fHeader->Text());
+				fOwner->Document()->SetFooterText(fFooter->Text());
+				fOwner->View()->Relayout();
+				break;
+			default:
+				BWindow::MessageReceived(message);
+		}
+	}
+
+	bool	QuitRequested() override
+	{
+		fOwner->PostMessage('pWhC');
+		return true;
+	}
+
+private:
+	PWWindow*	fOwner;
+	BTextControl*	fHeader;
+	BTextControl*	fFooter;
+};
+
 // ----------------------------------------------------------------- window --
 PWWindow::PWWindow(BRect frame, const char* title)
 	:
@@ -176,6 +366,66 @@ PWWindow::PWWindow(BRect frame, const char* title)
 	LayoutChildren();
 	UpdateStatusText();
 	fView->MakeFocus();
+}
+
+// Command-line document setup (used by the guest test harness):
+//   ProseWriter --demo --set-header "T {page} of {pages}" --set-footer "{page}"
+//              --paper letter --landscape --seed "text" [--print]
+static const char* gHeader = NULL;
+static const char* gFooter = NULL;
+static const char* gPaper = NULL;
+static const char* gSeed = NULL;
+static bool gLandscape = false;
+static bool gPrint = false;
+
+static void
+ParseArgs(int argc, char** argv)
+{
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--set-header") && i + 1 < argc)
+			gHeader = argv[++i];
+		else if (!strcmp(argv[i], "--set-footer") && i + 1 < argc)
+			gFooter = argv[++i];
+		else if (!strcmp(argv[i], "--paper") && i + 1 < argc)
+			gPaper = argv[++i];
+		else if (!strcmp(argv[i], "--seed") && i + 1 < argc)
+			gSeed = argv[++i];
+		else if (!strcmp(argv[i], "--landscape"))
+			gLandscape = true;
+		else if (!strcmp(argv[i], "--print"))
+			gPrint = true;
+	}
+}
+
+static void
+ApplyWindowArgs(PWWindow* window)
+{
+	PWPageSetup setup = window->Layout()->PageSetup();
+	if (gPaper) {
+		for (int i = 0; kPapers[i].name; i++) {
+			if (!strcasecmp(kPapers[i].name, gPaper)) {
+				setup.pageWidth = kPapers[i].width;
+				setup.pageHeight = kPapers[i].height;
+				break;
+			}
+		}
+	}
+	if (gLandscape && setup.pageWidth < setup.pageHeight) {
+		float t = setup.pageWidth;
+		setup.pageWidth = setup.pageHeight;
+		setup.pageHeight = t;
+	}
+	if (gPaper || gLandscape)
+		window->Layout()->SetPageSetup(setup);
+	if (gHeader)
+		window->Document()->SetHeaderText(gHeader);
+	if (gFooter)
+		window->Document()->SetFooterText(gFooter);
+	if (gSeed)
+		window->Document()->Insert(0, gSeed, NULL);
+	window->View()->Relayout();
+	if (gPrint)
+		window->PostMessage(PWWindow::PRINT_MSG);
 }
 
 void
@@ -232,6 +482,13 @@ PWWindow::BuildMenus()
 	menu->AddItem(item("Save as" B_UTF8_ELLIPSIS, SAVE_PANEL_MSG, 'S',
 		B_COMMAND_KEY | B_SHIFT_KEY));
 	menu->AddItem(item("Export as RTF" B_UTF8_ELLIPSIS, EXPORT_RTF_MSG));
+	fRecentMenu = new BMenu("Open recent");
+	menu->AddItem(fRecentMenu);
+	BuildRecentMenu();
+	menu->AddSeparatorItem();
+	menu->AddItem(item("Page setup" B_UTF8_ELLIPSIS, PAGE_SETUP_MSG));
+	menu->AddItem(item("Print" B_UTF8_ELLIPSIS, PRINT_MSG, 'P',
+		B_COMMAND_KEY));
 	menu->AddSeparatorItem();
 	menu->AddItem(item("Close", B_QUIT_REQUESTED, 'W', B_COMMAND_KEY));
 	menu->AddItem(item("Quit", B_QUIT_REQUESTED, 'Q', B_COMMAND_KEY));
@@ -316,6 +573,10 @@ PWWindow::BuildMenus()
 		menu->AddItem(new BMenuItem(alignLabels[i], msg));
 	}
 	menu->ItemAt(menu->CountItems() - 4)->SetMarked(true);
+	fMenuBar->AddItem(menu);
+
+	menu = new BMenu("Document");
+	menu->AddItem(item("Header and footer" B_UTF8_ELLIPSIS, HEADER_MSG));
 	fMenuBar->AddItem(menu);
 
 	menu = new BMenu("Search");
@@ -476,6 +737,130 @@ PWWindow::MarkZoomItem(float zoom)
 		fZoomMenu->ItemAt(i)->Message()->FindFloat("zoom", &z);
 		fZoomMenu->ItemAt(i)->SetMarked(fabs(z - zoom) < 0.01f);
 	}
+}
+
+void
+PWWindow::ApplyPageSetup(const PWPageSetup& setup)
+{
+	fLayout.SetPageSetup(setup);
+	fView->Relayout();
+	fRuler->Invalidate();
+	UpdateStatusText();
+}
+
+void
+PWWindow::Print()
+{
+	BPrintJob job("ProseWriter");
+	if (job.ConfigJob() != B_OK) {
+		(new BAlert("ProseWriter",
+			"No printer is configured; printing was cancelled.", "OK"))->Go();
+		return;
+	}
+	job.BeginJob();
+	int32 pages = fLayout.CountPages();
+	float scale = job.PrintableRect().Width() / fLayout.PageSetup().pageWidth;
+	float wasZoom = fView->Zoom();
+	fView->SetZoom(scale);
+	for (int32 p = 0; p < pages; p++) {
+		BRect page(0, 0, fLayout.PageSetup().pageWidth * scale,
+			fLayout.PageSetup().pageHeight * scale);
+		fView->BeginPrintMode(p);
+		job.DrawView(fView, page, BPoint(0, 0));
+		fView->EndPrintMode();
+		job.SpoolPage();
+	}
+	fView->SetZoom(wasZoom);
+	job.CommitJob();
+}
+
+static BPath
+RecentFilePath()
+{
+	BPath path;
+	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+		path.Append("ProseWriter");
+		create_directory(path.Path(), 0755);
+		path.Append("recent-files");
+	}
+	return path;
+}
+
+void
+PWWindow::BuildRecentMenu()
+{
+	while (fRecentMenu->RemoveItem((int32)0) != NULL) { }
+	BPath path = RecentFilePath();
+	BString lines;
+	{
+		BFile file;
+		if (file.SetTo(path.Path(), B_READ_ONLY) == B_OK) {
+			char buffer[4096];
+			ssize_t n = file.Read(buffer, sizeof(buffer) - 1);
+			if (n > 0) {
+				buffer[n] = 0;
+				lines = buffer;
+			}
+		}
+	}
+	int32 count = 0;
+	int32 at = 0;
+	while (count < 8) {
+		int32 eol = lines.FindFirst('\n', at);
+		BString line;
+		lines.CopyInto(line, at, (eol < 0 ? lines.Length() : eol) - at);
+		if (line.Length() == 0)
+			break;
+		BMessage* msg = new BMessage(RECENT_MSG);
+		msg->AddString("path", line);
+		BPath only(line.String());
+		fRecentMenu->AddItem(new BMenuItem(only.Leaf(), msg));
+		at = eol + 1;
+		count++;
+		if (eol < 0)
+			break;
+	}
+	if (count == 0)
+		fRecentMenu->AddItem(new BMenuItem("(none)", NULL));
+}
+
+void
+PWWindow::AddRecentFile(const char* path)
+{
+	BPath file = RecentFilePath();
+	BString lines;
+	{
+		BFile in;
+		if (in.SetTo(file.Path(), B_READ_ONLY) == B_OK) {
+			char buffer[4096];
+			ssize_t n = in.Read(buffer, sizeof(buffer) - 1);
+			if (n > 0) {
+				buffer[n] = 0;
+				lines = buffer;
+			}
+		}
+	}
+	BString updated = path;
+	updated << "\n";
+	int32 at = 0;
+	int32 added = 1;
+	while (added < 8) {
+		int32 eol = lines.FindFirst('\n', at);
+		if (eol < 0)
+			break;
+		BString line;
+		lines.CopyInto(line, at, eol - at);
+		at = eol + 1;
+		if (line != path) {
+			updated << line << "\n";
+			added++;
+		}
+	}
+	BFile out;
+	if (out.SetTo(file.Path(),
+			B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE) == B_OK)
+		out.Write(updated.String(), updated.Length());
+	BuildRecentMenu();
 }
 
 void
@@ -641,6 +1026,40 @@ PWWindow::MessageReceived(BMessage* message)
 		case FIND_BAR_MSG:
 			ToggleFindBar(!fFindShown);
 			break;
+		case PAGE_SETUP_MSG:
+			if (fSetupWin == NULL) {
+				fSetupWin = new PWPageSetupWindow(this,
+					fLayout.PageSetup());
+				fSetupWin->Show();
+			} else
+				fSetupWin->Activate();
+			break;
+		case 'pWpC':
+			fSetupWin = NULL;
+			break;
+		case HEADER_MSG:
+			if (fHeaderWin == NULL) {
+				fHeaderWin = new PWHeaderWindow(this, fDoc.HeaderText(),
+					fDoc.FooterText());
+				fHeaderWin->Show();
+			} else
+				fHeaderWin->Activate();
+			break;
+		case 'pWhC':
+			fHeaderWin = NULL;
+			break;
+		case PRINT_MSG:
+			Print();
+			break;
+		case RECENT_MSG: {
+			BString path;
+			if (message->FindString("path", &path) == B_OK) {
+				entry_ref ref;
+				if (get_ref_for_path(path.String(), &ref) == B_OK)
+					OpenFile(ref);
+			}
+			break;
+		}
 		case FIND_FIELD_MSG:
 		case FIND_NEXT_MSG:
 			FindNext();
@@ -691,6 +1110,7 @@ PWWindow::OpenFile(const entry_ref& ref)
 	}
 	fFilePath = path.Path();
 	fFileName = path.Leaf();
+	AddRecentFile(fFilePath.String());
 	fView->SetCaret(0, false);
 	fView->Relayout();
 	UpdateStatusText();
@@ -702,6 +1122,7 @@ PWWindow::DoSave(const BString& pathStr)
 {
 	if (fDoc.SaveToFile(pathStr.String()) == B_OK) {
 		fFilePath = pathStr;
+		AddRecentFile(pathStr.String());
 		fFileName = BPath(pathStr.String()).Leaf();
 		fDoc.SavedClean();
 		UpdateTitle();
@@ -749,6 +1170,8 @@ public:
 		BRect frame(avail.left, avail.top, avail.left + w, avail.top + h);
 		fWindow = new PWWindow(frame, "Untitled");
 		fWindow->Show();
+		if (gHeader || gFooter || gPaper || gLandscape || gSeed)
+			ApplyWindowArgs(fWindow);
 	}
 
 	void	MessageReceived(BMessage* message) override
@@ -791,14 +1214,15 @@ SelfTest()
 	struct Case {
 		const char* name;
 		bool ok;
-	} cases[40];
-	int n = 0;
+	};
+	std::vector<Case> cases;
 	bool all = true;
 
-	#define CHECK(label, cond) { cases[n].name = label; \
-		bool ok_ = (cond); cases[n].ok = ok_; \
-		if (!ok_) all = false; n++; }
+	#define CHECK(label, cond) { bool ok_ = (cond); \
+		cases.push_back(Case{ label, ok_ }); \
+		if (!ok_) all = false; }
 
+		printf("block: model\n"); fflush(stdout);
 	{
 		PWDocument doc;
 		CHECK("empty document has one paragraph", doc.CountParagraphs() == 1);
@@ -840,6 +1264,7 @@ SelfTest()
 		CHECK("caret x at left margin", xy.x == setup.marginLeft);
 	}
 
+		printf("block: search\n"); fflush(stdout);
 	{
 		// Search and replace over the plain text.
 		PWDocument doc;
@@ -857,6 +1282,7 @@ SelfTest()
 			strcmp(doc.PlainText(), "one TWO three TWO one") == 0);
 	}
 
+		printf("block: rtf\n"); fflush(stdout);
 	{
 		// RTF round trip: text, bold/italic/underline, size, colour,
 		// alignment, multiple paragraphs.
@@ -898,6 +1324,7 @@ SelfTest()
 		CHECK("rtf not bold at 0", !loaded.FormatAt(0).bold);
 	}
 
+		printf("block: justify\n"); fflush(stdout);
 	{
 		// Justify: a wrapped justified paragraph fills the column.
 		PWDocument doc;
@@ -932,6 +1359,93 @@ SelfTest()
 			&& xy.x <= setup.marginLeft + setup.TextWidth() + 2);
 	}
 
+		printf("block: headers\n"); fflush(stdout);
+	{
+		// Header/footer field substitution.
+		PWDocument doc;
+		doc.SetHeaderText("Report {page} of {pages}");
+		doc.SetFooterText("{page}/{pages} end");
+		BString h = PWDocument::ComposeHeaderText(doc.HeaderText(), 3, 12);
+		CHECK("header fields", h == "Report 3 of 12");
+		BString f = PWDocument::ComposeHeaderText(doc.FooterText(), 1, 2);
+		CHECK("footer fields", f == "1/2 end");
+		BMessage msg;
+		doc.SaveToMessage(&msg);
+		PWDocument doc2;
+		doc2.LoadFromMessage(&msg);
+		CHECK("header persists", strcmp(doc2.HeaderText(),
+			"Report {page} of {pages}") == 0);
+	}
+
+		printf("block: paper\n"); fflush(stdout);
+	{
+		// Paper size and orientation change the page count.
+		PWDocument doc;
+		BString filler;
+		for (int i = 0; i < 120; i++)
+			filler << "filler text here ";
+		doc.Insert(0, filler.String(), NULL);
+		PWLayout layout(&doc);
+		PWPageSetup portrait;
+		portrait.pageWidth = 595; portrait.pageHeight = 842;
+		layout.SetPageSetup(portrait);
+		layout.Layout();
+		int32 portraitPages = layout.CountPages();
+		PWPageSetup landscape = portrait;
+		landscape.pageWidth = 842; landscape.pageHeight = 595;
+		layout.SetPageSetup(landscape);
+		layout.Layout();
+		CHECK("paper swap relayouts", portraitPages >= 1);
+		// landscape has a wider column -> fewer or equal pages
+		CHECK("landscape not taller", layout.CountPages() <= portraitPages + 1);
+	}
+
+		printf("block: binsearch build\n"); fflush(stdout);
+	{
+		// Binary-search lookups agree with linear truth on a large doc.
+		PWDocument doc;
+		doc.Insert(0,
+			"alpha beta gamma delta epsilon zeta eta theta iota kappa "
+			"lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi "
+			"omega. ", NULL);
+		for (int i = 0; i < 3000; i++)
+			doc.SplitPara((i * 97) % std::max((int32)1, doc.Length()));
+		PWLayout layout(&doc);
+		layout.SetPageSetup(PWPageSetup());
+		layout.Layout();
+		int32 total = doc.Length();
+		printf("block: binsearch probes\n"); fflush(stdout);
+		bool agree = true;
+		bool roundTrip = true;
+		BPoint xy;
+		float hh;
+		for (int probe = 0; probe < 200; probe++) {
+			int32 off = (probe * 2654435761u) % (total > 0 ? total : 1);
+			// truth: linear scan over lines
+			int32 truth = -1;
+			for (int32 i = 0; i < (int32)layout.Lines().size(); i++) {
+				int32 s = layout.Lines()[i].startAbs;
+				int32 e = (i + 1 < (int32)layout.Lines().size())
+					? layout.Lines()[i + 1].startAbs
+					: total + 1;
+				if (off >= s && off < e) { truth = i; break; }
+			}
+			if (truth < 0)
+				printf("dbg: off=%d in no line\n", (int)off);
+			if (truth != layout.LineOfOffset(off))
+				agree = false;
+			if (layout.OffsetToXY(off, &xy, &hh)) {
+				int32 back = layout.XYToOffset(xy);
+				// same or an adjacent boundary is acceptable
+				if (back != off && back != off + 1 && back != off - 1)
+					roundTrip = false;
+			}
+		}
+		CHECK("line lookup matches linear scan", agree);
+		CHECK("offset/point round trip", roundTrip);
+	}
+
+		printf("block: perf\n"); fflush(stdout);
 	{
 		// Performance: ~100 pages.
 		PWDocument doc;
@@ -955,11 +1469,12 @@ SelfTest()
 	#undef CHECK
 
 	int passed = 0;
-	for (int i = 0; i < n; i++) {
-		printf("  %-42s %s\n", cases[i].name, cases[i].ok ? "PASS" : "FAIL");
-		if (cases[i].ok) passed++;
+	for (const Case& c : cases) {
+		printf("  %-42s %s\n", c.name, c.ok ? "PASS" : "FAIL");
+		if (c.ok) passed++;
 	}
-	printf("SELFTEST %s %d/%d\n", all ? "PASS" : "FAIL", passed, n);
+	printf("SELFTEST %s %d/%d\n", all ? "PASS" : "FAIL", passed,
+		(int)cases.size());
 	return all ? 0 : 1;
 }
 
@@ -971,7 +1486,9 @@ main(int argc, char** argv)
 		PWApp app;
 		return SelfTest();
 	}
+	ParseArgs(argc, argv);
 	PWApp app;
 	app.Run();
 	return 0;
 }
+

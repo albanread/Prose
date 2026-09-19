@@ -42,6 +42,11 @@ public:
 	void	Paste(const BMessage* fromClipboard);
 
 	void	ScrollCaretVisible();
+
+	// ---- printing: the window drives BPrintJob; we render one page per
+	// DrawView call with desk/shadow/selection/caret suppressed.
+	void	BeginPrintMode(int32 page) { fPrinting = true; fPrintPage = page; }
+	void	EndPrintMode() { fPrinting = false; }
 	void	Relayout();			// document changed: relayout + repaint
 
 	// ---- zoom: layout stays in points; the view scales deterministically
@@ -67,12 +72,15 @@ private:
 	void	InsertText(const char* text, int32 length);
 	void	DeleteSelection();
 	void	DrawPages(BRect updateRect);
+	void	DrawHeaderFooter(int32 page, BRect pageRect);
 	void	DrawSelection();
 	void	DrawCaret();
 	void	ClickCycled(BPoint where, int32 clicks);
 
 	PWDocument*	fDoc;
 	BScrollView*	fScrollView = NULL;
+	bool		fPrinting = false;
+	int32		fPrintPage = 0;
 	PWLayout*	fLayout;
 	int32		fCaret = 0;
 	int32		fSelAnchor = -1;	// -1: no selection

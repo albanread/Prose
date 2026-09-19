@@ -46,7 +46,8 @@ research, tooling and skills needed to build and test it.
 | VM harness | `vm/` boots our image clone headless under QEMU/HVF; **proseagent** in the guest gives `run`/`put`/`get`/`launch` over `127.0.0.1:9000`; QMP gives screendump + keyboard/tablet input; `vm/guest.sh`, `vm/qmp.py` |
 | ProseWriter | **Sprint 1 complete and guest-verified**: model (runs, undo, `.prose` round-trip), layout (greedy wrap, A4 pagination, offset↔xy), page view (render, caret, selection, keyboard/mouse), window (menus, clipboard, save/open), `--selftest` **20/20 PASS**, 96 pages layout in ~180 ms; typed text via QEMU keyboard renders on the page |
 | ProseWriter | **Sprint 2 complete and guest-verified**: RTF import/export (selftest round trip incl. fonts/colour/alignment), find & replace bar (wrap, case toggle, replace all), justified alignment with correct caret mapping, zoom 50–200 % + fit width (deterministic view scaling), Text menu (family/size/colour/alignment), ruler with draggable page margins, styled clipboard, window fits the screen. `--selftest` **34/34 PASS** |
-| Next | Sprint 3 (headers/footers, page setup, print, perf pass, packaging) — see `docs/plan.md` |
+| ProseWriter | **Sprint 3 complete and guest-verified**: headers/footers with `{page}`/`{pages}` fields (persisted, rendered per page), page setup (paper/orientation/margins), BPrintJob printing with print-mode rendering, recent documents, perf pass (cached line offsets, binary-search lookups, contiguous line ownership, per-page paint). `--selftest` **41/41 PASS**; landscape/header/footer/print-alert all verified in the GUI via `--seed/--paper/--set-header/--print` harness flags |
+| Next | Sprint 4 — see `docs/plan.md` |
 
 ## The dev loop
 

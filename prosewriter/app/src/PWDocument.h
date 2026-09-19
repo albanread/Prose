@@ -115,6 +115,15 @@ public:
 	status_t	LoadFromFile(const char* path);
 
 	const PWCharFormat& DefaultFormat() const { return fDefault; }
+
+	// ---- headers & footers: run text with {page} and {pages} fields,
+	// substituted per page at draw time. Empty string = none.
+	void		SetHeaderText(const char* text) { fHeader = text; fModified = true; }
+	void		SetFooterText(const char* text) { fFooter = text; fModified = true; }
+	const char* HeaderText() const { return fHeader.String(); }
+	const char* FooterText() const { return fFooter.String(); }
+	static BString ComposeHeaderText(const char* pattern, int32 page,
+		int32 pageCount);
 	void		SetDefaultFormat(const PWCharFormat& fmt) { fDefault = fmt; }
 
 	// Fixed default every new document starts with.
@@ -146,6 +155,7 @@ private:
 	std::vector<UndoStep>	fUndo, fRedo;
 	bool			fModified = false;
 	bool			fCoalesce = true;
+	BString			fHeader, fFooter;
 	bool			fInternalEdit = false;
 	mutable BString	fPlainTextCache;
 	mutable bool	fPlainTextValid = false;

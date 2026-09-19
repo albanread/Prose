@@ -6,10 +6,12 @@
 #include <Window.h>
 
 #include <cstdio>
+#include <math.h>
 #include <cstring>
 #include <algorithm>
 
 static const bigtime_t kBlinkInterval = 500000;	// 500 ms
+static const rgb_color kWhite = { 255, 255, 255, 255 };
 
 PWPageView::PWPageView(PWDocument* doc, PWLayout* layout)
 	:
@@ -72,6 +74,7 @@ PWPageView::SetZoom(float zoom)
 	fZoom = zoom;
 	ResizeTo(PagePixelWidth(), PagePixelHeight());
 	Invalidate();
+	ScrollCaretVisible();
 	if (Window())
 		Window()->PostMessage('pWup');
 }
@@ -101,6 +104,10 @@ PWPageView::Relayout()
 void
 PWPageView::Draw(BRect updateRect)
 {
+	if (fPrinting) {
+		DrawPages(Bounds());	// exactly one page, no chrome
+		return;
+	}
 	DrawPages(updateRect);
 	DrawSelection();
 	DrawCaret();
@@ -113,24 +120,47 @@ PWPageView::DrawPages(BRect updateRect)
 	FillRect(updateRect);
 
 	const PWPageSetup& setup = fLayout->PageSetup();
-	for (int32 p = 0; p < fLayout->CountPages(); p++) {
-		float top = 24 + p * (setup.pageHeight + PWLayout::Gap()) * fZoom;
-		BRect page(24, top, 24 + setup.pageWidth * fZoom,
+	int32 firstPage = 0, lastPage = fLayout->CountPages() - 1;
+	if (fPrinting) {
+		firstPage = lastPage = fPrintPage;
+	} else {
+		// only pages that touch the update rect
+		float span = (setup.pageHeight + PWLayout::Gap()) * fZoom;
+		firstPage = std::max(0L, lrint((updateRect.top - 24 - setup.pageHeight
+			* fZoom) / span));
+		lastPage = std::min(lastPage, (int32)((updateRect.bottom - 24)
+			/ span));
+		if (lastPage < firstPage)
+			lastPage = firstPage;
+	}
+	for (int32 p = firstPage; p <= lastPage; p++) {
+		float top = fPrinting ? 0 : 24 + p * (setup.pageHeight
+			+ PWLayout::Gap()) * fZoom;
+		float left = fPrinting ? 0 : 24;
+		BRect page(left, top, left + setup.pageWidth * fZoom,
 			top + setup.pageHeight * fZoom);
-		if (!page.Intersects(updateRect))
+		if (!fPrinting && !page.Intersects(updateRect))
 			continue;
 		// shadow first, page on top
-		SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), B_DARKEN_2_TINT));
-		FillRect(page.OffsetByCopy(3, 3));
-		SetHighColor(ui_color(B_DOCUMENT_BACKGROUND_COLOR));
+		if (!fPrinting) {
+			SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR),
+				B_DARKEN_2_TINT));
+			FillRect(page.OffsetByCopy(3, 3));
+		}
+		SetHighColor(fPrinting ? kWhite : ui_color(B_DOCUMENT_BACKGROUND_COLOR));
 		FillRect(page);
+		DrawHeaderFooter(p, page);
 
 		// Text lines on this page.
-		SetLowColor(ui_color(B_DOCUMENT_BACKGROUND_COLOR));
-		for (int32 li = 0; li < (int32)fLayout->Lines().size(); li++) {
+		SetLowColor(fPrinting ? kWhite : ui_color(B_DOCUMENT_BACKGROUND_COLOR));
+		int32 firstLine = 0, lineCount = 0;
+		fLayout->PageLines(p, &firstLine, &lineCount);
+		for (int32 n = 0; n < lineCount; n++) {
+			int32 li = firstLine + n;
 			const PWLayout::Line& line = fLayout->Lines()[li];
-			if (24 + line.y * fZoom < updateRect.top - 40
-				|| 24 + line.y * fZoom > updateRect.bottom + 40)
+			if (!fPrinting
+				&& (24 + line.y * fZoom < updateRect.top - 40
+					|| 24 + line.y * fZoom > updateRect.bottom + 40))
 				continue;
 			std::vector<PWLayout::Segment> segs;
 			fLayout->FillSegments(li, &segs);
@@ -144,8 +174,10 @@ PWPageView::DrawPages(BRect updateRect)
 				SetFont(&font);
 				SetHighColor(s.run->format.color);
 				if (s.length > 0) {
-					DrawString(text + s.startPara, s.length,
-						DocToView(BPoint(s.x, s.baseline)));
+					BPoint base = fPrinting
+						? BPoint(s.x * fZoom, s.baseline * fZoom)
+						: DocToView(BPoint(s.x, s.baseline));
+					DrawString(text + s.startPara, s.length, base);
 					if (s.run->format.underline) {
 						float ux = DocToView(BPoint(s.x, s.baseline)).x;
 						float uy = 24 + s.baseline * fZoom + 2 * fZoom;
@@ -156,6 +188,35 @@ PWPageView::DrawPages(BRect updateRect)
 				}
 			}
 		}
+	}
+}
+
+void
+PWPageView::DrawHeaderFooter(int32 page, BRect pageRect)
+{
+	const char* header = fDoc->HeaderText();
+	const char* footer = fDoc->FooterText();
+	if (!header[0] && !footer[0])
+		return;
+	const PWPageSetup& setup = fLayout->PageSetup();
+	SetFont(be_plain_font);
+	SetHighColor(tint_color(fPrinting ? kWhite
+		: ui_color(B_DOCUMENT_BACKGROUND_COLOR), B_DARKEN_1_TINT));
+	if (header[0]) {
+		BString text = PWDocument::ComposeHeaderText(header, page + 1,
+			fLayout->CountPages());
+		float y = pageRect.top + setup.marginTop / 2 * fZoom + 4;
+		float w = StringWidth(text.String());
+		DrawString(text.String(),
+			BPoint(pageRect.left + (pageRect.Width() - w) / 2, y));
+	}
+	if (footer[0]) {
+		BString text = PWDocument::ComposeHeaderText(footer, page + 1,
+			fLayout->CountPages());
+		float y = pageRect.bottom - setup.marginBottom / 2 * fZoom;
+		float w = StringWidth(text.String());
+		DrawString(text.String(),
+			BPoint(pageRect.left + (pageRect.Width() - w) / 2, y));
 	}
 }
 

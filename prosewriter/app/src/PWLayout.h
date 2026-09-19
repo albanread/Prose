@@ -53,6 +53,7 @@ public:
 		int32	para = 0;
 		int32	startPara = 0;		// byte offset within the paragraph
 		int32	length = 0;		// bytes on this line (no separator)
+		int32	startAbs = 0;		// document offset of startPara (cached)
 		float	x = 0, y = 0;		// origin of the line's first byte
 		float	width = 0;		// total advance (natural, un-justified)
 		float	height = 0;		// line height
@@ -60,6 +61,8 @@ public:
 		bool	last = false;	// last line of its paragraph
 	};
 	const std::vector<Line>& Lines() const { return fLines; }
+	// The lines of one page, for per-page drawing (see PWPageView).
+	void	PageLines(int32 page, int32* firstLine, int32* lineCount) const;
 
 	struct Segment {			// one styled piece of one line
 		const PWRun* run = NULL;
@@ -87,7 +90,12 @@ public:
 private:
 	void	LayoutParagraph(int32 para);
 	void	AssignLinesToPages();
+	void	CacheAbsoluteStarts();
 	BFont	FontForRun(const PWRun& run) const;
+	// Contiguous ownership: line i owns [startAbs, startAbs of line i+1);
+	// the last line owns through the document end. Trimmed trailing spaces
+	// and paragraph separators therefore always have exactly one owner.
+	int32	LineEndAbs(int32 lineIndex) const;
 	bool	LineIsJustified(int32 lineIndex) const;
 	float	SlackPerGap(int32 lineIndex) const;
 
