@@ -1,4 +1,4 @@
-From 09ba70ea44fb9af2ec364088b81d03308359f60d Mon Sep 17 00:00:00 2001
+From 4c6ee35e2795caa284f9a1f8d2ea418129e7e824 Mon Sep 17 00:00:00 2001
 From: albanread <albanread@googlemail.com>
 Date: Sat, 19 Sep 2026 19:32:26 +0100
 Subject: [PATCH] A blocklist: what the Prose image leaves out
@@ -21,14 +21,14 @@ line, in two lists, and no image gets them:
   of that package when local-packages copies it in.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-Prose-Patch: 0060-a-blocklist-what-the-prose-image-leaves-out.patch a6674ea25f7421e9ce26ff36d6f0465b9f86dec5ef47edac6fc5f561043c009e
+Prose-Patch: 0060-a-blocklist-what-the-prose-image-leaves-out.patch 1fd4fd2cf6c3a7cc2ab860b839100318413f87cad9ec07c1a6104759a130d736
 ---
  build/jam/DefaultBuildProfiles  |  4 +++
  build/jam/ImageRules            |  9 +++++
- build/jam/ProseBlocklist        | 63 +++++++++++++++++++++++++++++++++
+ build/jam/ProseBlocklist        | 64 +++++++++++++++++++++++++++++++++
  build/jam/images/HaikuImage     |  8 +++++
  build/scripts/build_haiku_image |  9 +++++
- 5 files changed, 93 insertions(+)
+ 5 files changed, 94 insertions(+)
  create mode 100644 build/jam/ProseBlocklist
 
 diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
@@ -72,10 +72,10 @@ index 52a724f86c..fccb777342 100644
  			Echo "AddHaikuImagePackages: package" $(package)
 diff --git a/build/jam/ProseBlocklist b/build/jam/ProseBlocklist
 new file mode 100644
-index 0000000000..1eec12ad0f
+index 0000000000..b0c152df32
 --- /dev/null
 +++ b/build/jam/ProseBlocklist
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,64 @@
 +# What the Prose image leaves out (Prose fork): of no use on Prose, or
 +# crashing. Two lists, one name a line, with what it is.
 +#
@@ -115,6 +115,7 @@ index 0000000000..1eec12ad0f
 +	cdplayer			# CDPlayer
 +	phantomlimb			# PhantomLimb
 +	taskmanager			# TaskManager
++	fairtrade			# fairtrade, a point of sale system
 +	;
 +
 +PROSE_BLOCKED_APPS =
