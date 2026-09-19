@@ -1441,6 +1441,14 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     }
 }
 
+ProseCommand.register()      // applescript.swift: keep the scripting class in the binary
+if args.contains("--scripting-check") {
+    let registry = NSScriptSuiteRegistry.shared()
+    log("scripting: suites \(registry.suiteNames)")
+    for suite in registry.suiteNames {
+        log("scripting:   \(suite): commands \((registry.commandDescriptions(inSuite: suite) ?? [:]).keys.sorted())")
+    }
+}
 let app = NSApplication.shared
 app.setActivationPolicy(headless ? .prohibited : .regular)
 NSWindow.allowsAutomaticWindowTabbing = false

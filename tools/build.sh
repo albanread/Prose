@@ -45,6 +45,9 @@ build_app() {
 	mv -f "$exe.new" "$exe"
 	sed "s/@VERSION@/$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)/" \
 		"$src/Info.plist" > "$app/Contents/Info.plist"
+	# the scripting dictionary: AppleScript, Shortcuts and osascript read this
+	mkdir -p "$app/Contents/Resources"
+	cp "$src/Prose.sdef" "$app/Contents/Resources/Prose.sdef"
 	codesign --force -s - --entitlements "$ENT" "$app"
 	rm -f "$OUT/hvgpu"
 	printf '#!/bin/sh\n# hvgpu runs as the Prose app: see tools/build.sh\nexec "$(dirname "$0")/../Prose.app/Contents/MacOS/hvgpu" "$@"\n' \

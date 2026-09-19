@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!--
+  The Prose scripting dictionary: what Script Editor, Shortcuts, osascript and
+  prose(1) can ask for. Every verb here is one call into the automation core
+  (tools/hvgpu/automation.swift), so the vocabulary and the implementation
+  cannot drift apart. docs/automation.md.
+
+  Nothing works until the owner allows it in Machine > Allow Automation and
+  Testing, and macOS asks separately before each application may send these
+  events at all.
+-->
+<!-- CocoaStandard.sdef is deliberately not XIncluded here. Cocoa's own runtime
+     registry does not resolve an XInclude, and a file it cannot load it drops
+     whole and without complaint, leaving the standard suite answering (Cocoa
+     supplies that one internally) while every verb below returns nothing at
+     all: a successful, empty reply, which is a hard thing to read backwards. -->
+<dictionary title="Prose">
+    <suite name="Prose Suite" code="Pros" description="Driving a Prose machine.">
+
+        <record-type name="command result" code="Prcr"
+            description="What a command run inside the machine did.">
+            <property name="status" code="Psts" type="integer"
+                description="The command's own exit status. 0 is success.">
+                <cocoa key="status"/>
+            </property>
+            <property name="output" code="Pout" type="text" description="What it wrote to stdout.">
+                <cocoa key="stdout"/>
+            </property>
+            <property name="errors" code="Perr" type="text" description="What it wrote to stderr.">
+                <cocoa key="stderr"/>
+            </property>
+        </record-type>
+
+        <enumeration name="presenter mode" code="Ppmd">
+            <enumerator name="native" code="Pnat"
+                description="One guest pixel per screen pixel."/>
+            <enumerator name="crisp" code="Pcrp"
+                description="The window's point size, magnified as blocks."/>
+            <enumerator name="smooth" code="Psmo"
+                description="The window's point size, interpolated."/>
+        </enumeration>
+
+        <class name="application" code="capp"
+            description="Prose itself.">
+            <cocoa class="NSApplication"/>
+            <property name="state" code="Psta" type="text" access="r"
+                description="off, starting, running, paused, stopping or error.">
+                <cocoa key="proseState"/>
+            </property>
+            <property name="display size" code="Psiz" type="list" access="r"
+                description="The guest's screen, in its own pixels: {width, height}.">
+                <cocoa key="proseDisplaySize"/>
+            </property>
+            <property name="presenter mode" code="Ppre" type="presenter mode"
+                description="How the guest's pixels reach the screen.">
+                <cocoa key="prosePresenterMode"/>
+            </property>
+            <property name="guest address" code="Padr" type="text" access="r"
+                description="The machine's address on its own network, once it has one.">
+                <cocoa key="proseGuestAddress"/>
+            </property>
+            <property name="automation allowed" code="Paut" type="boolean" access="r"
+                description="Whether the owner has allowed automation and testing.">
+                <cocoa key="proseAutomationAllowed"/>
+            </property>
+        </class>
+
+        <command name="start" code="Prosstrt" description="Start the machine.">
+            <cocoa class="ProseCommand"/>
+            <result type="text"/>
+        </command>
+        <command name="shut down" code="Prosshtd" description="Ask the machine to shut down.">
+            <cocoa class="ProseCommand"/>
+            <result type="text"/>
+        </command>
+        <command name="restart" code="Prosrstr" description="Ask the machine to restart.">
+            <cocoa class="ProseCommand"/>
+            <result type="text"/>
+        </command>
+        <command name="force stop" code="Prosfstp" description="Stop the machine without asking it.">
+            <cocoa class="ProseCommand"/>
+            <result type="text"/>
+        </command>
+        <command name="pause" code="Prospaus" description="Pause the machine.">
+            <cocoa class="ProseCommand"/>
+            <result type="text"/>
+        </command>
+        <command name="resume" code="Prosresm" description="Let a paused machine run again.">
+            <cocoa class="ProseCommand"/>
+            <result type="text"/>
+        </command>
+
+        <command name="type" code="Prostype" description="Type text at the machine.">
+            <cocoa class="ProseCommand"/>
+            <direct-parameter type="text" description="The text to type."/>
+            <result type="text"/>
+        </command>
+        <command name="press" code="Prospres" description="Press one key.">
+            <cocoa class="ProseCommand"/>
+            <direct-parameter type="text" description="A key name: return, escape, tab, f1, a."/>
+            <parameter name="with modifiers" code="Pmod" type="text" optional="yes"
+                description="shift, control, command, option, joined by +.">
+                <cocoa key="modifiers"/>
+            </parameter>
+            <result type="text"/>
+        </command>
+        <command name="click" code="Prosclik" description="Click in the machine's screen.">
+            <cocoa class="ProseCommand"/>
+            <direct-parameter type="list" description="Where, in guest pixels: {x, y}."/>
+            <parameter name="button" code="Pbtn" type="text" optional="yes"
+                description="left (the default), right or middle.">
+                <cocoa key="button"/>
+            </parameter>
+            <result type="text"/>
+        </command>
+
+        <command name="capture" code="Proscapt" description="Save a picture of the machine's screen.">
+            <cocoa class="ProseCommand"/>
+            <parameter name="to" code="Ppth" type="file" description="Where to write the PNG.">
+                <cocoa key="path"/>
+            </parameter>
+            <result type="text"/>
+        </command>
+
+        <command name="execute" code="Prosexec"
+            description="Run a command inside the machine and return what it did.">
+            <cocoa class="ProseCommand"/>
+            <direct-parameter type="text" description="The command line."/>
+            <result type="command result"/>
+        </command>
+        <command name="guest info" code="Prosinfo"
+            description="What the machine says about itself.">
+            <cocoa class="ProseCommand"/>
+            <result type="record"/>
+        </command>
+        <command name="ping" code="Prosping" description="Ask whether the machine is answering.">
+            <cocoa class="ProseCommand"/>
+            <result type="text"/>
+        </command>
+
+        <command name="wait for" code="Proswait"
+            description="Wait until something is true, or until the time runs out.">
+            <cocoa class="ProseCommand"/>
+            <direct-parameter type="text"
+                description="booted, desktop, guest, picture, address, idle, drawn or state."/>
+            <parameter name="timeout" code="Ptmo" type="integer" optional="yes"
+                description="Seconds to wait. 120 by default.">
+                <cocoa key="timeout"/>
+            </parameter>
+            <parameter name="value" code="Pval" type="text" optional="yes"
+                description="For state: which state to wait for.">
+                <cocoa key="value"/>
+            </parameter>
+            <result type="text"/>
+        </command>
+    </suite>
+</dictionary>
