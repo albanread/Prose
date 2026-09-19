@@ -57,6 +57,7 @@ gtimeout 300 qemu-system-aarch64 -M virt -cpu host -accel hvf -smp 4 -m 2G \
 	-bios /opt/homebrew/share/qemu/edk2-aarch64-code.fd -no-reboot \
 	-drive "if=none,file=$IMG,format=raw,id=hd0" -device virtio-blk-pci,drive=hd0 \
 	-device virtio-keyboard-pci -device virtio-tablet-pci -device ramfb \
+	-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 	-serial "file:$WORK/serial.log" -display none || echo ">>> (qemu ended: $?)"
 
 rm -f "$WORK/probe.txt"

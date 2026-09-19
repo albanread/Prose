@@ -1278,6 +1278,24 @@ class Builder:
 			(sysroot / 'boot' / 'system' / '.PackageInfo').unlink(missing_ok=True)
 			# runtime requirements of what we just activated
 			todo += entries(dep.key('REQUIRES', psuffix))
+		self._link_package_dir(port, sysroot)
+
+	def _link_package_dir(self, port, sysroot):
+		"""/packages/<name>-<version>-<revision>/ in the sysroot, as packagefs
+		makes it on Haiku for an activated package: .self and .settings, and a
+		link per requirement named as packagefs names them (ca_root_certificates,
+		lib~libz, cmd~perl, devel~libcurl). Every activated package is merged
+		into the sysroot's boot/system, so all of them point there."""
+		links = sysroot / 'packages' / ('%s-%s-%s' % (port.name, port.version, port.revision))
+		rmtree(links)
+		links.mkdir(parents=True)
+		os.symlink('../../boot/system', links / '.self')
+		os.symlink('../../boot/system/settings', links / '.settings')
+		for key in ('BUILD_REQUIRES', 'REQUIRES', 'BUILD_PREREQUIRES'):
+			for e in entries(port.keys.get(key)):
+				name = entry_name(e).replace(':', '~')
+				if name and not (links / name).exists():
+					os.symlink('../../boot/system', links / name)
 
 	def _host_command(self, name):
 		path = ':'.join([str(ENV_DIR / 'bin'), str(HOSTTOOLS / 'bin')] + HOST_PATH)
@@ -1436,7 +1454,10 @@ class Builder:
 		prefix = str(destdir) + '/boot/system' if install else '/boot/system'
 		extra = {'proseInInstall': '1' if install else '0',
 			'proseSubpackagesDir': str(work / 'sub'),
-			'portPackageLinksDir': str(work / 'package-links' / port.name),
+			# packagefs's links directory for the port, as on Haiku: recipes bake
+			# it into binaries (curl's CA bundle) and scripts; the sysroot has the
+			# same directory, so compile-time lookups through the wrappers work
+			'portPackageLinksDir': '/packages/%s-%s-%s' % (port.name, port.version, port.revision),
 			'workDir': str(work), 'hostPrefix': str(work / 'host' / 'prefix')}
 		if host:
 			extra.update(host_extra)
@@ -1444,11 +1465,6 @@ class Builder:
 			extra['sourceDir' if index == '1' else 'sourceDir' + index] = str(sdir)
 		variables = shell_variables(port.name, port.version, port.revision, port.recipe,
 			prefix, extra)
-		links = work / 'package-links' / port.name
-		links.mkdir(parents=True, exist_ok=True)
-		if not (links / '.self').exists():
-			(destdir / 'boot' / 'system').mkdir(parents=True, exist_ok=True)
-			os.symlink(destdir / 'boot' / 'system', links / '.self')
 		script = '#!%s\nset -e\n' % BASH
 		script += shell_setters(variables)
 		script += 'declare -a PROSE_DEBUG_INFO_PATHS=()\n'
@@ -1505,9 +1521,10 @@ class Builder:
 
 	def _scrub_host_paths(self, roots, log):
 		"""Recipes that write files in INSTALL (.pc files from a heredoc over
-		$prefix, ...) see the staging paths: map every staging root back to
-		/boot/system, and host tool paths to Haiku's. Text files and symlink
-		targets only; binaries that embed a staging path are reported."""
+		$prefix, ...) see the staging paths, and configure's flags carry the
+		sysroot: map every staging root and the sysroot back to /boot/system,
+		and host tool paths to Haiku's. Text files and symlink targets only;
+		binaries that embed a staging path are reported."""
 		# every staging root in every tree: packageEntries moves files that
 		# INSTALL wrote into destdir (with destdir paths) to sub/<suffix>
 		roots = [r for r in roots if r.is_dir()]
@@ -1516,6 +1533,12 @@ class Builder:
 			pairs += [((str(root) + '/boot/system').encode(), b'/boot/system'),
 				(str(root).encode() + b'/', b'/')]
 		pairs += [(a.encode(), b.encode()) for a, b in self.HOST_TOOL_PATHS]
+		# the build sysroot too: configure's -L/-I flags end up in *.pc files
+		# and *-config scripts (libcurl.pc, curl-config, fluidlite.pc)
+		sysroot = str(roots[0].parent / 'sysroot') if roots else None
+		if sysroot and os.path.isdir(sysroot):
+			pairs += [((sysroot + '/boot/system').encode(), b'/boot/system'),
+				(sysroot.encode() + b'/', b'/')]
 		prefixes = tuple(str(root) + '/' for root in roots)
 		for root in roots:
 			for path in sorted(root.rglob('*')):
