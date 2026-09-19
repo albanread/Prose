@@ -65,14 +65,41 @@ func option(_ name: String) -> String? {
     guard let i = args.lastIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-guard args.count >= 2, !args[1].hasPrefix("--") else {
+/// The installed machine: ~/Library/Application Support/Prose/Machines/Prose.image.
+///
+/// An installed copy is double-clicked, not given a disk on a command line, and
+/// an application that exits 64 when launched that way is not an application --
+/// it also cannot be scripted or opened by anything that asks the system to
+/// launch it. The first run copies the machine out of the bundle; after that it
+/// is the user's, and reinstalling does not touch it.
+func installedMachine() -> String? {
+    let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    let folder = support.appendingPathComponent("Prose/Machines", isDirectory: true)
+    let disk = folder.appendingPathComponent("Prose.image")
+    if FileManager.default.fileExists(atPath: disk.path) { return disk.path }
+    guard let template = Bundle.main.url(forResource: "prose", withExtension: "image") else { return nil }
+    do {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: template, to: disk)
+        FileManager.default.createFile(atPath: folder.appendingPathComponent(".firstrun").path, contents: nil)
+        return disk.path
+    } catch {
+        return nil
+    }
+}
+
+var diskArgument: String? = args.count >= 2 && !args[1].hasPrefix("--") ? args[1] : nil
+if diskArgument == nil { diskArgument = installedMachine() }
+guard let diskPath = diskArgument else {
     print("usage: hvgpu <disk.img> [--size WxH] [--efivars path] [--cpus n] "
         + "[--memory GiB] [--seconds n] [--grace n] [--serial path] [--nested] [--no-net] [--headless]")
+    print("with no disk, Prose uses ~/Library/Application Support/Prose/Machines/Prose.image,")
+    print("copying it out of the application on the first run. This copy has no machine in it.")
     exit(64)
 }
 
-let diskURL = URL(fileURLWithPath: args[1])
-let varsURL = URL(fileURLWithPath: option("--efivars") ?? args[1] + ".efivars")
+let diskURL = URL(fileURLWithPath: diskPath)
+let varsURL = URL(fileURLWithPath: option("--efivars") ?? diskPath + ".efivars")
 let cpus = Int(option("--cpus") ?? "4") ?? 4
 let memoryGiB = UInt64(option("--memory") ?? "4") ?? 4
 let dims = (option("--size") ?? "1280x800").split(separator: "x").compactMap { Int($0) }
