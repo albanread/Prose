@@ -5,84 +5,205 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 
 | port | version | result | packages / error |
 |---|---|---|---|
+| 2048 | 1.1.1-1 | built | 2048-1.1.1-1-arm64.hpkg |
+| 3dmov | 0.2-2 | failed | mesa failed: llvm12 failed: setuptools failed: INSTALL phase failed (exit 127) (log: /Volumes/HaikuSrc/prose-packages/logs/setuptools.log) (log: /Volumes/HaikuS |
+| admesh | 0.98.5-2 | built | admesh-0.98.5-2-arm64.hpkg, admesh_devel-0.98.5-2-arm64.hpkg |
+| agg | 2.7.0~r139-1 | failed | libsdl failed: mesa failed earlier in this run (log: /Volumes/HaikuSrc/prose-packages/logs/libsdl.log) |
 | album | 0.9.4-7 | failed | BUILD phase failed (exit 2) |
 | artpaint | 2.8-1 | built | artpaint-2.8-1-arm64.hpkg |
+| attrify | 1.0.2-1 | built | attrify-1.0.2-1-arm64.hpkg |
 | autoconf_archive | 2024.10.16-1 | built | autoconf_archive-2024.10.16-1-any.hpkg |
+| batchrename | 0.2.0-1 | failed | BUILD phase failed (exit 2) |
 | bc | 1.07.1-2 | built | bc-1.07.1-2-arm64.hpkg |
+| bdhcalc | 1.1-3 | built | bdhcalc-1.1-3-arm64.hpkg |
+| beacon | 27-2 | failed | clucene failed: boost1.83 failed: INSTALL phase failed (exit 126) (log: /Volumes/HaikuSrc/prose-packages/logs/boost1.83.log) (log: /Volumes/HaikuSrc/prose-packa |
+| bebattle | 1.0.0-3 | built | bebattle-1.0.0-3-arm64.hpkg |
+| becasso | 2.0-8 | failed | BUILD phase failed (exit 1) |
+| becheckers | 1.0.1-3 | built | becheckers-1.0.1-3-arm64.hpkg |
 | belife | 1.0.0-2 | failed | BUILD phase failed (exit 2) |
+| bemines | 1.2.1-1 | failed | BUILD phase failed (exit 2) |
+| benettris | 0.2-1 | failed | BUILD phase failed (exit 2) |
 | bepdf | 2.1.4-6 | built | bepdf-2.1.4-6-arm64.hpkg |
+| bepodder | 1.5.0-4 | failed | libxml2 failed: python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) (log: /Volumes/HaikuSrc/prose-package |
+| beshare | 3.04-3 | built | beshare-3.04-3-arm64.hpkg |
 | besol | 2.0.5-5 | failed | BUILD phase failed (exit 1) |
 | bespider | 0.1.1-1 | built | bespider-0.1.1-1-arm64.hpkg |
+| bevexed | 20141224-5 | failed | BUILD phase failed (exit 2) |
 | bong | 1.4~git-2 | built | bong-1.4~git-2-arm64.hpkg |
+| boost1.83 | 1.83.0-5 | failed | INSTALL phase failed (exit 126) |
+| bsnow | 1.0.0-5 | built | bsnow-1.0.0-5-arm64.hpkg |
+| butterfly | 1.6.2-2 | failed | BUILD phase failed (exit 2) |
 | bzip2 | 1.0.8-3 | built | bzip2-1.0.8-3-arm64.hpkg, bzip2_devel-1.0.8-3-arm64.hpkg |
 | ca_root_certificates | 2026_07_16-1 | built | ca_root_certificates-2026_07_16-1-any.hpkg |
 | calc | 2.12.7.2-1 | failed | BUILD phase failed (exit 2) |
 | calendar | 0.1-3 | failed | BUILD phase failed (exit 2) |
 | capitalbe | 2.3.2-1 | built | capitalbe-2.3.2-1-arm64.hpkg |
+| catkeyseditor | 0.1.2-3 | built | catkeyseditor-0.1.2-3-arm64.hpkg |
+| cdplayer | 1.0-1 | built | cdplayer-1.0-1-arm64.hpkg |
+| clipdinger | 1.2.4-2 | built | clipdinger-1.2.4-2-arm64.hpkg |
+| clucene | 2.3.3.4-4 | failed | boost1.83 failed: INSTALL phase failed (exit 126) (log: /Volumes/HaikuSrc/prose-packages/logs/boost1.83.log) |
 | codec_check | 1.0-4 | built | codec_check-1.0-4-arm64.hpkg |
+| colors | 2.3-6 | failed | BUILD phase failed (exit 2) |
+| commandtimer | 0.3.1-1 | built | commandtimer-0.3.1-1-arm64.hpkg |
+| connect4 | 1.0.0-1 | built | connect4-1.0.0-1-arm64.hpkg |
 | copynametoclipboard | 1.0.1-3 | built | copynametoclipboard-1.0.1-3-arm64.hpkg |
+| curl | 8.22.0-3 | built | curl-8.22.0-3-arm64.hpkg, curl_devel-8.22.0-3-arm64.hpkg |
 | dav1d | 1.5.4-2 | built | dav1d-1.5.4-2-arm64.hpkg, dav1d_devel-1.5.4-2-arm64.hpkg |
+| deskbareyes | 0.1.1-2 | built | deskbareyes-0.1.1-2-arm64.hpkg |
 | desknotes | 1.2.1-1 | built | desknotes-1.2.1-1-arm64.hpkg |
+| diffutils | 3.12-1 | failed | BUILD phase failed (exit 1) |
 | dynamate | 1.0.0-2 | built | dynamate-1.0.0-2-arm64.hpkg |
+| einsteinium | 1.4.1a-4 | failed | libxml2 failed: python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) (log: /Volumes/HaikuSrc/prose-package |
+| feedgator | 2.4.release-1 | built | feedgator-2.4.release-1-any.hpkg |
+| filecropper | 1-3 | built | filecropper-1-3-arm64.hpkg |
 | filer | 1.4.0-2 | built | filer-1.4.0-2-arm64.hpkg |
 | flac | 1.5.0-1 | built | flac-1.5.0-1-arm64.hpkg, flac_devel-1.5.0-1-arm64.hpkg, flac_tools-1.5.0-1-arm64.hpkg |
 | fontboy | 0.9.8-1 | built | fontboy-0.9.8-1-arm64.hpkg |
+| friss | 0.9.0-1 | failed | BUILD phase failed (exit 1) |
 | ftppositive | 1.2.2-8 | built | ftppositive-1.2.2-8-arm64.hpkg |
+| functionplotter | 0.9.2-1 | failed | BUILD phase failed (exit 2) |
+| gcc | 13.3.0_2023_08_10-6 | failed | gmp failed: cannot download gmp-6.3.0.tar.xz (log: /Volumes/HaikuSrc/prose-packages/logs/gmp.log) |
+| genesis_commander | 0.49-1 | built | genesis_commander-0.49-1-arm64.hpkg |
 | gettext | 1.0-1 | built | gettext-1.0-1-arm64.hpkg, gettext_devel-1.0-1-arm64.hpkg, gettext_doc-1.0-1-any.hpkg, gettext_libintl-1.0-1-arm64.hpkg, gettext_libintl_devel-1.0-1-arm64.hpkg |
 | giflib | 5.2.2-1 | built | giflib-5.2.2-1-arm64.hpkg, giflib_devel-5.2.2-1-arm64.hpkg, giflib_tools-5.2.2-1-arm64.hpkg |
+| glm | 1.0.3-1 | built | glm-1.0.3-1-arm64.hpkg, glm_devel-1.0.3-1-arm64.hpkg, glm_doc-1.0.3-1-any.hpkg |
+| gmp | 6.3.0-1 | failed | cannot download gmp-6.3.0.tar.xz |
+| gtest | 1.17.0-1 | built | gtest-1.17.0-1-arm64.hpkg, gtest_devel-1.17.0-1-arm64.hpkg |
+| gzip | 1.14-1 | built | gzip-1.14-1-arm64.hpkg |
+| haikuplot | 1.0.1-1 | built | haikuplot-1.0.1-1-arm64.hpkg |
+| haikuwebsearch | 0~git-1 | built | haikuwebsearch-0~git-1-arm64.hpkg |
 | hexvexed | 1.8-1 | built | hexvexed-1.8-1-arm64.hpkg |
 | interface_elements | 1.0-2 | built | interface_elements-1.0-2-arm64.hpkg, interface_elements_devel-1.0-2-arm64.hpkg |
+| keymapswitcher | 1.2.7.16-1 | failed | BUILD phase failed (exit 2) |
+| koder | 0.6.0-2 | failed | yaml_cpp0.8 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/yaml_cpp0.8.log) |
+| kottan | 1.0.1-2 | failed | checksum mismatch for 1.0.1.tar.gz |
 | lame | 3.100-4 | built | lame-3.100-4-arm64.hpkg, lame_devel-3.100-4-arm64.hpkg |
+| launchpad | 1.3~git-1 | failed | libprefs failed: gcc failed: gmp failed: cannot download gmp-6.3.0.tar.xz (log: /Volumes/HaikuSrc/prose-packages/logs/gmp.log) (log: /Volumes/HaikuSrc/prose-pac |
 | lcms | 2.19.1-1 | built | lcms-2.19.1-1-arm64.hpkg, lcms_devel-2.19.1-1-arm64.hpkg, lcms_tools-2.19.1-1-arm64.hpkg |
+| lexilla | 5.4.6-1 | built | lexilla-5.4.6-1-arm64.hpkg, lexilla_devel-5.4.6-1-arm64.hpkg |
+| lib3ds | 2.0.0-2 | failed | cannot download d477b7dc451ec88a739cc28e6d9a7564123569d0.tar.gz |
 | libedit | 20230828_3.1-1 | built | libedit-20230828_3.1-1-arm64.hpkg, libedit_devel-20230828_3.1-1-arm64.hpkg |
 | libffi | 3.4.6-1 | built | libffi-3.4.6-1-arm64.hpkg, libffi_devel-3.4.6-1-arm64.hpkg |
 | libiconv | 1.18-1 | built | libiconv-1.18-1-arm64.hpkg, libiconv_devel-1.18-1-arm64.hpkg |
+| libidn2 | 2.0.5-4 | built | libidn2-2.0.5-4-arm64.hpkg, libidn2_devel-2.0.5-4-arm64.hpkg |
 | libiptcdata | 1.0.4-4 | built | libiptcdata-1.0.4-4-arm64.hpkg, libiptcdata_devel-1.0.4-4-arm64.hpkg |
 | libjpeg_turbo | 3.1.4.1-1 | built | libjpeg_turbo-3.1.4.1-1-arm64.hpkg, libjpeg_turbo_devel-3.1.4.1-1-arm64.hpkg, libjpeg_turbo_tools-3.1.4.1-1-arm64.hpkg |
+| liblayout | 1.4.1-10 | failed | checksum mismatch for 1f9119e3dee5ff582d0e7b673be4f8d614f403ad.tar.gz |
 | libogg | 1.3.6-2 | built | libogg-1.3.6-2-arm64.hpkg, libogg_devel-1.3.6-2-arm64.hpkg |
 | libpcre | 8.45-3 | built | libpcre-8.45-3-arm64.hpkg, libpcre_devel-8.45-3-arm64.hpkg |
 | libpng16 | 1.6.53-1 | built | libpng16-1.6.53-1-arm64.hpkg, libpng16_devel-1.6.53-1-arm64.hpkg |
+| libprefs | 1.2.5-6 | failed | gcc failed: gmp failed: cannot download gmp-6.3.0.tar.xz (log: /Volumes/HaikuSrc/prose-packages/logs/gmp.log) (log: /Volumes/HaikuSrc/prose-packages/logs/gcc.lo |
+| libpsl | 0.21.5-1 | built | libpsl-0.21.5-1-arm64.hpkg, libpsl_devel-0.21.5-1-arm64.hpkg |
+| libsanta | 3.0.2-1 | failed | BUILD phase failed (exit 2) |
+| libsdl | 1.2.15-19 | failed | mesa failed earlier in this run |
+| libssh2 | 1.11.1-1 | built | libssh2-1.11.1-1-arm64.hpkg, libssh2_devel-1.11.1-1-arm64.hpkg |
 | libtheora | 1.1.1-8 | built | libtheora-1.1.1-8-arm64.hpkg, libtheora_devel-1.1.1-8-arm64.hpkg |
 | libtool | 2.5.4-1 | built | libtool-2.5.4-1-arm64.hpkg, libtool_libltdl-2.5.4-1-arm64.hpkg |
+| libunistring | 1.3-1 | built | libunistring-1.3-1-arm64.hpkg, libunistring_devel-1.3-1-arm64.hpkg, libunistring_doc-1.3-1-any.hpkg |
 | libvorbis | 1.3.7-1 | built | libvorbis-1.3.7-1-arm64.hpkg, libvorbis_devel-1.3.7-1-arm64.hpkg |
 | libvpx | 1.13.1-1 | built | libvpx-1.13.1-1-arm64.hpkg, libvpx_bin-1.13.1-1-arm64.hpkg, libvpx_devel-1.13.1-1-arm64.hpkg |
 | libwalter | 102-1 | built | libwalter-102-1-arm64.hpkg |
 | libwebp | 1.6.0-3 | built | libwebp-1.6.0-3-arm64.hpkg, libwebp_devel-1.6.0-3-arm64.hpkg, libwebp_tools-1.6.0-3-arm64.hpkg |
-| libxml2 | 2.15.3-1 | failed | python3.14 failed: openssl3 failed: BUILD phase failed (exit 2) (log: /Volumes/HaikuSrc/prose-packages/logs/openssl3.log) (log: /Volumes/HaikuSrc/prose-packages |
+| libxml2 | 2.15.3-1 | failed | python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) |
+| lightsoff | 1.1-1 | built | lightsoff-1.1-1-arm64.hpkg |
 | lingua | 2.0.0-1 | built | lingua-2.0.0-1-arm64.hpkg |
+| llvm12 | 12.0.1-8 | failed | setuptools failed: INSTALL phase failed (exit 127) (log: /Volumes/HaikuSrc/prose-packages/logs/setuptools.log) |
+| lnlauncher | 1.1.2-7 | failed | checksum mismatch for ddd60a641c31.zip |
 | lz4 | 1.9.4-2 | built | lz4-1.9.4-2-arm64.hpkg, lz4_devel-1.9.4-2-arm64.hpkg |
+| masterpiece | r742-2 | failed | python3.10 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.10.log) |
+| memochip | 1.3~git-1 | failed | command failed (1): /Volumes/HaikuSrc/prose-packages/hosttools/bin/package create /Volumes/HaikuSrc/prose-packages/repo/memochip-1.3~git-1-arm64.hpkg |
+| mesa | 22.0.5-3 | failed | llvm12 failed: setuptools failed: INSTALL phase failed (exit 127) (log: /Volumes/HaikuSrc/prose-packages/logs/setuptools.log) (log: /Volumes/HaikuSrc/prose-pack |
 | mev | 0.9.0-4 | failed | BUILD phase failed (exit 2) |
+| midikeyboard | 1.0.0-5 | built | midikeyboard-1.0.0-5-arm64.hpkg |
 | midisynth | 1.8.1-1 | failed | BUILD phase failed (exit 2) |
 | minesweeper | 20150109-5 | built | minesweeper-20150109-5-arm64.hpkg |
+| mkdepend | 1.7-5 | failed | command failed (128): git add -A -f . |
 | mpg123 | 1.32.9-1 | built | mpg123-1.32.9-1-arm64.hpkg, mpg123_devel-1.32.9-1-arm64.hpkg |
+| nanodot | 1.1b-1 | failed | BUILD phase failed (exit 2) |
+| netpulse | 0.2.3-9 | built | netpulse-0.2.3-9-arm64.hpkg |
+| nghttp2 | 1.63.0-1 | built | nghttp2-1.63.0-1-arm64.hpkg, nghttp2_devel-1.63.0-1-arm64.hpkg |
+| noto_sans_cjk | 2.004-2 | built | noto_sans_cjk-2.004-2-any.hpkg, noto_sans_cjk_hk-2.004-2-any.hpkg, noto_sans_cjk_jp-2.004-2-any.hpkg, noto_sans_cjk_kr-2.004-2-any.hpkg, noto_sans_cjk_sc-2.004-2-any.hpkg, noto_sans_cjk_tc-2.004-2-any.hpkg |
 | openjpeg | 2.5.4-1 | built | openjpeg-2.5.4-1-arm64.hpkg, openjpeg_devel-2.5.4-1-arm64.hpkg |
 | openssl3 | 3.5.8-2 | built | openssl3-3.5.8-2-arm64.hpkg, openssl3_devel-3.5.8-2-arm64.hpkg, openssl3_man-3.5.8-2-any.hpkg |
 | opus | 1.3.1-2 | built | opus-1.3.1-2-arm64.hpkg, opus_devel-1.3.1-2-arm64.hpkg |
+| organizer | 0.1-3 | failed | mesa failed earlier in this run |
 | paladin | 2.9-2 | failed | BUILD phase failed (exit 255) |
-| pe | 2.5.0-1 | failed | BUILD phase failed (exit 1) |
+| pe | 2.5.0-1 | built | pe-2.5.0-1-arm64.hpkg |
 | pecobeat | 1.0-2 | built | pecobeat-1.0-2-arm64.hpkg |
 | pecorename | 2.1.2-1 | built | pecorename-2.1.2-1-arm64.hpkg |
 | peek | 20140206-1 | failed | BUILD phase failed (exit 2) |
+| peggy | 0.7.5-2 | built | peggy-0.7.5-2-arm64.hpkg |
 | phantomlimb | 1-5 | built | phantomlimb-1-5-arm64.hpkg |
 | ponpokodiff | 0.5.2-1 | built | ponpokodiff-0.5.2-1-arm64.hpkg |
-| python3.14 | 3.14.7-1 | failed | openssl3 failed: BUILD phase failed (exit 2) (log: /Volumes/HaikuSrc/prose-packages/logs/openssl3.log) |
+| puri | 0.3.9.2-1 | failed | lib3ds failed: cannot download d477b7dc451ec88a739cc28e6d9a7564123569d0.tar.gz (log: /Volumes/HaikuSrc/prose-packages/logs/lib3ds.log) |
+| python3.10 | 3.10.21-1 | failed | BUILD phase failed (exit 1) |
+| python3.14 | 3.14.7-1 | failed | BUILD phase failed (exit 1) |
+| querywatcher | 1.4-6 | built | querywatcher-1.4-6-arm64.hpkg |
+| quicklaunch | 1.9-1 | failed | checksum mismatch for v1.9.tar.gz |
+| randomizer | 1.2.2-1 | failed | BUILD phase failed (exit 2) |
 | readline | 8.3.003-1 | built | readline-8.3.003-1-arm64.hpkg, readline_devel-8.3.003-1-arm64.hpkg |
+| remember | 1.0.0-2 | built | remember-1.0.0-2-arm64.hpkg |
+| rename | 3.9.0-4 | built | rename-3.9.0-4-arm64.hpkg |
 | resourceedit | 1.0_git-1 | failed | BUILD phase failed (exit 2) |
+| resourcer | 3.0-2 | failed | BUILD phase failed (exit 2) |
+| runprogram | 1.0rc1-3 | failed | BUILD phase failed (exit 2) |
+| samedi | 1.2-1 | built | samedi-1.2-1-arm64.hpkg |
+| sane_backends | 1.3.1-4 | failed | curl failed earlier in this run |
+| sanity | 0.6-8 | failed | sane_backends failed: curl failed earlier in this run (log: /Volumes/HaikuSrc/prose-packages/logs/sane_backends.log) |
+| scintilla | 5.3.4-2 | built | scintilla-5.3.4-2-arm64.hpkg, scintilla_devel-5.3.4-2-arm64.hpkg |
+| screensavers_ai | 1.1-2 | failed | mesa failed: llvm12 failed: setuptools failed: INSTALL phase failed (exit 127) (log: /Volumes/HaikuSrc/prose-packages/logs/setuptools.log) (log: /Volumes/HaikuS |
+| scriptureguide | 0.9.1.1-1 | failed | sword failed: clucene failed earlier in this run (log: /Volumes/HaikuSrc/prose-packages/logs/sword.log) |
+| seeker | 1.0-7 | failed | libsanta failed: BUILD phase failed (exit 2) (log: /Volumes/HaikuSrc/prose-packages/logs/libsanta.log) |
 | sequitur | 2.2.0-4 | failed | BUILD phase failed (exit 2) |
+| setuptools | 82.0.1-1 | failed | INSTALL phase failed (exit 127) |
+| shredder | 1.0.0-3 | built | shredder-1.0.0-3-arm64.hpkg |
 | slayer | 1.0-2 | built | slayer-1.0-2-arm64.hpkg |
 | speex | 1.2.1-2 | built | speex-1.2.1-2-arm64.hpkg, speex_devel-1.2.1-2-arm64.hpkg |
 | speexdsp | 1.2.1-1 | built | speexdsp-1.2.1-1-arm64.hpkg, speexdsp_devel-1.2.1-1-arm64.hpkg |
 | sqlite | 3.53.4.0-1 | built | sqlite-3.53.4.0-1-arm64.hpkg, sqlite_devel-3.53.4.0-1-arm64.hpkg |
+| stlover | 1.0.1-1 | failed | mesa failed earlier in this run |
 | streamradio | 1.0.0-8 | failed | libxml2 failed: python3.14 failed: openssl3 failed: BUILD phase failed (exit 2) (log: /Volumes/HaikuSrc/prose-packages/logs/openssl3.log) (log: /Volumes/HaikuSr |
+| sum_it | 0.2beta-8 | failed | BUILD phase failed (exit 2) |
+| superfreecell | 0.1.0-5 | failed | BUILD phase failed (exit 1) |
+| svgear | 1.0.2-1 | failed | agg failed: libsdl failed: mesa failed earlier in this run (log: /Volumes/HaikuSrc/prose-packages/logs/libsdl.log) (log: /Volumes/HaikuSrc/prose-packages/logs/a |
+| sword | 1.8.1-7 | failed | clucene failed earlier in this run |
+| symetrie | 0.0.1-5 | failed | BUILD phase failed (exit 2) |
+| systeminfo | 2-4 | built | systeminfo-2-4-arm64.hpkg |
+| takenotes | 1.0.1~git-2 | failed | BUILD phase failed (exit 2) |
+| tar | 1.35-2 | built | tar-1.35-2-arm64.hpkg |
+| taresizer | 3.4-2 | built | taresizer-3.4-2-arm64.hpkg |
 | taskmanager | 0.1.7-5 | built | taskmanager-0.1.7-5-arm64.hpkg |
+| textworker | 0.9.1-1 | built | textworker-0.9.1-1-arm64.hpkg |
+| thememanager | 1.0~git-9 | failed | BUILD phase failed (exit 2) |
 | tiff | 4.7.0-1 | built | tiff-4.7.0-1-arm64.hpkg, tiff_devel-4.7.0-1-arm64.hpkg, tiff_tools-4.7.0-1-arm64.hpkg |
+| timebomb | 0.4.0-1 | built | timebomb-0.4.0-1-arm64.hpkg |
+| timecop | 0.61-6 | built | timecop-0.61-6-arm64.hpkg |
+| timetracker | 0.2-4 | built | timetracker-0.2-4-arm64.hpkg |
 | tipster | 1.1.3-2 | built | tipster-1.1.3-2-arm64.hpkg |
+| tolmach | 1.1.0-2 | built | tolmach-1.1.0-2-arm64.hpkg |
 | toner | 1.0.0-3 | built | toner-1.0.0-3-arm64.hpkg |
+| trackergrep | 5.2-4 | built | trackergrep-5.2-4-arm64.hpkg |
+| trackrunner | 0.3-1 | failed | BUILD phase failed (exit 2) |
+| transplus | 0.6-4 | built | transplus-0.6-4-arm64.hpkg |
+| trax | 1.1.1-1 | built | trax-1.1.1-1-arm64.hpkg |
+| ubertuber | 0.9.13-2 | built | ubertuber-0.9.13-2-arm64.hpkg |
 | unittest++ | 2.0.0-2 | built | unittest++-2.0.0-2-arm64.hpkg, unittest++_devel-2.0.0-2-arm64.hpkg |
+| uploadit | 1.4-3 | failed | checksum mismatch for v1.4.tar.gz |
 | vision | 0.10.6-2 | built | vision-0.10.6-2-arm64.hpkg |
+| w6 | 1.7-4 | built | w6-1.7-4-arm64.hpkg |
 | wakeup | 1.0-3 | built | wakeup-1.0-3-arm64.hpkg |
 | wavpack | 5.5.0-3 | built | wavpack-5.5.0-3-arm64.hpkg, wavpack_bin-5.5.0-3-arm64.hpkg, wavpack_devel-5.5.0-3-arm64.hpkg |
 | weather | 1.1.0-1 | failed | BUILD phase failed (exit 2) |
+| webwatch | 1.0~git-4 | built | webwatch-1.0~git-4-arm64.hpkg |
 | wget | 1.24.5-2 | built | wget-1.24.5-2-arm64.hpkg |
+| whereismymouse | 1.0-2 | built | whereismymouse-1.0-2-arm64.hpkg |
+| which | 2.21-6 | built | which-2.21-6-arm64.hpkg |
+| whisper | 1.2-2 | failed | libsanta failed earlier in this run |
+| windowtailor | 0.3-1 | failed | checksum mismatch for v0.3.tar.gz |
+| wonderbrush | 2.1.2-12 | failed | liblayout failed: checksum mismatch for 1f9119e3dee5ff582d0e7b673be4f8d614f403ad.tar.gz (log: /Volumes/HaikuSrc/prose-packages/logs/liblayout.log) |
+| wordclock | 0.1.1-1 | built | wordclock-0.1.1-1-arm64.hpkg |
+| workspacenumber | 0.2-1 | failed | BUILD phase failed (exit 2) |
 | xz_utils | 5.8.4-1 | built | xz_utils-5.8.4-1-arm64.hpkg, xz_utils_devel-5.8.4-1-arm64.hpkg |
+| yaml_cpp0.8 | 0.8.0-2 | failed | BUILD phase failed (exit 1) |
+| zookeeper | 2.1.1-1 | built | zookeeper-2.1.1-1-arm64.hpkg |
 | zstd | 1.5.7-1 | built | zstd-1.5.7-1-arm64.hpkg, zstd_bin-1.5.7-1-arm64.hpkg, zstd_devel-1.5.7-1-arm64.hpkg |

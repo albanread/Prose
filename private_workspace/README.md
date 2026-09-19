@@ -32,9 +32,16 @@ private_workspace/hostfs-test.sh         # HostFS end to end: scratch share + ho
 private_workspace/trap-test.sh [qemu|vz] # user-mode exceptions -> signals (patch 0029): trap_check.c run at boot, plus what debug_server logged
 private_workspace/run-qemu.sh            # QEMU + HVF, modern virtio-pci, ramfb, -snapshot
 private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke/haiku.img
+PW_FIRST_BOOT_PROMPT=1 private_workspace/run-vz.sh fb   # keep FirstBootPrompt (language, keymap); skipped by default, see below
 ```
 
 `run-vz.sh` always boots a **fresh copy** of the image, so every run starts from first boot and `first login` is a reliable marker.
+
+A fresh copy of the Prose image (regular profile, patch 0042) would show
+FirstBootPrompt and start the desktop only after a click, on every run. The run
+scripts and `packages/boot-test.sh` therefore seed an empty `Locale settings`
+file into the copy (`private_workspace/skip-first-boot-prompt.sh`), which
+launch_daemon takes as "answered"; `PW_FIRST_BOOT_PROMPT=1` keeps the prompt.
 
 ## Rules
 - Change Haiku as commits on `prose`; export each with `scripts/export-patch.sh` as the next `patches/haiku/NNNN-*.patch`, so main carries it. The build refuses a tree with uncommitted changes.

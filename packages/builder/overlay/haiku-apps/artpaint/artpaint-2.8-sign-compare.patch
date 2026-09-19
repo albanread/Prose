@@ -1,0 +1,15 @@
+ArtPaint 2.8: Layer.cpp compares what BFile::Read() returned (ssize_t) with
+an unsigned length; gcc 13 makes that an error under the Makefile's -Werror.
+Cast the length.
+
+--- a/artpaint/layers/Layer.cpp
++++ b/artpaint/layers/Layer.cpp
+@@ -588,7 +588,7 @@
+ 	bits += alignment_offset;
+ 
+ 	if (file.Read(bits, layer->Bitmap()->BitsLength() - alignment_offset)
+-		!= (layer->Bitmap()->BitsLength() - alignment_offset)) {
++		!= (ssize_t)(layer->Bitmap()->BitsLength() - alignment_offset)) {
+ 		delete layer;
+ 		return NULL;
+ 	}

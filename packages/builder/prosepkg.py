@@ -84,6 +84,12 @@ HOST_TOOL_NAMES = [
 
 # the system packages of the target image: what a Prose system provides
 BASE_PACKAGES_BUILT = ['haiku.hpkg', 'haiku_devel.hpkg']
+# commands the build environment provides (cross toolchain, host make and
+# pkg-config): a recipe naming them in BUILD_REQUIRES (libprefs: cmd:gcc)
+# must not make prosepkg build the gcc port
+TOOLCHAIN_COMMANDS = {'cmd:' + c for c in ('gcc', 'g++', 'cc', 'c++', 'cpp', 'ld', 'as',
+	'ar', 'nm', 'ranlib', 'strip', 'objcopy', 'objdump', 'readelf', 'make', 'pkg_config',
+	'pkgconf')}
 
 BINUTILS = ['addr2line', 'ar', 'as', 'c++filt', 'elfedit', 'ld', 'nm', 'objcopy',
 	'objdump', 'ranlib', 'readelf', 'size', 'strings', 'strip']
@@ -212,6 +218,7 @@ def bootstrap(args):
 	redo = lambda step: step in refresh or 'all' in refresh
 	bootstrap_toolchain(redo('toolchain'))
 	bootstrap_hosttools(redo('hosttools'))
+	bootstrap_hostsdk(redo('hostsdk'))
 	bootstrap_base(redo('base'))
 	bootstrap_env()
 	check_toolchain()
@@ -288,6 +295,77 @@ def bootstrap_hosttools(refresh):
 	run([HOSTTOOLS / 'bin' / 'package', 'list', '-i',
 		HAIKU_TREE / 'generated/objects/haiku/arm64/packaging/packages/makefile_engine.hpkg'],
 		capture=True)
+
+
+HOST_BE_CXX = r'''#!/bin/sh
+# Compile and link a Be API program for this Mac, the way the Haiku build
+# compiles its own host tools (rc, xres, mimeset ...): with the build-host
+# headers and libbe_build/libroot_build, which cover the storage, support
+# and app kits' file, resource, message and string classes -- enough for the
+# tools a port runs during its build (Pe's rez).
+#
+# Usage: host-be-c++ -o <program> <sources...> [more compiler flags]
+SDK=%(sdk)s
+LIB=%(lib)s
+out=""
+prev=""
+for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done
+/usr/bin/clang++ -O2 -std=gnu++17 -Wno-multichar -Wno-deprecated-declarations \
+	-include "$SDK/headers/build/BeOSBuildCompatibility.h" \
+	-DARCH_arm64 -D_NO_INLINE_ASM -D__NO_INLINE__ -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
+	-D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -DHAIKU_HOST_USE_XATTR \
+	-DHAIKU_HOST_PLATFORM_DARWIN -DHAIKU_HOST_PLATFORM_64_BIT -DHAIKU_PACKAGING_ARCH='"arm64"' \
+	-iquote "$SDK/config_headers" \
+	-I "$SDK/headers/build/host/darwin" -I "$SDK/headers/build" -I "$SDK/headers/build/os" \
+	-I "$SDK/headers/build/os/add-ons/registrar" -I "$SDK/headers/build/os/app" \
+	-I "$SDK/headers/build/os/drivers" -I "$SDK/headers/build/os/kernel" \
+	-I "$SDK/headers/build/os/interface" -I "$SDK/headers/build/os/locale" \
+	-I "$SDK/headers/build/os/storage" -I "$SDK/headers/build/os/support" \
+	-I "$SDK/headers/build/private" -I "$SDK/headers/build/private/kernel" \
+	-I "$SDK/headers/build/private/libroot" -I "$SDK/headers/build/private/system" \
+	-I "$SDK/headers/private/system" \
+	"$@" \
+	"$LIB/libroot_build_function_remapper.a" "$LIB/libroot_build.so" "$LIB/libbe_build.so" -lz \
+	-Wl,-headerpad_max_install_names \
+	|| exit 1
+if [ -n "$out" ]; then
+	# the libraries' install names are relative to the loading binary
+	# (@loader_path, for the tools next to them); this program lives elsewhere
+	for l in libroot_build.so libbe_build.so; do
+		install_name_tool -change "@loader_path/$l" "$LIB/$l" "$out"
+	done
+	codesign --force --sign - "$out" 2>/dev/null
+fi
+'''
+
+
+def bootstrap_hostsdk(refresh):
+	"""The build-host Be API, for tools a port compiles and runs during its
+	own build: the Haiku tree's headers/build, which mostly forward to the
+	real headers (headers/os, headers/private, headers/config, as <../os/...>),
+	the config headers, libroot_build's function remapper archive (the .so
+	files came with the host tools), and host-be-c++."""
+	sdk = HOSTTOOLS / 'sdk'
+	if (sdk / 'headers' / 'build').is_dir() and not refresh:
+		return
+	say('copying the build-host Be API headers from', HAIKU_TREE)
+	rmtree(sdk)
+	for rel in ('headers/build', 'headers/os', 'headers/private', 'headers/config',
+			'build/config_headers'):
+		dst = sdk / ('config_headers' if rel == 'build/config_headers' else rel)
+		dst.parent.mkdir(parents=True, exist_ok=True)
+		shutil.copytree(HAIKU_TREE / rel, dst)
+	# the umbrella headers (StorageKit.h, SupportKit.h ...) over what is there
+	for kit, directory in (('Storage', 'storage'), ('Support', 'support'), ('App', 'app')):
+		headers = sorted(h.name for h in (sdk / 'headers' / 'build' / 'os' / directory).glob('*.h'))
+		write_file(sdk / 'headers' / 'build' / 'os' / (kit + 'Kit.h'),
+			'// the build-host subset of the %s Kit (prosepkg host SDK)\n' % kit
+			+ ''.join('#include <%s/%s>\n' % (directory, h) for h in headers))
+	remapper = HAIKU_TREE / 'generated' / 'objects' / 'darwin' / 'arm64' / 'release' / 'build' \
+		/ 'libroot' / 'libroot_build_function_remapper.a'
+	shutil.copy2(remapper, HOSTTOOLS / 'lib' / remapper.name)
+	write_file(HOSTTOOLS / 'bin' / 'host-be-c++',
+		HOST_BE_CXX % {'sdk': sh_quote(sdk), 'lib': sh_quote(HOSTTOOLS / 'lib')}, 0o755)
 
 
 def base_package_sources():
@@ -739,6 +817,8 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 # Haiku answers for configure tests that cannot run target code here.
 ac_cv_func_malloc_0_nonnull=${ac_cv_func_malloc_0_nonnull=yes}
 ac_cv_func_realloc_0_nonnull=${ac_cv_func_realloc_0_nonnull=yes}
+# gnulib's strcasecmp check runs a test program (diffutils, grep ...)
+gl_cv_func_strcasecmp_works=${gl_cv_func_strcasecmp_works=yes}
 ''')
 	for stale in before - _env_written:
 		stale.unlink()
@@ -1034,6 +1114,13 @@ class Builder:
 			version, path, category = max(ok or versions, key=lambda v: natural_key(v[0]))
 		return Port(name, version, path, category)
 
+	def _record(self, name, result):
+		"""Save a port's result. The file is re-read first: another prosepkg
+		may be building at the same time, and its entries must survive."""
+		self.results = load_json(RESULTS, {})
+		self.results[name] = result
+		save_json(RESULTS, self.results)
+
 	def _cached_keys(self, path):
 		if not hasattr(self, '_recipe_cache'):
 			self._recipe_cache = load_json(CACHE / 'recipes.json', {})
@@ -1043,7 +1130,7 @@ class Builder:
 		"""(port name, version, suffix) providing an entry, or None if the
 		base system provides it."""
 		name = entry_name(entry)
-		if name in self.base_provides:
+		if name in self.base_provides or name in TOOLCHAIN_COMMANDS:
 			return None
 		candidates = self.index.get(name)
 		if not candidates:
@@ -1108,12 +1195,10 @@ class Builder:
 				log.write('\nFAILED: %s\n' % e)
 				result.update(status='failed', error=str(e),
 					seconds=round(time.time() - started))
-				self.results[port.name] = result
-				save_json(RESULTS, self.results)
+				self._record(port.name, result)
 				raise BuildError('%s failed: %s (log: %s)' % (port.name, e, log_path))
 		result.update(status='built', packages=hpkgs, seconds=round(time.time() - started))
-		self.results[port.name] = result
-		save_json(RESULTS, self.results)
+		self._record(port.name, result)
 		if not self.args.keep_work:
 			rmtree(work)
 		say('built %s: %s' % (port.name, ', '.join(hpkgs)))
@@ -1971,7 +2056,7 @@ def main():
 	sub = p.add_subparsers(dest='command', required=True)
 	b = sub.add_parser('bootstrap', help='copy toolchain, host tools and base packages; generate the environment')
 	b.add_argument('--refresh', nargs='?', const='all', metavar='STEPS',
-		help='redo steps: all (default) or a comma list of toolchain,hosttools,base')
+		help='redo steps: all (default) or a comma list of toolchain,hosttools,hostsdk,base')
 	b.set_defaults(func=bootstrap)
 	b = sub.add_parser('build', help='build ports (and their build requirements)')
 	b.add_argument('ports', nargs='+')

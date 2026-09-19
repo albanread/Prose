@@ -8,9 +8,11 @@
 #   3. jam
 # Requires: build volume mounted (scripts/mount-src.sh), cross-tools configured.
 #
-# Usage: build-image.sh [jam target]   (default: @minimum-mmc)
+# Usage: build-image.sh [jam target]   (default: @prose-mmc, the fork's profile:
+#        the regular image plus Prose's packages and applications; @minimum-mmc
+#        for the bare system)
 set -e
-TARGET="${1:-@minimum-mmc}"
+TARGET="${1:-@prose-mmc}"
 ROOT="/Volumes/HaikuSrc/haiku"
 
 # jam lives in ~/bin; brew bison/gettext are keg-only and must precede system ones

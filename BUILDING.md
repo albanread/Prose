@@ -122,10 +122,16 @@ Notes:
 ## 5. Build the image
 
 ```sh
-scripts/build-image.sh              # default: @minimum-mmc
+scripts/build-image.sh              # default: @prose-mmc
 # which is: scripts/apply-patches.sh, scripts/local-packages.sh,
-#           then cd /Volumes/HaikuSrc/haiku && jam -q -j14 @minimum-mmc
+#           then cd /Volumes/HaikuSrc/haiku && jam -q -j14 @prose-mmc
 ```
+
+`prose-mmc` is the fork's build profile (patch 0042): Haiku's regular image
+(its applications, preferences and demos, minus what needs Mesa) plus the
+packages built by prosepkg -- OpenSSL, the codecs, and the applications listed
+in `build/jam/DefaultBuildProfiles` under `prose-*`. `@minimum-mmc` still
+builds the bare system.
 
 There is one Haiku tree, `/Volumes/HaikuSrc/haiku`, and the image is built
 from its branch **`prose`**: upstream's `master` (hrev60122) plus this repo's

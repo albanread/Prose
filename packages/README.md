@@ -59,8 +59,9 @@ result: 19/19 ok.
 into a clone of the image and runs the probe (`packages/tests/*.sh`) from a
 UserBootscript. It boots headless under QEMU, prints what the guest wrote,
 and exits 0 if the last line is `PASS`. Boot to power-off takes about 7 s.
-The probes are `tests/codecs.sh` (codec_check), `tests/openssl.sh` and
-`tests/minimum.sh` (OpenSSL with its certificates, bc, wget: patch 0041).
+The probes are `tests/codecs.sh` (codec_check), `tests/openssl.sh`,
+`tests/minimum.sh` (OpenSSL with its certificates, bc, wget: patch 0041) and
+`tests/apps.sh` (the Prose profile's applications and demos: patch 0042).
 The minimum image has no grep, sed or awk, so probes use bash and coreutils.
 
 ## Rules (the incident, turned into design)

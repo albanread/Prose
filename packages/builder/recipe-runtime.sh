@@ -305,9 +305,11 @@ addResourcesToBinaries()
 	local rdefPath="$1"
 	shift 1
 
+	# rc writes to <name>.rsrc when the output name has no .rsrc extension
+	# (silently: curl's icon was lost that way), so the temp name gets one
 	local rsrcPath
-	rsrcPath=$(mktemp "${TMPDIR:-/tmp}/prose_resources.XXXXXX")
-	rm -f "$rsrcPath"
+	rsrcPath=$(mktemp "${TMPDIR:-/tmp}/prose_resources.XXXXXX").rsrc
+	rm -f "$rsrcPath" "${rsrcPath%.rsrc}"
 	rc -o "$rsrcPath" "$rdefPath"
 
 	while [ $# -gt 0 ]; do

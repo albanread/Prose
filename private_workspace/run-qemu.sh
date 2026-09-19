@@ -33,6 +33,7 @@ MON="$D/monitor.sock"
 [ ${#MON} -lt 104 ] || MON="${TMPDIR:-/tmp}/pw-qemu-$$.sock"
 if [ -z "$SNAPSHOT" ]; then
 	cp "$PW_IMAGE" "$IMAGE"
+	[ "${PW_FIRST_BOOT_PROMPT:-}" = 1 ] || "$PW_ROOT/private_workspace/skip-first-boot-prompt.sh" "$IMAGE"
 	if [ -n "${PW_PACKAGES:-}" ]; then
 		"$PW_ROOT/scripts/prosepkg" install "$IMAGE" $PW_PACKAGES
 	fi

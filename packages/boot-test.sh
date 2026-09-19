@@ -49,6 +49,8 @@ cp "$PROBE" "$WORK/probe.sh"
 chmod +x "$WORK/probe.sh"
 bfs "cp :$WORK/UserBootscript $BOOT/UserBootscript" "cp :$WORK/probe.sh /myfs/home/probe.sh" \
 	"sync" >/dev/null
+# a regular image would otherwise wait in FirstBootPrompt for a click
+"$ROOT/private_workspace/skip-first-boot-prompt.sh" "$IMG" > /dev/null
 
 echo ">>> booting $IMG (headless QEMU, serial: $WORK/serial.log)"
 gtimeout 300 qemu-system-aarch64 -M virt -cpu host -accel hvf -smp 4 -m 2G \

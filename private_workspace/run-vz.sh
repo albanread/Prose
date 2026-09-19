@@ -25,6 +25,7 @@ if [ "$KEEP" = 1 ] && [ -f "$D/haiku.img" ]; then
 else
 	cp "$PW_IMAGE" "$D/haiku.img"
 	rm -f "$D/efivars"
+	[ "${PW_FIRST_BOOT_PROMPT:-}" = 1 ] || "$PW_ROOT/private_workspace/skip-first-boot-prompt.sh" "$D/haiku.img"
 fi
 # PW_PACKAGES="<ports|packages|@set>": install packages built by prosepkg into the copy
 if [ -n "${PW_PACKAGES:-}" ]; then
