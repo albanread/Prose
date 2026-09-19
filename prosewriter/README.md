@@ -45,7 +45,8 @@ research, tooling and skills needed to build and test it.
 | API index | `api-db/prose_api.sqlite` — 16,086 symbols from the arm64 devel headers + 980 doc pages, FTS5; MCP server `api-db/mcp_server.py` (registered as `prose-api-db` in `.zcode/config.json`, skills in `.zcode/skills/`) |
 | VM harness | `vm/` boots our image clone headless under QEMU/HVF; **proseagent** in the guest gives `run`/`put`/`get`/`launch` over `127.0.0.1:9000`; QMP gives screendump + keyboard/tablet input; `vm/guest.sh`, `vm/qmp.py` |
 | ProseWriter | **Sprint 1 complete and guest-verified**: model (runs, undo, `.prose` round-trip), layout (greedy wrap, A4 pagination, offset↔xy), page view (render, caret, selection, keyboard/mouse), window (menus, clipboard, save/open), `--selftest` **20/20 PASS**, 96 pages layout in ~180 ms; typed text via QEMU keyboard renders on the page |
-| Next | Sprint 2 (font/style/size UI, ruler, tabs, find/replace, zoom, RTF), Sprint 3 (headers/footers, print, packaging) — see `docs/plan.md` |
+| ProseWriter | **Sprint 2 complete and guest-verified**: RTF import/export (selftest round trip incl. fonts/colour/alignment), find & replace bar (wrap, case toggle, replace all), justified alignment with correct caret mapping, zoom 50–200 % + fit width (deterministic view scaling), Text menu (family/size/colour/alignment), ruler with draggable page margins, styled clipboard, window fits the screen. `--selftest` **34/34 PASS** |
+| Next | Sprint 3 (headers/footers, page setup, print, perf pass, packaging) — see `docs/plan.md` |
 
 ## The dev loop
 

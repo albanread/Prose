@@ -691,3 +691,67 @@ PWDocument::LoadFromFile(const char* path)
 		return err;
 	return LoadFromMessage(&msg);
 }
+
+// ----------------------------------------------------------------- search --
+static char
+FoldChar(char c, bool caseSensitive)
+{
+	if (caseSensitive)
+		return c;
+	return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+}
+
+static bool
+MatchAt(const char* text, int32 at, const char* needle, bool caseSensitive)
+{
+	for (int32 i = 0; needle[i]; i++)
+		if (FoldChar(text[at + i], caseSensitive) != FoldChar(needle[i], caseSensitive))
+			return false;
+	return true;
+}
+
+int32
+PWDocument::FindNext(const char* needle, int32 fromOffset, bool caseSensitive,
+	bool wrap, int32* length) const
+{
+	if (length)
+		*length = 0;
+	if (!needle || !needle[0])
+		return -1;
+	const char* text = PlainText();
+	int32 docLen = Length();
+	int32 needleLen = (int32)strlen(needle);
+	if (fromOffset < 0)
+		fromOffset = 0;
+	for (int32 at = fromOffset; at + needleLen <= docLen; at++)
+		if (MatchAt(text, at, needle, caseSensitive)) {
+			if (length)
+				*length = needleLen;
+			return at;
+		}
+	if (wrap && fromOffset > 0)
+		return FindNext(needle, 0, caseSensitive, false, length);
+	return -1;
+}
+
+int32
+PWDocument::ReplaceAll(const char* find, const char* replace,
+	bool caseSensitive)
+{
+	if (!find || !find[0] || strcmp(find, replace) == 0)
+		return -1;
+	int32 count = 0;
+	int32 at = 0;
+	int32 len = 0;
+	int32 replaceLen = (int32)strlen(replace);
+	while (true) {
+		int32 found = FindNext(find, at, caseSensitive, false, &len);
+		if (found < 0)
+			break;
+		Remove(found, len);
+		Insert(found, replace, NULL);
+		at = found + replaceLen;
+		count++;
+	}
+	return count;
+}

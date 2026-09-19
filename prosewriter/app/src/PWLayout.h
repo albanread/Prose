@@ -54,9 +54,10 @@ public:
 		int32	startPara = 0;		// byte offset within the paragraph
 		int32	length = 0;		// bytes on this line (no separator)
 		float	x = 0, y = 0;		// origin of the line's first byte
-		float	width = 0;		// total advance
+		float	width = 0;		// total advance (natural, un-justified)
 		float	height = 0;		// line height
 		float	baseline = 0;	// baseline offset within the line
+		bool	last = false;	// last line of its paragraph
 	};
 	const std::vector<Line>& Lines() const { return fLines; }
 
@@ -87,6 +88,8 @@ private:
 	void	LayoutParagraph(int32 para);
 	void	AssignLinesToPages();
 	BFont	FontForRun(const PWRun& run) const;
+	bool	LineIsJustified(int32 lineIndex) const;
+	float	SlackPerGap(int32 lineIndex) const;
 
 	const PWDocument*	fDoc = NULL;
 	PWPageSetup			fSetup;
@@ -96,6 +99,9 @@ private:
 	std::vector<PageSpan>	fPages;
 
 	static const float kPageGap;	// grey gap between pages, points
+public:
+	static float Gap() { return kPageGap; }
+private:
 };
 
 #endif	// PW_LAYOUT_H

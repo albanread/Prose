@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 
 static const bigtime_t kBlinkInterval = 500000;	// 500 ms
 
@@ -29,9 +30,8 @@ PWPageView::AttachedToWindow()
 {
 	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	fScrollView = dynamic_cast<BScrollView*>(Parent());
-	// room for the pages plus a desk border
-	ResizeTo(fLayout->PageSetup().pageWidth + 2 * 24,
-		fLayout->TotalHeight() + 2 * 24);
+	fCurrentFormat = fDoc->DefaultFormat();
+	ResizeTo(PagePixelWidth(), PagePixelHeight() + 24);
 }
 
 void
@@ -48,6 +48,45 @@ PWPageView::FrameResized(float, float)
 	if (fScrollView)
 		fScrollView->ScrollBar(B_VERTICAL)->SetRange(0,
 			fLayout->TotalHeight() + 48 - Bounds().Height());
+}
+
+float
+PWPageView::PagePixelWidth() const
+{
+	return fLayout->PageSetup().pageWidth * fZoom + 2 * 24;
+}
+
+float
+PWPageView::PagePixelHeight() const
+{
+	return fLayout->TotalHeight() * fZoom + 24;
+}
+
+void
+PWPageView::SetZoom(float zoom)
+{
+	if (zoom < 0.4f) zoom = 0.4f;
+	if (zoom > 3.0f) zoom = 3.0f;
+	if (zoom == fZoom)
+		return;
+	fZoom = zoom;
+	ResizeTo(PagePixelWidth(), PagePixelHeight());
+	Invalidate();
+	if (Window())
+		Window()->PostMessage('pWup');
+}
+
+void
+PWPageView::ApplyCharFormat(const PWCharFormat& fmt)
+{
+	fCurrentFormat = fmt;
+	fOverrideFormat = true;
+	if (HasSelection()) {
+		int32 from, to;
+		GetSelection(&from, &to);
+		fDoc->ApplyFormat(from, to - from, fmt);
+		Relayout();
+	}
 }
 
 void
@@ -73,8 +112,11 @@ PWPageView::DrawPages(BRect updateRect)
 	SetHighColor(ui_color(B_PANEL_BACKGROUND_COLOR));
 	FillRect(updateRect);
 
+	const PWPageSetup& setup = fLayout->PageSetup();
 	for (int32 p = 0; p < fLayout->CountPages(); p++) {
-		BRect page = fLayout->PageBounds(p).OffsetByCopy(24, 24);
+		float top = 24 + p * (setup.pageHeight + PWLayout::Gap()) * fZoom;
+		BRect page(24, top, 24 + setup.pageWidth * fZoom,
+			top + setup.pageHeight * fZoom);
 		if (!page.Intersects(updateRect))
 			continue;
 		// shadow first, page on top
@@ -87,8 +129,8 @@ PWPageView::DrawPages(BRect updateRect)
 		SetLowColor(ui_color(B_DOCUMENT_BACKGROUND_COLOR));
 		for (int32 li = 0; li < (int32)fLayout->Lines().size(); li++) {
 			const PWLayout::Line& line = fLayout->Lines()[li];
-			if (line.y + 24 < updateRect.top - 40
-				|| line.y + 24 > updateRect.bottom + 40)
+			if (24 + line.y * fZoom < updateRect.top - 40
+				|| 24 + line.y * fZoom > updateRect.bottom + 40)
 				continue;
 			std::vector<PWLayout::Segment> segs;
 			fLayout->FillSegments(li, &segs);
@@ -98,18 +140,18 @@ PWPageView::DrawPages(BRect updateRect)
 				font.SetFamilyAndFace(s.run->format.family,
 					(uint16)((s.run->format.bold ? B_BOLD_FACE : 0)
 						| (s.run->format.italic ? B_ITALIC_FACE : 0)));
-				font.SetSize(s.run->format.size);
+				font.SetSize(s.run->format.size * fZoom);
 				SetFont(&font);
 				SetHighColor(s.run->format.color);
 				if (s.length > 0) {
 					DrawString(text + s.startPara, s.length,
-						BPoint(s.x + 24, s.baseline + 24));
+						DocToView(BPoint(s.x, s.baseline)));
 					if (s.run->format.underline) {
-						SetHighColor(s.run->format.color);
-						StrokeLine(
-							BPoint(s.x + 24, s.baseline + 24 + 2),
-							BPoint(s.x + 24 + font.StringWidth(text + s.startPara,
-								s.length), s.baseline + 24 + 2));
+						float ux = DocToView(BPoint(s.x, s.baseline)).x;
+						float uy = 24 + s.baseline * fZoom + 2 * fZoom;
+						StrokeLine(BPoint(ux, uy),
+							BPoint(ux + font.StringWidth(text + s.startPara,
+								s.length), uy));
 					}
 				}
 			}
@@ -139,11 +181,11 @@ PWPageView::DrawSelection()
 		if (!fLayout->OffsetToXY(std::min(to, lineE), &b, &hb))
 			continue;
 		BRect r;
-		r.left = a.x + 24;
-		r.right = (li == endLine) ? b.x + 24
-			: line.x + line.width + 24;
-		r.top = line.y + 24 + line.baseline - line.height * 0.8f;
-		r.bottom = r.top + line.height;
+		r.left = 24 + a.x * fZoom;
+		r.right = (li == endLine) ? 24 + b.x * fZoom
+			: 24 + (line.x + line.width) * fZoom;
+		r.top = 24 + (line.y + line.baseline - line.height * 0.8f) * fZoom;
+		r.bottom = r.top + line.height * fZoom;
 		if (r.right < r.left)
 			continue;
 		FillRect(r);
@@ -161,8 +203,8 @@ PWPageView::DrawCaret()
 	if (!fLayout->OffsetToXY(fCaret, &p, &h))
 		return;
 	SetDrawingMode(B_OP_INVERT);
-	StrokeLine(BPoint(p.x + 24, p.y - h * 0.75f + 24),
-		BPoint(p.x + 24, p.y + h * 0.25f + 24));
+	StrokeLine(DocToView(BPoint(p.x, p.y - h * 0.75f)),
+		DocToView(BPoint(p.x, p.y + h * 0.25f)));
 	SetDrawingMode(B_OP_COPY);
 }
 
@@ -176,7 +218,8 @@ PWPageView::Pulse()
 		BPoint p;
 		float h;
 		if (fLayout->OffsetToXY(fCaret, &p, &h)) {
-			BRect r(p.x + 24 - 1, p.y - h + 24, p.x + 24 + 1, p.y + 24 + 2);
+			BPoint v = DocToView(p);
+			BRect r(v.x - 1, v.y - h * fZoom, v.x + 1, v.y + 2);
 			Invalidate(r);
 		}
 	}
@@ -226,9 +269,10 @@ PWPageView::HandlePrintableChar(const char* bytes, int32 numBytes)
 void
 PWPageView::InsertText(const char* text, int32 length)
 {
-	fDoc->Insert(fCaret, BString(text, length).String(), NULL);
+	fDoc->Insert(fCaret, BString(text, length).String(), &fCurrentFormat);
 	fCaret += length;
 	fSelAnchor = -1;
+	fOverrideFormat = false;	// the format has been used; moves re-sync
 	Relayout();
 	ScrollCaretVisible();
 }
@@ -367,6 +411,8 @@ PWPageView::SetCaret(int32 offset, bool extend)
 	if (offset < 0) offset = 0;
 	if (offset > docLen) offset = docLen;
 	bool hadSelection = HasSelection();
+	if (!fOverrideFormat)
+		fCurrentFormat = fDoc->FormatAt(offset);
 	fCaret = offset;
 	if (extend) {
 		if (fSelAnchor < 0)
@@ -430,6 +476,45 @@ PWPageView::Copy(BMessage* clip)
 	clip->what = B_MIME_DATA;
 	clip->RemoveName("text/plain");
 	clip->AddData("text/plain", B_MIME_TYPE, text.String(), text.Length());
+
+	// Prose styled flavour: the selection's runs, offsets relative to the
+	// selection start, so a paste inside ProseWriter keeps character styles.
+	int32 from, to;
+	GetSelection(&from, &to);
+	clip->RemoveName("pWrun");
+	int32 para, inPara;
+	fDoc->Locate(from, &para, &inPara);
+	int32 covered = 0;
+	int32 paraLen = fDoc->ParagraphLength(para);
+	while (covered < to - from) {
+		int32 take = paraLen - inPara;
+		if (take > to - from - covered)
+			take = to - from - covered;
+		const std::vector<PWRun>& runs = fDoc->ParagraphRuns(para);
+		for (const PWRun& r : runs) {
+			int32 runEnd = r.start + r.length;
+			if (runEnd <= inPara || r.start >= inPara + take)
+				continue;
+			int32 s = std::max(r.start, inPara);
+			int32 e = std::min(runEnd, inPara + take);
+			BMessage runMsg('pWr&');
+			runMsg.AddInt32("start", covered + (s - inPara));
+			runMsg.AddInt32("length", e - s);
+			r.format.Archive(&runMsg);
+			clip->AddMessage("pWrun", &runMsg);
+		}
+		covered += take;
+		if (covered < to - from) {
+			covered += 1;	// the paragraph separator
+			para++;
+			if (para < fDoc->CountParagraphs()) {
+				inPara = 0;
+				paraLen = fDoc->ParagraphLength(para);
+				continue;
+			}
+			break;
+		}
+	}
 }
 
 void
@@ -442,8 +527,20 @@ PWPageView::Paste(const BMessage* clip)
 	if (HasSelection())
 		DeleteSelection();
 	BString text((const char*)data, (int32)size);
-	fDoc->Insert(fCaret, text.String(), NULL);
-	fCaret += text.Length();
+	int32 insertedAt = fCaret;
+	fDoc->Insert(insertedAt, text.String(), &fCurrentFormat);
+	// Prose styled flavour wins when present
+	BMessage runMsg;
+	for (int32 i = 0; clip->FindMessage("pWrun", i, &runMsg) == B_OK; i++) {
+		int32 start = 0, length = 0;
+		runMsg.FindInt32("start", &start);
+		runMsg.FindInt32("length", &length);
+		PWCharFormat fmt;
+		fmt.Unarchive(&runMsg);
+		if (length > 0 && insertedAt + start + length <= fDoc->Length())
+			fDoc->ApplyFormat(insertedAt + start, length, fmt);
+	}
+	fCaret = insertedAt + text.Length();
 	fSelAnchor = -1;
 	Relayout();
 	ScrollCaretVisible();
@@ -471,7 +568,7 @@ PWPageView::MouseDown(BPoint where)
 void
 PWPageView::ClickCycled(BPoint where, int32 clicks)
 {
-	BPoint docPoint(where.x - 24, where.y - 24);
+	BPoint docPoint = ViewToDoc(where);
 	switch (clicks) {
 		case 1:
 			SetCaret(fLayout->XYToOffset(docPoint),
@@ -511,7 +608,7 @@ PWPageView::MouseMoved(BPoint point, uint32 transit, const BMessage*)
 {
 	if (!fMouseSelecting || transit != B_INSIDE_VIEW)
 		return;
-	int32 at = fLayout->XYToOffset(BPoint(point.x - 24, point.y - 24));
+	int32 at = fLayout->XYToOffset(ViewToDoc(point));
 	if (at != fCaret)
 		SetCaret(at, true);
 }
@@ -529,7 +626,7 @@ PWPageView::ScrollCaretVisible()
 	float h;
 	if (!fLayout->OffsetToXY(fCaret, &p, &h))
 		return;
-	BPoint view(p.x + 24, p.y + 24);
+	BPoint view = DocToView(p);
 	if (fScrollView) {
 		BScrollView* sc = fScrollView;
 		BScrollBar* v = sc->ScrollBar(B_VERTICAL);

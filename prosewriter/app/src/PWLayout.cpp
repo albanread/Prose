@@ -159,9 +159,10 @@ PWLayout::LayoutParagraph(int32 para)
 				line.x = fSetup.marginLeft;
 				break;
 		}
+		line.last = (lineEnd >= paraLen);
 		fLines.push_back(line);
 
-		if (lineEnd >= paraLen)
+		if (line.last)
 			break;
 		// Next line starts after the break chars we swallowed.
 		int32 next = lastBreak > lineEnd ? lastBreak : lastGood;
@@ -170,8 +171,13 @@ PWLayout::LayoutParagraph(int32 para)
 		lineStart = next;
 	}
 	// Empty paragraph: one zero-length line.
-	if (fLines.empty() || fLines.back().para != (int32)para)
-		fLines.push_back(Line{ para, 0, 0, fSetup.marginLeft, 0, 0, 0, 0 });
+	if (fLines.empty() || fLines.back().para != (int32)para) {
+		Line empty;
+		empty.para = para;
+		empty.x = fSetup.marginLeft;
+		empty.last = true;
+		fLines.push_back(empty);
+	}
 }
 
 void
@@ -313,6 +319,13 @@ PWLayout::OffsetToXY(int32 offset, BPoint* xy, float* caretHeight) const
 		} else
 			b = UTF8Next(text, b, fDoc->ParagraphLength(l.para));
 	}
+	if (LineIsJustified(line)) {
+		int32 spaces = 0;
+		for (int32 i = l.startPara; i < caretPara; i++)
+			if (text[i] == ' ')
+				spaces++;
+		x += SlackPerGap(line) * spaces;
+	}
 	xy->x = x;
 	xy->y = l.y + l.baseline;
 	*caretHeight = l.height;
@@ -366,6 +379,29 @@ PWLayout::XYToOffset(BPoint p) const
 	return fDoc->ParaStart(l.para) + b;
 }
 
+bool
+PWLayout::LineIsJustified(int32 lineIndex) const
+{
+	const Line& l = fLines[lineIndex];
+	return fDoc->ParagraphFormat(l.para).alignment == PW_ALIGN_JUSTIFY
+		&& !l.last;
+}
+
+float
+PWLayout::SlackPerGap(int32 lineIndex) const
+{
+	const Line& l = fLines[lineIndex];
+	const char* text = fDoc->ParagraphText(l.para);
+	int32 gaps = 0;
+	for (int32 i = l.startPara; i < l.startPara + l.length; i++)
+		if (text[i] == ' ')
+			gaps++;
+	if (gaps == 0)
+		return 0;
+	float slack = fSetup.TextWidth() - l.width;
+	return slack > 0 ? slack / gaps : 0;
+}
+
 void
 PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 {
@@ -373,9 +409,24 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 	const Line& l = fLines[lineIndex];
 	const std::vector<PWRun>& runs = fDoc->ParagraphRuns(l.para);
 	const char* text = fDoc->ParagraphText(l.para);
+	bool justify = LineIsJustified(lineIndex);
+	float slack = justify ? SlackPerGap(lineIndex) : 0;
 	float x = l.x;
 	int32 b = l.startPara;
 	int32 end = l.startPara + l.length;
+	auto pushSeg = [&](const PWRun* r, int32 from, int32 to, float& at) {
+		Segment s;
+		s.run = r;
+		s.startPara = from;
+		s.length = to - from;
+		s.x = at;
+		s.baseline = l.y + l.baseline;
+		BFont f = FontForRun(*r);
+		at += f.StringWidth(text + from, to - from);
+		if (justify && to < end && text[to - 1] == ' ')
+			at += slack;	// the gap after a trailing space takes the slack
+		out->push_back(s);
+	};
 	while (b < end) {
 		const PWRun* r = &runs[0];
 		for (const PWRun& rr : runs)
@@ -383,16 +434,27 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 		int32 segEnd = std::min(r->start + r->length, end);
 		if (segEnd <= b)
 			segEnd = b + 1;
-		Segment s;
-		s.run = r;
-		s.startPara = b;
-		s.length = segEnd - b;
-		s.x = x;
-		s.baseline = l.y + l.baseline;
-		BFont f = FontForRun(*r);
-		x += f.StringWidth(text + b, segEnd - b);
-		out->push_back(s);
-		b = segEnd;
+		if (!justify) {
+			pushSeg(r, b, segEnd, x);
+			b = segEnd;
+			continue;
+		}
+		// justified: split at spaces so each gap can stretch
+		while (b < segEnd) {
+			int32 word = b;
+			while (word < segEnd && text[word] != ' ')
+				word++;
+			if (word > b)
+				pushSeg(r, b, word, x);
+			if (word < segEnd) {
+				int32 sp = word;
+				while (sp < segEnd && text[sp] == ' ')
+					sp++;
+				pushSeg(r, word, sp, x);
+				b = sp;
+			} else
+				b = word;
+		}
 	}
 }
 

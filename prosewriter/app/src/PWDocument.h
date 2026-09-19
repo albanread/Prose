@@ -99,6 +99,14 @@ public:
 	void		Redo();
 	void		SetUndoCoalescing(bool on) { fCoalesce = on; }
 
+	// ---- search (over the plain-text view of the document)
+	// Returns the match offset or -1; *length gets the match length.
+	int32		FindNext(const char* needle, int32 fromOffset,
+					bool caseSensitive, bool wrap, int32* length) const;
+	// Replaces every match; returns how many, or -1 on bad input.
+	int32		ReplaceAll(const char* find, const char* replace,
+					bool caseSensitive);
+
 	// ---- persistence. The native format is a flattened BMessage: one
 	// 'para' field per paragraph; RTF/plain text live in later sprints.
 	status_t	SaveToMessage(BMessage* msg) const;

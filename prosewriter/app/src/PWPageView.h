@@ -27,6 +27,9 @@ public:
 	void	MakeFocus(bool focus = true) override;
 
 	int32	CaretOffset() const { return fCaret; }
+	BScrollView* ScrollView() const { return fScrollView; }
+	float	PagePixelWidth() const;
+	float	PagePixelHeight() const;
 	void	SetCaret(int32 offset, bool select);
 	void	Select(int32 from, int32 to);
 	bool	HasSelection() const
@@ -40,6 +43,19 @@ public:
 
 	void	ScrollCaretVisible();
 	void	Relayout();			// document changed: relayout + repaint
+
+	// ---- zoom: layout stays in points; the view scales deterministically
+	float	Zoom() const { return fZoom; }
+	void	SetZoom(float zoom);
+	BPoint	DocToView(BPoint p) const
+			{ return BPoint(24 + p.x * fZoom, 24 + p.y * fZoom); }
+	BPoint	ViewToDoc(BPoint p) const
+			{ return BPoint((p.x - 24) / fZoom, (p.y - 24) / fZoom); }
+
+	// ---- the format typing uses and menus change
+	const PWCharFormat& CurrentFormat() const { return fCurrentFormat; }
+	void	ApplyCharFormat(const PWCharFormat& fmt);
+	bool	FormatPending() const { return fOverrideFormat; }
 
 protected:
 			PWPageView(BMessage* archive);
@@ -63,6 +79,9 @@ private:
 	bool		fCaretVisible = true;
 	bigtime_t	fLastCaretBlink = 0;
 	BPoint		fLastClick;
+	float		fZoom = 1.0f;
+	PWCharFormat	fCurrentFormat;
+	bool		fOverrideFormat = false;
 	int32		fClickCount = 0;
 	bigtime_t	fLastClickTime = 0;
 	bool		fMouseSelecting = false;

@@ -121,14 +121,15 @@ def main():
         print(out)
     elif what == "key":
         combo = "-".join(args)
-        for code in args:
+        keys = [k for part in args for k in part.split("-") if k]
+        for code in keys:
             if code not in QCODES:
                 print(f"unknown qcode {code}", file=sys.stderr)
                 return 1
-        for code in args:
+        for code in keys:
             q.cmd("input-send-event", events=[{"type": "key", "data": {
                 "key": {"type": "qcode", "data": code}, "down": True}}])
-        for code in reversed(args):
+        for code in reversed(keys):
             q.cmd("input-send-event", events=[{"type": "key", "data": {
                 "key": {"type": "qcode", "data": code}, "down": False}}])
     elif what in ("keydown", "keyup"):
