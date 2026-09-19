@@ -108,6 +108,13 @@ final class VMContentView: NSView {
         layoutChildren()
     }
 
+    /// Say the display size again although it has not changed: what it means to
+    /// the guest has (the presenter mode, or a move to a screen of another scale).
+    func reannounceDisplaySize() {
+        lastDisplaySize = .zero
+        layoutChildren()
+    }
+
     /// A camera flash over the display (screenshots).
     func flash() {
         let white = NSView(frame: displayFrame)
@@ -666,10 +673,25 @@ final class WindowChrome: NSObject {
     private func updateDisplay() {
         let item = content.statusBar.display
         let size = controller.displaySize
-        item.label.stringValue = size.map { "\($0.width) × \($0.height)" } ?? "No signal"
-        item.toolTip = displayMode == "s2"
-            ? "Prose Display (S2): the guest's screen follows the window"
-            : "virtio-gpu (S1): the guest's screen is \(width) × \(height); the window scales it"
+        let mode = PresenterMode.current
+        let backing = content.window?.backingScaleFactor ?? 1
+        // in a magnified mode the guest's pixels are not the screen's: say so, or
+        // the size reads as a claim about what you are looking at
+        let magnification = mode == .native ? 1 : Int(backing)
+        item.label.stringValue = size.map {
+            magnification > 1 ? "\($0.width) × \($0.height) ×\(magnification)"
+                              : "\($0.width) × \($0.height)"
+        } ?? "No signal"
+        if let size, magnification > 1 {
+            item.toolTip = "Prose draws \(size.width) × \(size.height); the presenter magnifies it "
+                + "\(magnification)× to \(size.width * magnification) × \(size.height * magnification) "
+                + "screen pixels (View ▸ Presenter)"
+        } else if displayMode == "s2" {
+            item.toolTip = "Prose Display (S2): the guest's screen follows the window, "
+                + "one guest pixel per screen pixel (View ▸ Presenter)"
+        } else {
+            item.toolTip = "virtio-gpu (S1): the guest's screen is \(width) × \(height); the window scales it"
+        }
     }
 
     func forgetGuestAddress() {

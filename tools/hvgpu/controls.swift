@@ -309,9 +309,25 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         return !window.styleMask.contains(.fullScreen)
     }
 
-    /// S1: one guest pixel per point (the window back at the scanout size).
+    /// View ▸ Presenter: how the guest's pixels reach the screen.
+    @objc func setPresenterMode(_ sender: NSMenuItem) {
+        guard PresenterMode.allCases.indices.contains(sender.tag) else { return }
+        let mode = PresenterMode.allCases[sender.tag]
+        for item in sender.menu?.items ?? [] { item.state = item === sender ? .on : .off }
+        guard mode != PresenterMode.current else { return }
+        PresenterMode.current = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: PresenterMode.defaultsKey)
+        // a point means a different number of guest pixels now, so say the size again
+        chrome?.content.reannounceDisplaySize()
+        chrome?.content.statusBar.show(message: "Presenter: \(mode.title)")
+        log("presenter: \(mode.rawValue)")
+    }
+
+    /// The window back at the size it started: --size points, whatever that is
+    /// in guest pixels under the current presenter mode.
     @objc func actualSize(_ sender: Any?) {
-        resizeDisplay(to: NSSize(width: width, height: height))
+        let size = initialGuestSize()
+        resizeDisplay(to: NSSize(width: size.width, height: size.height))
     }
 
     /// S2: the guest's screen follows the window, so a display size is a window size.
@@ -321,11 +337,15 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         resizeDisplay(to: NSSize(width: size.width, height: size.height))
     }
 
+    /// \a size is in guest pixels: in Native mode a point holds more than one of
+    /// them, so the window is that much smaller.
     func resizeDisplay(to size: NSSize) {
         guard let chrome, windowed else { return }
         let bar = chrome.content.statusBarShown ? StatusBar.height : 0
         let window = chrome.window
-        let target = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height + bar))
+        let scale = PresenterMode.current.guestScale(window.backingScaleFactor)
+        let points = NSSize(width: size.width / scale, height: size.height / scale)
+        let target = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: points.width, height: points.height + bar))
         var frame = window.frame
         frame.origin.y += frame.height - target.height          // keep the top left corner
         frame.size = target.size
@@ -341,6 +361,12 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
     }
 
     // MARK: window delegate additions
+
+    /// Moved to a screen of another scale: in Native mode that changes how many
+    /// guest pixels the same window holds.
+    func windowDidChangeBackingProperties(_ notification: Notification) {
+        chrome?.content.reannounceDisplaySize()
+    }
 
     func windowDidResignKey(_ notification: Notification) {
         // a key held when the window lost the keyboard (⌘Tab) would stay down in the guest

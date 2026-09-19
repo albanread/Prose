@@ -87,6 +87,15 @@ func makeMainMenu(_ controller: Controller) -> NSMenu {
         add(sizes.submenu!, "\(size.width) × \(size.height)", #selector(Controller.setDisplaySize(_:))).tag = i
     }
     view.addItem(sizes)
+    let presenter = NSMenuItem(title: "Presenter", action: nil, keyEquivalent: "")
+    presenter.submenu = NSMenu(title: "Presenter")
+    for (i, mode) in PresenterMode.allCases.enumerated() {
+        let item = add(presenter.submenu!, mode.title, #selector(Controller.setPresenterMode(_:)))
+        item.tag = i
+        item.toolTip = mode.detail
+        item.state = mode == PresenterMode.current ? .on : .off
+    }
+    view.addItem(presenter)
     view.addItem(.separator())
     add(view, "Enter Full Screen", #selector(Controller.toggleFullScreen(_:)), "f")
 

@@ -154,7 +154,7 @@ struct VOut { float4 pos [[position]]; float2 uv; };
 
 struct Params {
     uint width; uint height; uint strideWords; uint offsetWords;
-    float2 scale; float2 bias;
+    float2 scale; float2 bias; uint smooth;
 };
 
 vertex VOut vmain(uint vid [[vertex_id]]) {
@@ -166,16 +166,30 @@ vertex VOut vmain(uint vid [[vertex_id]]) {
 }
 
 // B_RGB32: bytes B, G, R, X with undefined X, so alpha is forced to 1.
+static inline float3 texel(device const uint *fb, constant Params &p, uint x, uint y) {
+    uint v = fb[p.offsetWords + min(y, p.height - 1) * p.strideWords + min(x, p.width - 1)];
+    return float3(float((v >> 16) & 0xFF), float((v >> 8) & 0xFF), float(v & 0xFF)) / 255.0;
+}
+
 fragment float4 fmain(VOut in [[stage_in]],
                       device const uint *fb [[buffer(0)]],
                       constant Params &p [[buffer(1)]]) {
     float2 uv = (in.uv - p.bias) / p.scale;
     if (any(uv < 0.0) || any(uv >= 1.0))
         return float4(0.0, 0.0, 0.0, 1.0);
-    uint x = min(uint(uv.x * float(p.width)), p.width - 1);
-    uint y = min(uint(uv.y * float(p.height)), p.height - 1);
-    uint v = fb[p.offsetWords + y * p.strideWords + x];
-    return float4(float((v >> 16) & 0xFF), float((v >> 8) & 0xFF), float(v & 0xFF), 255.0) / 255.0;
+    float2 t = uv * float2(p.width, p.height);
+    if (p.smooth == 0) {
+        // nearest: every guest pixel is a hard block, which is what you want
+        // when the drawable is an exact multiple of the guest's mode
+        return float4(texel(fb, p, uint(t.x), uint(t.y)), 1.0);
+    }
+    // bilinear about the texel centres, so a non-integer scale does not shimmer
+    float2 c = t - 0.5;
+    float2 f = fract(clamp(c, 0.0, float2(p.width, p.height)));
+    uint2 i = uint2(max(c, 0.0));
+    float3 a = mix(texel(fb, p, i.x, i.y), texel(fb, p, i.x + 1, i.y), f.x);
+    float3 b = mix(texel(fb, p, i.x, i.y + 1), texel(fb, p, i.x + 1, i.y + 1), f.x);
+    return float4(mix(a, b, f.y), 1.0);
 }
 
 // No signal: an untuned analogue TV. Snow is luminance noise smeared
@@ -248,6 +262,58 @@ struct SnowParams {
     var scale: Float = 1
 }
 
+/// How the presenter maps the guest's screen onto the window's device pixels.
+///
+/// A Retina drawable is `backingScaleFactor` times the window's size in points,
+/// so there is a real choice: either the guest draws at that full resolution --
+/// its own font rendering, one guest pixel per screen pixel -- or it draws at
+/// the point size and we magnify, which magnifies its antialiasing with it and
+/// is why text looks soft. Native is sharpest but halves the apparent size of
+/// everything, so the guest's font size wants raising to match.
+enum PresenterMode: String, CaseIterable {
+    case native, crisp, smooth
+
+    static let defaultsKey = "prose.presenterMode"
+
+    var title: String {
+        switch self {
+        case .native: return "Native Resolution"
+        case .crisp: return "Magnified (Crisp)"
+        case .smooth: return "Magnified (Smooth)"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .native:
+            return "One guest pixel per screen pixel: Prose draws its own text at the "
+                 + "display's full resolution. Everything is half the size, so raise the "
+                 + "font size in Prose to match."
+        case .crisp:
+            return "Prose draws at the window's point size and each of its pixels becomes "
+                 + "a block on a Retina display."
+        case .smooth:
+            return "As magnified, but interpolated: soft edges rather than blocks."
+        }
+    }
+
+    /// Guest pixels per point.
+    func guestScale(_ backing: CGFloat) -> CGFloat { self == .native ? backing : 1 }
+
+    static var current = PresenterMode(
+        rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .crisp
+}
+
+/// The guest's first mode, in its own pixels. --size gives the window its size in
+/// points; Native mode hands the guest every screen pixel inside them, so it must
+/// start at that size -- the driver takes its first mode from the device config,
+/// and nothing resizes the window on the way up to correct it later.
+func initialGuestSize() -> (width: Int, height: Int) {
+    guard !headless else { return (width, height) }
+    let scale = PresenterMode.current.guestScale(NSScreen.main?.backingScaleFactor ?? 1)
+    return (Int(CGFloat(width) * scale), Int(CGFloat(height) * scale))
+}
+
 struct ShaderParams {
     var width: UInt32
     var height: UInt32
@@ -255,6 +321,7 @@ struct ShaderParams {
     var offsetWords: UInt32
     var scale: SIMD2<Float>
     var bias: SIMD2<Float>
+    var smooth: UInt32
 }
 
 /// The host-side frame surface: page-aligned, Metal-wrapped, written by the
@@ -994,7 +1061,8 @@ final class Presenter: NSObject {
         }
         return ShaderParams(width: UInt32(surface.width), height: UInt32(surface.height),
                             strideWords: UInt32(surface.stride / 4), offsetWords: UInt32(surface.offset / 4),
-                            scale: scale, bias: (SIMD2<Float>(1, 1) - scale) / 2)
+                            scale: scale, bias: (SIMD2<Float>(1, 1) - scale) / 2,
+                            smooth: PresenterMode.current == .smooth ? 1 : 0)
     }
 
     private var ticks = 0
@@ -1119,7 +1187,8 @@ final class CustomVirtioRNG: NSObject, VZCustomVirtioDeviceConfigurationDelegate
 final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVirtualMachineDelegate {
     var vm: VZVirtualMachine!
     let gpu = CustomVirtioGPU()
-    let prds = PRDSDevice(width: width, height: height, poolMiB: Int(option("--pool-mib") ?? "128") ?? 128)
+    let prds = PRDSDevice(width: initialGuestSize().width, height: initialGuestSize().height,
+                          poolMiB: Int(option("--pool-mib") ?? "128") ?? 128)
     lazy var router = InputRouter(presenter: presenter)
     let midi = ProseMIDIDevice()
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
@@ -1150,7 +1219,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
                 chrome = WindowChrome(controller: self, window: window, content: content)
                 // the guest's screen follows the display area (status bar, full screen), not just the window
                 content.onDisplayResize = { size in
-                    presenterGPU?.windowResized(width: Int(size.width), height: Int(size.height))
+                    // the presenter mode decides how many guest pixels a point is
+                    let s = PresenterMode.current.guestScale(self.presenter.window?.backingScaleFactor ?? 1)
+                    presenterGPU?.windowResized(width: Int(size.width * s), height: Int(size.height * s))
                 }
             }
             presenter.window.delegate = self     // windowShouldClose, full screen (MODE_HINT: onDisplayResize)
