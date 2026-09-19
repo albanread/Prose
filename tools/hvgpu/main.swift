@@ -596,28 +596,52 @@ final class CustomVirtioGPU: NSObject, VZCustomVirtioDeviceConfigurationDelegate
 /// The loader keeps its log in a memory buffer, and the kernel keeps its debug
 /// output in the syslog ring buffer; both are plain text. Every second, find
 /// them by their opening lines and print whatever text is new.
+///
+/// Searching all of guest RAM (4 GiB by default) takes ~0.1 s, so it isn't done every
+/// second: each second re-reads only the places the last search found a marker at and
+/// follows the longest buffer, as a full search would. RAM is searched again at once when
+/// the followed buffer's marker is gone; every second while a marker is missing in the first
+/// minute; when a followed buffer stops growing, at most every 5 s (the loader's log moves
+/// into the kernel's syslog buffer that way); and otherwise at intervals that start at 1 s
+/// after a change of buffer and double up to 30 s.
 final class RAMConsole {
     static let ramBase: UInt64 = 0x7000_0000        // VZ generic platform (Sprint 0 T3)
     // The kernel's RAM log (patches/haiku/0001) holds all kernel debug output from the start.
     static let markers = ["Welcome to the Haiku boot loader!", "HAIKU-RAMLOG-V1"]
+    // A search is one memchr pass for a byte every marker contains, each hit checked against
+    // the markers: ~0.1 s for 4 GiB, where memmem takes 1.5-2 s per marker.
+    static let pivot = UInt8(ascii: "H")
+    static let needles = markers.map { Array($0.utf8) }
+    static let pivotOffsets = needles.map { $0.firstIndex(of: pivot)! }
+    static let maxSearchWait = 30.0
     weak var device: VZCustomVirtioDevice?
     var mapping: VZGuestMemoryMapping?
     let queue = DispatchQueue(label: "hvgpu.ramconsole", qos: .utility)
     var timer: DispatchSourceTimer?
     var printed: [String: Int] = [:]                // marker -> bytes already printed
     var bufferAddress: [String: Int] = [:]          // marker -> offset of the buffer being followed
+    var candidates: [String: [Int]] = [:]           // marker -> offsets the last search found it at
+    var grown: Set<String> = []                     // markers whose buffer grew since the last search
+    var mappedAt = 0.0                              // uptime when this boot's RAM was mapped
+    var lastSearch = -Double.infinity
+    var searchWait = 1.0                            // seconds from the last search to the next
     var attempts = 0
     var logHandle: FileHandle?
     let logURL = URL(fileURLWithPath: option("--ramconsole-log") ?? "ramconsole.log")
 
     static var logStarted = false       // one log per run: a restarted VM's boot is appended
+    static weak var current: RAMConsole?    // the console to flush when hvgpu exits
 
     init(device: VZCustomVirtioDevice) {
         self.device = device
         if !RAMConsole.logStarted {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
             RAMConsole.logStarted = true
+            // hvgpu exits as soon as the guest powers off, before the next scan could read
+            // the guest's last lines ("arch_cpu_shutdown: PSCI SYSTEM_OFF").
+            atexit { RAMConsole.current?.flushBeforeExit() }
         }
+        RAMConsole.current = self
         logHandle = FileHandle(forWritingAtPath: logURL.path)
         logHandle?.seekToEndOfFile()
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -629,16 +653,42 @@ final class RAMConsole {
 
     deinit { timer?.cancel() }
 
-    /// The machine stopped: its RAM is gone (a mapping can't outlive a shutdown), so stop
-    /// scanning until activate() — the next boot is mapped and followed afresh.
+    /// The machine stopped: print its last lines, then stop scanning until activate(). The
+    /// next boot runs in new RAM (a mapping can't outlive a shutdown), so it is mapped and
+    /// followed afresh.
     func reset() {
         queue.async { [self] in
+            flush()
             active = false
             mapping = nil
             printed.removeAll()
             bufferAddress.removeAll()
+            candidates.removeAll()
+            grown.removeAll()
+            lastSearch = -.infinity
+            searchWait = 1
             attempts = 0
         }
+    }
+
+    /// Print what the guest wrote since the last scan. Called when it has stopped: the
+    /// mapping still shows its RAM as it was left.
+    private func flush() {
+        guard active, let mapping else { return }
+        let base = mapping.mutableBytes.assumingMemoryBound(to: UInt8.self)
+        _ = dropMoved(base)
+        _ = follow(base, mapping.length)
+    }
+
+    /// At exit, on the main thread. Waits at most 2 s, so a scan stuck mapping guest RAM
+    /// can't hold up the exit.
+    func flushBeforeExit() {
+        let done = DispatchSemaphore(value: 0)
+        queue.async { [self] in
+            flush()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 2)
     }
 
     func activate() {
@@ -657,6 +707,7 @@ final class RAMConsole {
         }
         if let m {
             mapping = m
+            mappedAt = ProcessInfo.processInfo.systemUptime
             log("ramconsole: mapped \(m.length >> 20) MiB of guest RAM; log -> \(logURL.path)")
         } else if attempts == 5 {
             log("ramconsole: still cannot map guest RAM at 0x\(String(RAMConsole.ramBase, radix: 16))")
@@ -668,27 +719,88 @@ final class RAMConsole {
         guard active, let mapping = ensureMapping() else { return }
         let base = mapping.mutableBytes.assumingMemoryBound(to: UInt8.self)
         let length = mapping.length
+        let now = ProcessInfo.processInfo.systemUptime
+        let lost = dropMoved(base)
+        let missing = RAMConsole.markers.contains { candidates[$0, default: []].isEmpty }
+        let stalled = grown.contains { marker in
+            bufferAddress[marker].map { textEnd(base, length, $0) - $0 <= printed[marker] ?? 0 } ?? false
+        }
+        // When to search: see the class comment. Half a second of slack: the timer jitters.
+        let search = lost || (missing && now - mappedAt < 60) || (stalled && now - lastSearch > 4.5)
+            || now - lastSearch > searchWait - 0.5
+        if search {
+            let hits = findMarkers(base, length)
+            for (i, marker) in RAMConsole.markers.enumerated() { candidates[marker] = hits[i] }
+            lastSearch = now
+            grown.removeAll()
+        }
+        if follow(base, length) {
+            searchWait = 1                  // buffers are moving: look again soon
+        } else if search {
+            searchWait = min(2 * searchWait, RAMConsole.maxSearchWait)
+        }
+    }
+
+    /// Forget the places that no longer hold their marker. True if the followed buffer lost its.
+    private func dropMoved(_ base: UnsafeMutablePointer<UInt8>) -> Bool {
+        var lost = false
+        for (i, marker) in RAMConsole.markers.enumerated() {
+            guard let known = candidates[marker] else { continue }
+            let needle = RAMConsole.needles[i]
+            let kept = known.filter { memcmp(base + $0, needle, needle.count) == 0 }
+            if let followed = bufferAddress[marker], known.contains(followed), !kept.contains(followed) {
+                lost = true
+            }
+            candidates[marker] = kept
+        }
+        return lost
+    }
+
+    /// Every place in guest RAM that holds a marker, in address order, for each marker.
+    private func findMarkers(_ base: UnsafeMutablePointer<UInt8>, _ length: Int) -> [[Int]] {
+        let needles = RAMConsole.needles, offsets = RAMConsole.pivotOffsets
+        var hits = [[Int]](repeating: [], count: needles.count)
+        var from = 0
+        while from < length, let p = memchr(base + from, Int32(RAMConsole.pivot), length - from) {
+            let at = base.distance(to: p.assumingMemoryBound(to: UInt8.self))
+            for i in needles.indices {
+                let start = at - offsets[i]
+                if start >= 0, start + needles[i].count <= length,
+                   memcmp(base + start, needles[i], needles[i].count) == 0 {
+                    hits[i].append(start)
+                }
+            }
+            from = at + 1
+        }
+        return hits
+    }
+
+    /// Where the text after a marker at `start` ends: at the first NUL, at most 1 MiB on.
+    private func textEnd(_ base: UnsafeMutablePointer<UInt8>, _ length: Int, _ start: Int) -> Int {
+        let limit = min(length, start + (1 << 20))
+        return memchr(base + start, 0, limit - start)
+            .map { base.distance(to: $0.assumingMemoryBound(to: UInt8.self)) } ?? limit
+    }
+
+    /// Follow each marker's buffer and print its new text. True if a marker changed buffer.
+    private func follow(_ base: UnsafeMutablePointer<UInt8>, _ length: Int) -> Bool {
+        var changed = false
         for marker in RAMConsole.markers {
             // The marker also exists as a string constant inside the loaded binaries (followed
             // by a NUL). The live log buffer is the occurrence followed by the most text.
-            let needle = Array(marker.utf8)
             var best: (start: Int, end: Int)?
-            var from = 0
-            while from < length, let hit = needle.withUnsafeBufferPointer({ n -> Int? in
-                guard let p = memmem(base + from, length - from, n.baseAddress, n.count) else { return nil }
-                return base.distance(to: p.assumingMemoryBound(to: UInt8.self))
-            }) {
-                var end = hit
-                let limit = min(length, hit + (1 << 20))
-                while end < limit && base[end] != 0 { end += 1 }
-                if best == nil || end - hit > best!.end - best!.start { best = (hit, end) }
-                from = hit + needle.count
+            for start in candidates[marker] ?? [] {
+                let end = textEnd(base, length, start)
+                if best == nil || end - start > best!.end - best!.start { best = (start, end) }
             }
             guard let (start, end) = best else { continue }
             if bufferAddress[marker] != start {        // a different (longer) buffer: start over
                 bufferAddress[marker] = start
                 printed[marker] = 0
+                changed = true
                 emit("----- \(marker) buffer at guest 0x\(String(RAMConsole.ramBase + UInt64(start), radix: 16))\n")
+            } else if end - start > printed[marker] ?? 0 {
+                grown.insert(marker)
             }
             let done = printed[marker] ?? 0
             guard end - start > done else { continue }
@@ -699,6 +811,7 @@ final class RAMConsole {
                               as: UTF8.self)
             emit(text)
         }
+        return changed
     }
 
     func emit(_ text: String) {
