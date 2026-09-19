@@ -14,8 +14,10 @@
 //   --ramconsole-log PATH   where the guest-RAM log goes (default ./ramconsole.log)
 //   --no-ramconsole         don't scan guest RAM for Haiku's logs
 //   --disk nvme|usb|virtio  boot disk interface (default nvme; virtio works with fork patch 0003)
-//   --display s1|s2         our display device: s1 impersonates virtio-gpu (default),
-//                           s2 is the shared-surface Prose Display (docs/s2-display-device.md)
+//   --display s2|s1         our display device: s2 is the shared-surface Prose Display
+//                           (default; docs/s2-display-device.md), the only one that follows
+//                           the window. s1 impersonates virtio-gpu: a fixed scanout, kept
+//                           for comparison and for bisecting display problems.
 //   --pool-mib N            s2 surface pool size (default 128)
 //   --screenshot PATH       s2: dump the presentation surface as PNG every 10 s (with the stats line)
 //   --resize-after N WxH    resize our window after N seconds (tests MODE_HINT / live resize)
@@ -76,7 +78,7 @@ let (width, height) = (dims.count == 2 ? dims[0] : 1280, dims.count == 2 ? dims[
 let runSeconds = option("--seconds").flatMap(Double.init)
 let grace = Double(option("--grace") ?? "8") ?? 8
 let headless = args.contains("--headless")
-let displayMode = option("--display") ?? "s1"
+let displayMode = option("--display") ?? "s2"
 let ownInput = option("--input") != "vz"
 var inputRouter: InputRouter?        // set when our own input devices are in use
 

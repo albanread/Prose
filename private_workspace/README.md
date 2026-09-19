@@ -18,9 +18,9 @@ source private_workspace/env.sh
 private_workspace/build.sh               # = scripts/build-image.sh (patches applied, local packages, jam)
 private_workspace/run-vz.sh smoke        # hvgpu, windowed, 8 vCPUs, NVMe, fresh copy in work/smoke
 private_workspace/run-vz.sh t1 --headless --seconds 100 --disk virtio
-private_workspace/run-vz.sh s2 --display s2 --screenshot private_workspace/work/s2/shot.png   # S2 Prose Display instead of the S1 virtio-gpu
-private_workspace/run-vz.sh s2 --display s2 --resize-after 45 1600x1000   # live-resize test: the guest desktop follows the window
-private_workspace/run-vz.sh in --display s2 --input-test   # our own keyboard/tablet (default); --input vz restores VZ's devices + view
+private_workspace/run-vz.sh s2 --screenshot private_workspace/work/s2/shot.png   # S2 Prose Display is the default; --display s1 for the virtio-gpu impersonation
+private_workspace/run-vz.sh s2 --resize-after 45 1600x1000   # live-resize test: the guest desktop follows the window
+private_workspace/run-vz.sh in --input-test   # our own keyboard/tablet (default); --input vz restores VZ's devices + view
 PW_INJECT_SCRIPT=private_workspace/netprobe.sh private_workspace/run-vz.sh net --headless --seconds 80   # guest-side network probe
 private_workspace/extract.sh net /home/netprobe.txt   # ... and its result (any file from a run's image copy)
 PW_INJECT_SCRIPT=private_workspace/soundprobe.sh private_workspace/run-vz.sh snd --seconds 70   # plays a 440 Hz tone through the Mac at ~30 s

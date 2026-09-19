@@ -216,11 +216,12 @@ hvgpu) because the host compiler otherwise targets the running OS.
 ## 9. Run it
 
 ```bash
-private_workspace/run-vz.sh desktop --keep --display s2
+private_workspace/run-vz.sh desktop --keep
 ```
 
-- `--display s2` — our Prose Display. (`s1` is the older virtio-gpu
-  impersonation, kept as a fallback.)
+- The Prose Display (S2) is the default. `--display s1` selects the older
+  virtio-gpu impersonation instead — a fixed scanout, no live resize; keep it
+  for bisecting display problems, not for use.
 - `--keep` — **reuse this run's disk**, so preferences and files survive.
   Without it every run starts from a pristine copy, which is what the tests
   want but means nothing you do in the guest persists. It also means Tracker's
@@ -246,13 +247,13 @@ working, rather than merely present.
 
 ```bash
 # display: mode set, commits, vsync, and a PNG of what is on screen
-private_workspace/run-vz.sh s2 --display s2 --screenshot private_workspace/work/s2/shot.png
+private_workspace/run-vz.sh s2 --screenshot private_workspace/work/s2/shot.png
 
 # live resize: 40 hints should produce exactly one mode switch
-private_workspace/run-vz.sh s2 --display s2 --resize-drag 30 1000x700
+private_workspace/run-vz.sh s2 --resize-drag 30 1000x700
 
 # input: clicks the Deskbar leaf, presses Escape, parks the pointer
-private_workspace/run-vz.sh in --display s2 --input-test
+private_workspace/run-vz.sh in --input-test
 
 # networking: DHCP, gateway, internet, DNS, a 1400-byte ping
 PW_INJECT_SCRIPT=private_workspace/netprobe.sh private_workspace/run-vz.sh net --headless --seconds 80
