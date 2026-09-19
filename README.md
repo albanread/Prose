@@ -83,7 +83,8 @@ That is the honest description. The patches here, the host application, the
 package builds and the ports were written with AI assistance, and I intend to
 carry on that way: porting applications, fixing what I find, and adding what I
 want. This work almost certainly does not meet the policy or the code-quality
-expectations of Haiku's skilled developers, and it is not offered to them.
+expectations of Haiku's skilled developers. Not offered to them; not raised
+upstream.
 
 It means I can run the software I want, now.
 
