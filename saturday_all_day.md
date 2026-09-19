@@ -1,7 +1,7 @@
 # A day on PROSE — 18 September 2026
 
 One long session. Haiku on Apple Silicon went from "boots to a desktop" to
-something you can sit in front of: a tear-free zero-copy display that follows
+something you can sit in front of: a tear-free display that follows
 the window, our own keyboard and mouse, networking, sound, MIDI played by the
 Mac, image decoding, and a look of its own.
 
@@ -17,7 +17,7 @@ colleague's package-building track. Both commit to `vz-s1`.
 The whole pipe was built and then rebuilt three times as we learned what
 actually matters.
 
-- **Zero copy where it counts.** app_server draws into the device's shared
+- **The guest draws into the Mac's memory.** app_server draws into the device's shared
   surface pool — both its back buffer and the front buffer live there
   (patch 0018), so the host's GPU can reach everything the guest draws.
 - **Tear-free by construction** (patch 0017). Only app_server knows when a

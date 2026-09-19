@@ -129,6 +129,12 @@ guest is always drawing into a buffer nobody is reading.
 Sampling the front buffer directly from the shader would save that copy. It also
 tears, and that design is gone.
 
+So there are two copies, not none: app_server's back-to-front, which Haiku does
+on any machine, and the host's copy of the committed rectangles. What there is
+none of is a copy **across the virtualization boundary** — no framebuffer
+scraping, no bounce buffer between guest and host, and nothing full-frame. The
+guest is writing into the Mac's memory the whole time.
+
 `View ▸ Presenter` chooses whether the guest draws at the display's true pixel
 resolution — one guest pixel per screen pixel — or at the window's point size,
 magnified. Either way its screen follows the window: drag the corner and it
@@ -151,7 +157,7 @@ image from macOS with `bfs_shell`.
 
 | | |
 |---|---|
-| Display | Tear-free, zero-copy, live resize, native Retina resolution |
+| Display | Tear-free, live resize, native Retina resolution; the guest draws straight into host memory |
 | Input | Keyboard and absolute tablet |
 | Networking | DHCP, DNS, routing |
 | Sound | `hmulti_audio` over virtio-snd, out to the Mac |

@@ -333,7 +333,7 @@ Things that look like your bug and are not.
 
 A Haiku desktop on Apple Silicon with:
 
-- a zero-copy, tear-free display that follows the host window and shows
+- a tear-free display that follows the host window and shows
   analogue TV static before the guest paints;
 - keyboard and mouse from our own virtio devices, with the window entirely ours;
 - networking, sound through the Mac, and MIDI played by Core Audio's synth;
