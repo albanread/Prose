@@ -8,9 +8,15 @@ import AppKit
 
 private let host: NSEvent.ModifierFlags = [.control, .command]
 
-/// Display sizes offered by View ▸ Display Size (S2 follows the window, so these resize it).
+/// Screen modes offered by View ▸ Screen Mode: the guest's resolution, in its own
+/// pixels. The S2 display follows the window, so choosing one resizes the window
+/// to suit, through whatever View ▸ Scale is set to. The ceiling is the device's
+/// 3840×2160 (prds.swift).
 let displaySizePresets: [(width: Int, height: Int)] = [
-    (1024, 768), (1280, 800), (1440, 900), (1680, 1050), (1920, 1080), (2560, 1440),
+    (1024, 768), (1280, 800), (1280, 1024), (1440, 900), (1680, 1050),
+    (1920, 1080), (1920, 1200),
+    (2048, 1280), (2560, 1440), (2560, 1600), (2880, 1800),
+    (3024, 1890), (3456, 2160), (3840, 2160),
 ]
 
 func makeMainMenu(_ controller: Controller) -> NSMenu {
@@ -88,12 +94,28 @@ func makeMainMenu(_ controller: Controller) -> NSMenu {
     add(view, "Show Status Bar", #selector(Controller.toggleStatusBar(_:)), "/")
     view.addItem(.separator())
     add(view, "Actual Size", #selector(Controller.actualSize(_:)), "0")
-    let sizes = NSMenuItem(title: "Display Size", action: nil, keyEquivalent: "")
-    sizes.submenu = NSMenu(title: "Display Size")
+
+    // what the guest thinks its screen is
+    let sizes = NSMenuItem(title: "Screen Mode", action: nil, keyEquivalent: "")
+    sizes.submenu = NSMenu(title: "Screen Mode")
     for (i, size) in displaySizePresets.enumerated() {
-        add(sizes.submenu!, "\(size.width) × \(size.height)", #selector(Controller.setDisplaySize(_:))).tag = i
+        let item = add(sizes.submenu!, "\(size.width) × \(size.height)",
+                       #selector(Controller.setDisplaySize(_:)))
+        item.tag = i
+        item.toolTip = "Set the machine's screen to \(size.width) × \(size.height) pixels."
     }
     view.addItem(sizes)
+
+    // ... and how big one of its pixels is here
+    let scales = NSMenuItem(title: "Scale", action: nil, keyEquivalent: "")
+    scales.submenu = NSMenu(title: "Scale")
+    for (i, scale) in PresenterScale.allCases.enumerated() {
+        let item = add(scales.submenu!, scale.title, #selector(Controller.setPresenterScale(_:)))
+        item.tag = i
+        item.toolTip = scale.detail
+        item.state = scale == PresenterScale.current ? .on : .off
+    }
+    view.addItem(scales)
     let presenter = NSMenuItem(title: "Presenter", action: nil, keyEquivalent: "")
     presenter.submenu = NSMenu(title: "Presenter")
     for (i, mode) in PresenterMode.allCases.enumerated() {

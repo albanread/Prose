@@ -398,46 +398,63 @@ struct SnowParams {
     var scale: Float = 1
 }
 
-/// How the presenter maps the guest's screen onto the window's device pixels.
+/// How many of the Mac's pixels one of the guest's covers.
 ///
-/// A Retina drawable is `backingScaleFactor` times the window's size in points,
-/// so there is a real choice: either the guest draws at that full resolution --
-/// its own font rendering, one guest pixel per screen pixel -- or it draws at
-/// the point size and we magnify, which magnifies its antialiasing with it and
-/// is why text looks soft. Native is sharpest but halves the apparent size of
-/// everything, so the guest's font size wants raising to match.
+/// The guest's screen mode and the scale it is shown at are two things, and
+/// keeping them apart is what makes either usable: the mode is the resolution
+/// Haiku believes it has, the scale is magnification here. At x1 a guest pixel
+/// is a screen pixel -- sharpest, and on a Retina display everything is half
+/// the size it would be elsewhere. x2 doubles it, x4 again.
+enum PresenterScale: Int, CaseIterable {
+    case x1 = 1, x2 = 2, x4 = 4
+
+    static let defaultsKey = "prose.presenterScale"
+
+    var title: String { "\(rawValue)×" }
+
+    var detail: String {
+        switch self {
+        case .x1: return "One guest pixel per screen pixel. Sharpest, and smallest on a Retina display."
+        case .x2: return "Each guest pixel covers two screen pixels across."
+        case .x4: return "Each guest pixel covers four screen pixels across."
+        }
+    }
+
+    /// Guest pixels per point: the window is in points, the scale is in the
+    /// Mac's pixels, and a Retina point is `backing` of those.
+    func guestPixelsPerPoint(_ backing: CGFloat) -> CGFloat { backing / CGFloat(rawValue) }
+
+    static var current: PresenterScale = {
+        if let stored = UserDefaults.standard.object(forKey: defaultsKey) as? Int,
+           let scale = PresenterScale(rawValue: stored) { return scale }
+        // what the old single setting meant, before mode and scale were separated
+        return UserDefaults.standard.string(forKey: PresenterMode.defaultsKey) == "native" ? .x1 : .x2
+    }()
+}
+
+/// What the presenter does with a guest pixel that covers more than one of the
+/// Mac's. It only shows at a scale above x1.
 enum PresenterMode: String, CaseIterable {
-    case native, crisp, smooth
+    case crisp, smooth
 
     static let defaultsKey = "prose.presenterMode"
 
     var title: String {
         switch self {
-        case .native: return "Native Resolution"
-        case .crisp: return "Magnified (Crisp)"
-        case .smooth: return "Magnified (Smooth)"
+        case .crisp: return "Crisp"
+        case .smooth: return "Smooth"
         }
     }
 
     var detail: String {
         switch self {
-        case .native:
-            return "One guest pixel per screen pixel: Prose draws its own text at the "
-                 + "display's full resolution. Everything is half the size, so raise the "
-                 + "font size in Prose to match."
-        case .crisp:
-            return "Prose draws at the window's point size and each of its pixels becomes "
-                 + "a block on a Retina display."
-        case .smooth:
-            return "As magnified, but interpolated: soft edges rather than blocks."
+        case .crisp: return "Each guest pixel is a hard block. Nothing is invented."
+        case .smooth: return "Interpolated, so edges soften instead of stepping."
         }
     }
 
-    /// Guest pixels per point.
-    func guestScale(_ backing: CGFloat) -> CGFloat { self == .native ? backing : 1 }
-
     static var current = PresenterMode(
-        rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .crisp
+        rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .smooth
 }
 
 /// The guest's first mode, in its own pixels. --size gives the window its size in
@@ -446,8 +463,8 @@ enum PresenterMode: String, CaseIterable {
 /// and nothing resizes the window on the way up to correct it later.
 func initialGuestSize() -> (width: Int, height: Int) {
     guard !headless else { return (width, height) }
-    let scale = PresenterMode.current.guestScale(NSScreen.main?.backingScaleFactor ?? 1)
-    return (Int(CGFloat(width) * scale), Int(CGFloat(height) * scale))
+    let perPoint = PresenterScale.current.guestPixelsPerPoint(NSScreen.main?.backingScaleFactor ?? 1)
+    return (Int(CGFloat(width) * perPoint), Int(CGFloat(height) * perPoint))
 }
 
 struct ShaderParams {
@@ -1359,8 +1376,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
                 // the guest's screen follows the display area (status bar, full screen), not just the window
                 content.onDisplayResize = { size in
                     // the presenter mode decides how many guest pixels a point is
-                    let s = PresenterMode.current.guestScale(self.presenter.window?.backingScaleFactor ?? 1)
-                    presenterGPU?.windowResized(width: Int(size.width * s), height: Int(size.height * s))
+                    let perPoint = PresenterScale.current
+                        .guestPixelsPerPoint(self.presenter.window?.backingScaleFactor ?? 1)
+                    presenterGPU?.windowResized(width: Int(size.width * perPoint),
+                                                height: Int(size.height * perPoint))
                 }
             }
             presenter.window.delegate = self     // windowShouldClose, full screen (MODE_HINT: onDisplayResize)

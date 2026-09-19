@@ -673,23 +673,21 @@ final class WindowChrome: NSObject {
     private func updateDisplay() {
         let item = content.statusBar.display
         let size = controller.displaySize
-        let mode = PresenterMode.current
-        let backing = content.window?.backingScaleFactor ?? 1
-        // in a magnified mode the guest's pixels are not the screen's: say so, or
-        // the size reads as a claim about what you are looking at
-        let magnification = mode == .native ? 1 : Int(backing)
+        // The screen mode is the guest's; the scale is what happens to it here.
+        // Showing the mode alone reads as a claim about what is on the screen,
+        // so the scale goes beside it whenever it is not 1.
+        let scale = PresenterScale.current
         item.label.stringValue = size.map {
-            magnification > 1 ? "\($0.width) × \($0.height) ×\(magnification)"
-                              : "\($0.width) × \($0.height)"
+            scale == .x1 ? "\($0.width) × \($0.height)" : "\($0.width) × \($0.height)  \(scale.title)"
         } ?? "No signal"
-        if let size, magnification > 1 {
-            item.toolTip = "Prose draws \(size.width) × \(size.height); the presenter magnifies it "
-                + "\(magnification)× to \(size.width * magnification) × \(size.height * magnification) "
-                + "screen pixels (View ▸ Presenter)"
-        } else if displayMode == "s2" {
-            item.toolTip = "Prose Display (S2): the guest's screen follows the window, "
-                + "one guest pixel per screen pixel (View ▸ Presenter)"
-        } else {
+        if let size, displayMode == "s2" {
+            let across = size.width * scale.rawValue, down = size.height * scale.rawValue
+            item.toolTip = scale == .x1
+                ? "Prose's screen is \(size.width) × \(size.height), one guest pixel per screen pixel "
+                  + "(View ▸ Screen Mode, View ▸ Scale)"
+                : "Prose's screen is \(size.width) × \(size.height), shown \(scale.title) — "
+                  + "\(across) × \(down) of this Mac's pixels (View ▸ Screen Mode, View ▸ Scale)"
+        } else if size != nil {
             item.toolTip = "virtio-gpu (S1): the guest's screen is \(width) × \(height); the window scales it"
         }
     }

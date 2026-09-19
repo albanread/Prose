@@ -317,11 +317,12 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
     /// them as subfolders when there are several.
     @objc func revealHostFiles(_ sender: Any?) {
         let shares = hostShares()
-        guard !shares.isEmpty else {
-            chrome?.content.statusBar.show(message: "No folder is shared with this machine")
-            return
+        guard !shares.isEmpty else { return }         // the item is disabled; belt and braces
+        for share in shares {
+            // the folder may not exist yet on a machine that has not started
+            try? FileManager.default.createDirectory(at: share.url, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(share.url)
         }
-        for share in shares { NSWorkspace.shared.open(share.url) }
     }
 
     @objc func toggleFullScreen(_ sender: Any?) {
@@ -333,7 +334,8 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         return !window.styleMask.contains(.fullScreen)
     }
 
-    /// View ▸ Presenter: how the guest's pixels reach the screen.
+    /// View ▸ Presenter: what happens to a guest pixel that covers more than one
+    /// of the Mac's. Only the filtering; the size is View ▸ Scale.
     @objc func setPresenterMode(_ sender: NSMenuItem) {
         guard PresenterMode.allCases.indices.contains(sender.tag) else { return }
         let mode = PresenterMode.allCases[sender.tag]
@@ -341,10 +343,25 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         guard mode != PresenterMode.current else { return }
         PresenterMode.current = mode
         UserDefaults.standard.set(mode.rawValue, forKey: PresenterMode.defaultsKey)
-        // a point means a different number of guest pixels now, so say the size again
-        chrome?.content.reannounceDisplaySize()
         chrome?.content.statusBar.show(message: "Presenter: \(mode.title)")
         log("presenter: \(mode.rawValue)")
+    }
+
+    /// View ▸ Scale: magnification here, with the guest's screen mode left alone.
+    /// The window grows or shrinks around it; the guest is told nothing has
+    /// changed, because from where it sits nothing has.
+    @objc func setPresenterScale(_ sender: NSMenuItem) {
+        guard PresenterScale.allCases.indices.contains(sender.tag) else { return }
+        let scale = PresenterScale.allCases[sender.tag]
+        for item in sender.menu?.items ?? [] { item.state = item === sender ? .on : .off }
+        guard scale != PresenterScale.current, let size = displaySize else { return }
+        PresenterScale.current = scale
+        UserDefaults.standard.set(scale.rawValue, forKey: PresenterScale.defaultsKey)
+        // keep the mode, change the window: resizeDisplay takes guest pixels and
+        // converts them through the scale that is now in force
+        resizeDisplay(to: NSSize(width: size.width, height: size.height))
+        chrome?.content.statusBar.show(message: "Scale: \(scale.title)")
+        log("scale: \(scale.title)")
     }
 
     /// The window back at the size it started: --size points, whatever that is
@@ -367,8 +384,8 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         guard let chrome, windowed else { return }
         let bar = chrome.content.statusBarShown ? StatusBar.height : 0
         let window = chrome.window
-        let scale = PresenterMode.current.guestScale(window.backingScaleFactor)
-        let points = NSSize(width: size.width / scale, height: size.height / scale)
+        let perPoint = PresenterScale.current.guestPixelsPerPoint(window.backingScaleFactor)
+        let points = NSSize(width: size.width / perPoint, height: size.height / perPoint)
         let target = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: points.width, height: points.height + bar))
         var frame = window.frame
         frame.origin.y += frame.height - target.height          // keep the top left corner
@@ -376,12 +393,37 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         window.setFrame(frame, display: true)
     }
 
-    private func fits(_ size: (width: Int, height: Int)) -> Bool {
+    /// Would a guest screen of this size fit on the Mac's screen at `scale`?
+    ///
+    /// A screen mode is in the guest's pixels and a window is in points, and the
+    /// two are only the same number when the scale happens to match the display.
+    /// Comparing them directly disabled every mode above 1280x800 -- and a
+    /// disabled item swallows the click, so the menu simply did nothing.
+    private func fits(_ size: (width: Int, height: Int), at scale: PresenterScale? = nil) -> Bool {
         guard let window = presenter.window, let screen = window.screen ?? NSScreen.main else { return false }
+        let perPoint = (scale ?? PresenterScale.current).guestPixelsPerPoint(window.backingScaleFactor)
         let bar = chrome?.content.statusBarShown == true ? StatusBar.height : 0
-        let frame = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: CGFloat(size.width),
-                                                            height: CGFloat(size.height) + bar))
+        let frame = window.frameRect(forContentRect:
+            NSRect(x: 0, y: 0, width: CGFloat(size.width) / perPoint,
+                   height: CGFloat(size.height) / perPoint + bar))
         return frame.width <= screen.visibleFrame.width && frame.height <= screen.visibleFrame.height
+    }
+
+    /// Why a screen mode is not on offer, in the item's tooltip. A greyed menu
+    /// item that swallows the click and says nothing is the worst of both.
+    private func whyNot(_ size: (width: Int, height: Int)) -> String {
+        guard displayMode == "s2" else { return "The S1 display has a fixed size." }
+        guard windowed else { return "Leave full screen to choose a screen mode." }
+        let smaller = PresenterScale.allCases.first { fits(size, at: $0) }
+        if let smaller {
+            return "\(size.width) × \(size.height) needs Scale \(smaller.title) to fit this screen."
+        }
+        guard let window = presenter.window, let screen = window.screen ?? NSScreen.main else { return "" }
+        let perPoint = PresenterScale.current.guestPixelsPerPoint(window.backingScaleFactor)
+        return "\(size.width) × \(size.height) would need a window "
+            + "\(Int(CGFloat(size.width) / perPoint)) × \(Int(CGFloat(size.height) / perPoint)) points "
+            + "and this screen has \(Int(screen.visibleFrame.width)) × \(Int(screen.visibleFrame.height)). "
+            + "Hiding the status bar or the toolbar buys a little."
     }
 
     // MARK: window delegate additions
@@ -503,12 +545,37 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         case #selector(toggleFullScreen(_:)):
             item.title = windowed || presenter.window == nil ? "Enter Full Screen" : "Exit Full Screen"
             return presenter.window != nil
+        case #selector(revealHostFiles(_:)):
+            let shares = hostShares()
+            item.toolTip = shares.isEmpty
+                ? "No folder is shared with this machine. An installed copy shares ~/Documents/HostFS; "
+                  + "otherwise pass --share."
+                : "Open " + shares.map {
+                    $0.url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+                  }.joined(separator: ", ") + " in the Finder."
+            return !shares.isEmpty
         case #selector(actualSize(_:)):
             return displayMode != "s2" && windowed
         case #selector(setDisplaySize(_:)):
             let size = displaySizePresets[item.tag]
             item.state = displaySize.map { $0.width == size.width && $0.height == size.height } == true ? .on : .off
-            return displayMode == "s2" && windowed && fits(size)
+            let available = displayMode == "s2" && windowed && fits(size)
+            item.toolTip = available
+                ? "Set the machine's screen to \(size.width) × \(size.height) pixels."
+                : whyNot(size)
+            return available
+        case #selector(setPresenterScale(_:)):
+            guard PresenterScale.allCases.indices.contains(item.tag) else { return false }
+            let scale = PresenterScale.allCases[item.tag]
+            item.state = scale == PresenterScale.current ? .on : .off
+            // the guest follows the window, so a scale its mode cannot be shown
+            // at would shrink the mode rather than the window
+            guard let size = displaySize else { return scale == PresenterScale.current }
+            let available = windowed && (scale == PresenterScale.current || fits(size, at: scale))
+            item.toolTip = available ? scale.detail
+                : "\(size.width) × \(size.height) shown \(scale.title) would not fit this screen. "
+                  + "Choose a smaller screen mode first."
+            return available
         default:
             return true
         }
