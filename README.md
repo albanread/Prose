@@ -101,14 +101,28 @@ their work produced, and everything that makes it good is theirs.
 
 ### The display
 
-The guest's app_server draws directly into a surface pool that is host memory
-mapped into the guest as a virtio shared memory region, and commits dirty
-rectangles. The host copies exactly those rectangles and presents them with
-Metal. There is no framebuffer scraping and no emulated GPU. `View ▸ Presenter`
-chooses whether the guest draws at the display's true pixel resolution — one
-guest pixel per screen pixel — or at the window's point size, magnified.
+Three buffers, and the guest owns two of them.
 
-The guest's screen follows the window: drag the corner and it changes mode.
+app_server's back buffer and its front buffer both live in a **surface pool**:
+host memory, mapped into the guest as a virtio shared memory region, so the
+guest draws straight into memory the Mac's GPU can reach as well. Nothing is
+scraped, and there is no emulated GPU.
+
+The third is the host's own **display buffer**, and it is the reason there is no
+tearing. Only app_server knows when a frame is finished, so its back-to-front
+copy is the signal: the accelerant's commit hook sends the dirty rectangles
+synchronously, the host copies exactly those rectangles out of the front buffer
+into the display buffer under the presentation lock, and only then does the
+commit return. Metal samples the display buffer, under that same lock, so the
+guest is always drawing into a buffer nobody is reading.
+
+Sampling the front buffer directly from the shader would save that copy. It also
+tears, and that design is gone.
+
+`View ▸ Presenter` chooses whether the guest draws at the display's true pixel
+resolution — one guest pixel per screen pixel — or at the window's point size,
+magnified. Either way its screen follows the window: drag the corner and it
+changes mode.
 
 ### What works
 
