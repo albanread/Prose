@@ -175,6 +175,7 @@ every application in the guest is scriptable without being modified, and a
 | Sound | `hmulti_audio` over virtio-snd, out to the Mac |
 | MIDI | The guest's MIDI played by the Mac's synthesizer and published to CoreMIDI |
 | Storage | NVMe, virtio-block, and a Mac folder mounted in the guest |
+| Automation | A portal device the guest answers on — run a command, get its exit status — and an AppleScript dictionary |
 | Software | ~120 applications, a web browser, codecs, OpenSSL |
 
 ## Requirements

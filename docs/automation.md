@@ -19,7 +19,7 @@ One setting per virtual machine, in the Machine menu and in the VM's settings:
 
 Three things follow from it, and the order matters:
 
-1. **The channel is hardware.** With the setting off, the Prose Automation
+1. **The channel is hardware.** With the setting off, the Prose Portal
    virtio device is not added to the VM's configuration at all. The guest has no
    device, its driver finds nothing, and there is no path in — not a disabled
    API, an absent one. Turning it on takes effect at the next start, like any
@@ -47,7 +47,7 @@ doing it this way round.
                               |
                     the automation core          (Prose.app)
                     /                  \
-        the window and VM        the Prose Automation device
+        the window and VM        the Prose Portal device
         (host side: input,          (guest side: run, files,
          display, power)             screen text, state)
 ```
@@ -62,8 +62,9 @@ person, `--json` for a program. Because it goes through Apple Events, it
 inherits the same consent gate rather than opening a second door.
 
 **The guest channel** is a custom virtio device, the same shape as the Prose
-MIDI port: a framed byte stream, a small kernel driver publishing
-`/dev/misc/prose/automation/0`, and a daemon reading it. Without the guest side
+MIDI port: a small kernel driver publishing `/dev/misc/prose/portal/0` as a
+datagram device — one frame per buffer, never half of one — and a daemon
+answering each request on its own thread. Without the guest side
 running, the host-side operations still work — a screen capture and a keystroke
 need nothing from the guest — and the rest report that the guest is not
 answering.
@@ -201,6 +202,13 @@ prose capture /tmp/prose.png
 prose run 'syslog -t 200' --json | jq -r .stdout
 ```
 
+**Where the application has to live.** AppleScript reaches Prose only once
+LaunchServices knows the bundle — installed in `/Applications`, or registered
+with `lsregister`. Run straight from a build directory, every verb hangs until
+the caller gives up: the dictionary loads, the suite is registered, and no
+event is ever delivered. That cost an afternoon to establish, so: install it
+first, then script it.
+
 ## What it deliberately cannot do
 
 - **Reach the Mac.** There is no operation that reads or writes a file on the
@@ -220,7 +228,7 @@ prose run 'syslog -t 200' --json | jq -r .stdout
 2. The **`.sdef`** and Apple Event handling, which turns the core into something
    the OS can gate and Shortcuts can see.
 3. **`prose(1)`**, a hundred lines over the same events.
-4. The **Prose Automation device** and its guest daemon — the patch that makes
+4. **Done, patch 0058:** the **Prose Portal device** and its guest daemon — the patch that makes
    `run` real. Model it on `prose_midi` (patch 0023), which is the same problem:
    a custom virtio device, a small driver, a device node, a byte stream.
 5. **Flattened `BMessage`s over the same device**, and the specifier rewriting
