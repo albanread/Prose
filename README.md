@@ -261,7 +261,7 @@ table there also records why each one exists.
 | 0055 | An icon for each folder of the Deskbar's Applications menu |
 | 0056 | A gigabyte of disk in the image |
 | 0057 | The portal daemon serves connections on threads, with timeouts |
-| 0058 | The Prose Portal is a virtio device — no network: a kernel driver, `/dev/misc/prose/portal/0`, and the daemon answering on it |
+| 0059 | The Prose Portal is a virtio device — no network: a kernel driver, `/dev/misc/prose/portal/0`, and the daemon answering on it |
 
 ## Layout
 

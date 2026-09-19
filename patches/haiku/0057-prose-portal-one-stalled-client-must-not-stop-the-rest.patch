@@ -1,0 +1,108 @@
+From f15873c4faec07e3dbae9b226873f3a01bef226a Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 19:11:09 +0100
+Subject: [PATCH] prose_portal: one stalled client must not stop the rest
+
+It served one connection at a time and waited for each without a
+deadline, so a client that connected and then said nothing -- a host that
+timed out, a port scan, a script killed between connecting and asking --
+left it blocked in recv() for ever. Every later connection then completed
+its TCP handshake and met silence, which from outside is indistinguishable
+from a machine that has died. Observed on the installed build: the port
+accepted, and nothing ever came back.
+
+A thread per connection, thirty seconds of patience on an accepted socket
+in both directions, a backlog of sixteen, and an accept that fails is
+logged and retried rather than ending the loop -- a daemon that stops
+listening can only be fixed by rebooting the machine.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0057-prose-portal-one-stalled-client-must-not-stop-the-rest.patch faac08877d5d36c22495a3888042c288089a7438da1418e82fae3c66df6f58a2
+---
+ src/servers/prose_portal/prose_portal.cpp | 45 ++++++++++++++++++++---
+ 1 file changed, 39 insertions(+), 6 deletions(-)
+
+diff --git a/src/servers/prose_portal/prose_portal.cpp b/src/servers/prose_portal/prose_portal.cpp
+index 38f549a5f0..b677098a5f 100644
+--- a/src/servers/prose_portal/prose_portal.cpp
++++ b/src/servers/prose_portal/prose_portal.cpp
+@@ -39,6 +39,8 @@
+ // the owner of the Mac allowed automation -- and this is the switch on the
+ // inside, for someone using the guest who would rather it did not listen.
+ static const char* kStopFile = "/boot/home/config/settings/prose/no-automation";
++static void serve(int socket);
++
+ static const char* kTrackerSignature = "application/x-vnd.Be-TRAK";
+ static const char* kDeskbarSignature = "application/x-vnd.Be-TSKB";
+ 
+@@ -182,6 +184,22 @@ send_info(int socket, uint32 id)
+ }
+ 
+ 
++/*!	One connection, on its own thread. Serving them one at a time was wrong: a
++	client that connects and then says nothing -- a host that timed out, a port
++	scan, a script killed between connecting and asking -- leaves this blocked
++	in recv() for ever, and every later connection completes its handshake and
++	is then met with silence, which looks exactly like a machine that has died.
++*/
++static int32
++connection_thread(void* data)
++{
++	int connection = (int)(addr_t)data;
++	serve(connection);
++	close(connection);
++	return 0;
++}
++
++
+ static void
+ serve(int socket)
+ {
+@@ -255,7 +273,7 @@ main()
+ 	address.sin_port = htons(PROSE_PORTAL_PORT);
+ 	address.sin_addr.s_addr = htonl(INADDR_ANY);
+ 	if (bind(listener, (struct sockaddr*)&address, sizeof(address)) != 0
+-		|| listen(listener, 4) != 0) {
++		|| listen(listener, 16) != 0) {
+ 		syslog(LOG_ERR, "prose_portal: cannot listen on %d: %s\n",
+ 			PROSE_PORTAL_PORT, strerror(errno));
+ 		close(listener);
+@@ -263,18 +281,33 @@ main()
+ 	}
+ 	syslog(LOG_INFO, "prose_portal: listening on %d\n", PROSE_PORTAL_PORT);
+ 
+-	// One host, one conversation at a time: the caller is a program waiting for
+-	// an answer, and serialising is what it expects anyway.
+ 	while (true) {
+ 		int connection = accept(listener, NULL, NULL);
+ 		if (connection < 0) {
+ 			if (errno == EINTR)
+ 				continue;
++			// Never give up the listener over one bad accept: a daemon that
++			// stops listening can only be fixed by rebooting the machine.
+ 			syslog(LOG_ERR, "prose_portal: accept: %s\n", strerror(errno));
+-			break;
++			snooze(500000);
++			continue;
+ 		}
+-		serve(connection);
+-		close(connection);
++
++		// A client that stops talking mid-request must not hold a thread for
++		// ever, and one that never starts must not hold one either.
++		struct timeval patience;
++		patience.tv_sec = 30;
++		patience.tv_usec = 0;
++		setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &patience, sizeof(patience));
++		setsockopt(connection, SOL_SOCKET, SO_SNDTIMEO, &patience, sizeof(patience));
++
++		thread_id thread = spawn_thread(connection_thread, "prose portal connection",
++			B_NORMAL_PRIORITY, (void*)(addr_t)connection);
++		if (thread < 0) {
++			serve(connection);			// no thread to be had: serve it here
++			close(connection);
++		} else
++			resume_thread(thread);
+ 	}
+ 	close(listener);
+ 	return 0;

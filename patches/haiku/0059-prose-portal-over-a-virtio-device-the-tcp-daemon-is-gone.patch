@@ -1,0 +1,1210 @@
+From 680f6072a747bbcd0b2f4c185be567f9a7063361 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 19:19:14 +0100
+Subject: [PATCH] Prose Portal over a virtio device; the TCP daemon is gone
+
+The portal carried by TCP was the wrong design and it did not work: a
+network daemon is a second system with its own failure modes, it gave the
+guest a listening port it never needed, and on the installed build every
+connection completed its handshake and was then met with silence --
+still, after a thread per connection -- for reasons that could not be
+seen from outside. The guest should talk to the host application through
+a device, as the display and the MIDI port already do.
+
+A custom virtio device, ID 61, modelled on prose_midi down to where the
+module lives: under drivers/audio/hmulti, because a virtio child's driver
+is searched only in the context of the /dev/<class> scan that first
+probes its PCI class, and multimedia is the class whose scan is proven to
+happen. /dev/misc is taught to the device manager as /dev/midi was in
+0023, so opening the device directly probes the same devices.
+
+The driver publishes /dev/misc/prose/portal/0 as a datagram device: one
+read() is one whole request, one write() one whole frame. Buffers the
+daemon has not read stay with the driver, so the host can have at most
+eight requests outstanding -- that is the flow control, and the only
+place anything waits. One opener, so two daemons cannot each see half the
+frames.
+
+The daemon answers each request on its own thread, so a long command
+delays no ping, and a result longer than a frame goes out as RESULT then
+RESULT_MORE frames with the same id, whole frames back to back under a
+lock. No socket, no port, nothing to hold open, nothing a caller can jam
+by connecting and going quiet. If the device is not there, the owner of
+the Mac has not allowed automation, and the daemon exits quietly.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0059-prose-portal-over-a-virtio-device-the-tcp-daemon-is-gone.patch 66578a1d5ee1fbb7fef86a85817035c68c23d5c691476bd0ebef3ca734dcc4c5
+---
+ build/jam/packages/Haiku                      |   1 +
+ headers/private/prose/prose_portal.h          |  68 ++-
+ src/add-ons/kernel/drivers/misc/Jamfile       |   1 +
+ .../kernel/drivers/misc/prose_portal/Jamfile  |  11 +
+ .../misc/prose_portal/prose_portal.cpp        | 484 ++++++++++++++++++
+ src/servers/prose_portal/Jamfile              |   2 +-
+ src/servers/prose_portal/prose_portal.cpp     | 392 +++++++-------
+ .../kernel/device_manager/device_manager.cpp  |   4 +
+ 8 files changed, 748 insertions(+), 215 deletions(-)
+ create mode 100644 src/add-ons/kernel/drivers/misc/prose_portal/Jamfile
+ create mode 100644 src/add-ons/kernel/drivers/misc/prose_portal/prose_portal.cpp
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 50bd0ca464..f449f3f95f 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -156,6 +156,7 @@ AddNewDriversToPackage display :
+ 	;
+ AddNewDriversToPackage audio hmulti :
+ 	prose_midi
++	<driver>prose_portal
+ 	virtio_sound
+ 	;
+ AddNewDriversToPackage hyperv :
+diff --git a/headers/private/prose/prose_portal.h b/headers/private/prose/prose_portal.h
+index aabb4ff31a..fd312f1f40 100644
+--- a/headers/private/prose/prose_portal.h
++++ b/headers/private/prose/prose_portal.h
+@@ -2,53 +2,65 @@
+  * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
+  * Distributed under the terms of the MIT License.
+  *
+- * The Prose Portal wire protocol: how the host asks the guest to do something
+- * and hears what happened. docs/automation.md.
++ * The Prose Portal: how the host asks this machine to do something and hears
++ * what happened. docs/automation.md in HaikuArmQemu.
+  *
+- * Framed so it does not care what carries it. Today that is a TCP connection
+- * on the host-only NAT bridge; a virtio device is the eventual home, and only
+- * the read and write calls at either end change.
++ * The transport is a custom virtio device, ID 61, like the Prose MIDI port:
++ * queue 0 carries frames from the guest to the host, queue 1 brings requests
++ * from the host. The driver publishes it as /dev/misc/prose/portal/0, a
++ * datagram device: one read() returns one whole request, one write() sends one
++ * whole frame. Nothing is streamed and nothing has to be reassembled on the
++ * way in; the daemon never sees half a frame.
+  *
+- * Every frame is a 16-byte header and then its payload. A request carries an
+- * id; its reply carries the same id, so a caller never has to assume replies
+- * arrive in order.
++ * A request is one frame. A reply is one frame, except a RUN result, whose
++ * body -- stdout then stderr -- may be longer than a frame: it begins in the
++ * RESULT frame and continues in RESULT_MORE frames carrying the same id until
++ * out_length + error_length bytes have arrived.
+  */
+ #ifndef PROSE_PORTAL_H
+ #define PROSE_PORTAL_H
+ 
+ #include <SupportDefs.h>
+ 
+-#define PROSE_PORTAL_MAGIC		'PRPT'
+-#define PROSE_PORTAL_VERSION	1
+-#define PROSE_PORTAL_PORT		7654
+-#define PROSE_PORTAL_MAX		(8 * 1024 * 1024)
++#define PROSE_PORTAL_MAGIC			'PRPT'
++#define PROSE_PORTAL_VERSION		2		/* 1 was carried by TCP; gone */
++#define PROSE_PORTAL_VIRTIO_ID		61		/* 62 MIDI, 63 display; 64+ leaves the modern PCI ID range */
++#define PROSE_PORTAL_DEVICE			"/dev/misc/prose/portal/0"
++
++#define PROSE_PORTAL_REQUEST_SIZE	4096	/* host -> guest: one frame per buffer */
++#define PROSE_PORTAL_REPLY_SIZE		32768	/* guest -> host: one frame per buffer */
++#define PROSE_PORTAL_MAX_OUTPUT		(8 * 1024 * 1024)	/* a RUN body, across all its frames */
+ 
+ enum {
+-	// host -> guest
+-	PROSE_PORTAL_PING		= 1,	// no payload
+-	PROSE_PORTAL_RUN		= 2,	// the command line, UTF-8, no terminator
+-	PROSE_PORTAL_INFO		= 3,	// no payload
+-
+-	// guest -> host
+-	PROSE_PORTAL_HELLO		= 0x81,	// sent once, unasked, when the daemon starts
+-	PROSE_PORTAL_PONG		= 0x82,
+-	PROSE_PORTAL_RESULT		= 0x83,	// prose_portal_result, then stdout, then stderr
+-	PROSE_PORTAL_INFO_REPLY	= 0x84,	// key=value lines, \n separated
+-	PROSE_PORTAL_ERROR		= 0xFF	// a message, UTF-8
++	/* host -> guest */
++	PROSE_PORTAL_PING			= 1,	/* no payload */
++	PROSE_PORTAL_RUN			= 2,	/* a command line, UTF-8, no terminator */
++	PROSE_PORTAL_INFO			= 3,	/* no payload */
++
++	/* guest -> host */
++	PROSE_PORTAL_HELLO			= 0x81,	/* once, unasked, when the daemon has the device */
++	PROSE_PORTAL_PONG			= 0x82,
++	PROSE_PORTAL_RESULT			= 0x83,	/* prose_portal_result, then the start of the body */
++	PROSE_PORTAL_INFO_REPLY		= 0x84,	/* key=value lines, \n separated */
++	PROSE_PORTAL_RESULT_MORE	= 0x85,	/* the rest of a body, same id */
++	PROSE_PORTAL_ERROR			= 0xFF	/* a message, UTF-8 */
+ };
+ 
+ typedef struct {
+ 	uint32	magic;
+ 	uint16	version;
+ 	uint16	type;
+-	uint32	id;
+-	uint32	length;			// payload bytes following this header
++	uint32	id;				/* a reply carries the id of its request */
++	uint32	length;			/* payload bytes in this frame */
+ } prose_portal_header;
+ 
++#define PROSE_PORTAL_RESULT_TRUNCATED	1	/* the body hit PROSE_PORTAL_MAX_OUTPUT */
++
+ typedef struct {
+-	int32	status;			// the command's exit status, or -1 if it could not run
+-	uint32	out_length;
+-	uint32	error_length;
++	int32	status;			/* the command's exit status, or -1 if it could not run */
++	uint32	out_length;		/* total, across frames */
++	uint32	error_length;	/* total, across frames */
++	uint32	flags;
+ } prose_portal_result;
+ 
+ #endif	/* PROSE_PORTAL_H */
+diff --git a/src/add-ons/kernel/drivers/misc/Jamfile b/src/add-ons/kernel/drivers/misc/Jamfile
+index b6ecbaf1e1..5144662ef4 100644
+--- a/src/add-ons/kernel/drivers/misc/Jamfile
++++ b/src/add-ons/kernel/drivers/misc/Jamfile
+@@ -18,3 +18,4 @@ KernelAddon <driver>kdl :
+ KernelAddon <driver>test :
+ 	test.c
+ 	;
++SubInclude HAIKU_TOP src add-ons kernel drivers misc prose_portal ;
+diff --git a/src/add-ons/kernel/drivers/misc/prose_portal/Jamfile b/src/add-ons/kernel/drivers/misc/prose_portal/Jamfile
+new file mode 100644
+index 0000000000..4f3b5755df
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/misc/prose_portal/Jamfile
+@@ -0,0 +1,11 @@
++SubDir HAIKU_TOP src add-ons kernel drivers misc prose_portal ;
++
++UsePrivateKernelHeaders ;
++UsePrivateHeaders drivers virtio prose ;
++
++# <driver>: the daemon in src/servers is also a target called prose_portal,
++# and jam targets are global -- without the grist the two rules merge into
++# one link with both kinds of glue and no main(). As <driver>mem beside us.
++KernelAddon <driver>prose_portal :
++	prose_portal.cpp
++;
+diff --git a/src/add-ons/kernel/drivers/misc/prose_portal/prose_portal.cpp b/src/add-ons/kernel/drivers/misc/prose_portal/prose_portal.cpp
+new file mode 100644
+index 0000000000..5b758fe198
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/misc/prose_portal/prose_portal.cpp
+@@ -0,0 +1,484 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Prose Portal: the device through which the host asks this machine to do
++ * something (headers/private/prose/prose_portal.h). A custom virtio device,
++ * ID 61: queue 0 carries frames to the host, queue 1 brings requests from it.
++ *
++ * /dev/misc/prose/portal/0 is a datagram device. A read() returns one whole
++ * request frame -- never part of one, never two -- and a write() sends one
++ * whole frame of up to PROSE_PORTAL_REPLY_SIZE bytes. Buffers the daemon has
++ * not read yet stay with the driver, so the host can have at most BUFFER_COUNT
++ * requests outstanding: that is the flow control, and there is no other.
++ *
++ * Modelled on prose_midi, including where the module lives: under
++ * drivers/audio, because the device manager searches a virtio child's driver
++ * only when its node is registered, in the context of the /dev/<class> scan
++ * that triggered it, and for a multimedia-class device that is the /dev/audio
++ * (or, in this fork, /dev/midi or /dev/misc) scan. Where the device file is
++ * published does not depend on it.
++ */
++
++
++#include <KernelExport.h>
++#include <device_manager.h>
++#include <kernel.h>
++#include <lock.h>
++#include <util/AutoLock.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <virtio.h>
++#include <prose_portal.h>
++
++
++#define PRPT_DRIVER_MODULE_NAME		"drivers/audio/hmulti/prose_portal/driver_v1"
++#define PRPT_DEVICE_MODULE_NAME		"drivers/audio/hmulti/prose_portal/device_v1"
++#define PRPT_DEVICE_ID_GENERATOR	"prose_portal/device_id"
++
++#define INFO(x...)	dprintf("prose_portal: " x)
++#define ERROR(x...)	dprintf("prose_portal: " x)
++
++#define BUFFER_COUNT		8
++#define REPLY_SIZE			PROSE_PORTAL_REPLY_SIZE		// to the host
++#define REQUEST_SIZE		PROSE_PORTAL_REQUEST_SIZE	// from the host
++
++
++struct prpt_info {
++	device_node*				node;
++	int32						id;
++	char						name[64];
++	virtio_device				device;
++	virtio_device_interface*	virtio;
++	uint64						features;
++	virtio_queue				txQueue;		// to the host
++	virtio_queue				rxQueue;		// from the host
++
++	area_id						area;			// tx buffers then rx buffers, contiguous
++	uint8*						buffers;
++	phys_addr_t					phys;
++
++	// to the host: a free list of tx buffers
++	sem_id						txFree;
++	spinlock					lock;
++	uint32						txFreeList[BUFFER_COUNT];
++	uint32						txFreeHead;
++	uint32						txFreeTail;
++	mutex						txLock;
++
++	// from the host: completed rx buffers, each one whole request, in order
++	sem_id						rxAvailable;
++	uint32						rxIndex[BUFFER_COUNT];
++	uint32						rxLength[BUFFER_COUNT];
++	uint32						rxHead;
++	uint32						rxTail;
++	mutex						rxLock;
++
++	int32						openCount;
++	uint32						framesOut;
++	uint32						framesIn;
++};
++
++
++static device_manager_info* sDeviceManager;
++
++
++//	#pragma mark - queues
++
++
++static uint8*
++prpt_tx_buffer(prpt_info* info, uint32 index)
++{
++	return info->buffers + index * REPLY_SIZE;
++}
++
++
++static uint8*
++prpt_rx_buffer(prpt_info* info, uint32 index)
++{
++	return info->buffers + BUFFER_COUNT * REPLY_SIZE + index * REQUEST_SIZE;
++}
++
++
++static status_t
++prpt_post_rx(prpt_info* info, uint32 index)
++{
++	physical_entry entry = { info->phys + BUFFER_COUNT * REPLY_SIZE + index * REQUEST_SIZE,
++		REQUEST_SIZE };
++	return info->virtio->queue_request_v(info->rxQueue, &entry, 0, 1, (void*)(addr_t)(index + 1));
++}
++
++
++static void
++prpt_tx_callback(void* driverCookie, void* cookie)
++{
++	prpt_info* info = (prpt_info*)cookie;
++	void* tag;
++	while (info->virtio->queue_dequeue(info->txQueue, &tag, NULL)) {
++		uint32 index = (uint32)(addr_t)tag - 1;
++		if (index >= BUFFER_COUNT)
++			continue;
++		InterruptsSpinLocker locker(info->lock);
++		info->txFreeList[info->txFreeHead % BUFFER_COUNT] = index;
++		info->txFreeHead++;
++		locker.Unlock();
++		release_sem_etc(info->txFree, 1, B_DO_NOT_RESCHEDULE);
++	}
++}
++
++
++/*!	A request has arrived: keep the buffer until read() takes it. */
++static void
++prpt_rx_callback(void* driverCookie, void* cookie)
++{
++	prpt_info* info = (prpt_info*)cookie;
++	void* tag;
++	uint32 length;
++	while (info->virtio->queue_dequeue(info->rxQueue, &tag, &length)) {
++		uint32 index = (uint32)(addr_t)tag - 1;
++		if (index >= BUFFER_COUNT)
++			continue;
++		if (length > REQUEST_SIZE)
++			length = REQUEST_SIZE;
++		{
++			InterruptsSpinLocker locker(info->lock);
++			info->rxIndex[info->rxHead % BUFFER_COUNT] = index;
++			info->rxLength[info->rxHead % BUFFER_COUNT] = length;
++			info->rxHead++;
++		}
++		info->framesIn++;
++		release_sem_etc(info->rxAvailable, 1, B_DO_NOT_RESCHEDULE);
++	}
++}
++
++
++//	#pragma mark - driver
++
++
++static float
++prpt_supports_device(device_node* parent)
++{
++	const char* bus;
++	uint16 deviceType;
++	if (sDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false) != B_OK
++		|| strcmp(bus, "virtio") != 0)
++		return 0.0f;
++	if (sDeviceManager->get_attr_uint16(parent, VIRTIO_DEVICE_TYPE_ITEM, &deviceType, true)
++			!= B_OK || deviceType != PROSE_PORTAL_VIRTIO_ID)
++		return 0.0f;
++	return 1.0f;
++}
++
++
++static status_t
++prpt_register_device(device_node* node)
++{
++	device_attr attrs[] = {
++		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, { .string = "Prose Portal" }},
++		{ NULL }
++	};
++	return sDeviceManager->register_node(node, PRPT_DRIVER_MODULE_NAME, attrs, NULL, NULL);
++}
++
++
++static void
++prpt_teardown(prpt_info* info)
++{
++	if (info->virtio != NULL && info->txQueue != NULL)
++		info->virtio->free_interrupts(info->device);
++	if (info->txFree >= 0)
++		delete_sem(info->txFree);
++	if (info->rxAvailable >= 0)
++		delete_sem(info->rxAvailable);
++	if (info->area >= 0)
++		delete_area(info->area);
++	mutex_destroy(&info->txLock);
++	mutex_destroy(&info->rxLock);
++	free(info);
++}
++
++
++static status_t
++prpt_init_driver(device_node* node, void** _cookie)
++{
++	prpt_info* info = (prpt_info*)calloc(1, sizeof(prpt_info));
++	if (info == NULL)
++		return B_NO_MEMORY;
++	info->node = node;
++	info->area = -1;
++	info->txFree = -1;
++	info->rxAvailable = -1;
++	B_INITIALIZE_SPINLOCK(&info->lock);
++	mutex_init(&info->txLock, "prose_portal tx");
++	mutex_init(&info->rxLock, "prose_portal rx");
++
++	device_node* parent = sDeviceManager->get_parent_node(node);
++	sDeviceManager->get_driver(parent, (driver_module_info**)&info->virtio, (void**)&info->device);
++	sDeviceManager->put_node(parent);
++
++	status_t status = info->virtio->negotiate_features(info->device, 0, &info->features, NULL);
++	if (status != B_OK) {
++		ERROR("feature negotiation failed: %s\n", strerror(status));
++		goto error;
++	}
++
++	{
++		void* address;
++		size_t size = ROUNDUP(BUFFER_COUNT * (REPLY_SIZE + REQUEST_SIZE), B_PAGE_SIZE);
++		info->area = create_area("prose_portal buffers", &address, B_ANY_KERNEL_ADDRESS, size,
++			B_CONTIGUOUS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
++		if (info->area < 0) {
++			status = info->area;
++			goto error;
++		}
++		physical_entry entry;
++		status = get_memory_map(address, size, &entry, 1);
++		if (status != B_OK)
++			goto error;
++		info->buffers = (uint8*)address;
++		info->phys = entry.address;
++		memset(info->buffers, 0, size);
++	}
++	info->txFree = create_sem(BUFFER_COUNT, "prose_portal tx free");
++	info->rxAvailable = create_sem(0, "prose_portal rx");
++	if (info->txFree < 0 || info->rxAvailable < 0) {
++		status = B_NO_MEMORY;
++		goto error;
++	}
++	for (uint32 i = 0; i < BUFFER_COUNT; i++)
++		info->txFreeList[i] = i;
++	info->txFreeHead = BUFFER_COUNT;
++	info->txFreeTail = 0;
++
++	{
++		virtio_queue queues[2];
++		status = info->virtio->alloc_queues(info->device, 2, queues, NULL);
++		if (status != B_OK) {
++			ERROR("queue allocation failed: %s\n", strerror(status));
++			goto error;
++		}
++		info->txQueue = queues[0];
++		info->rxQueue = queues[1];
++	}
++	status = info->virtio->setup_interrupt(info->device, NULL, info);
++	if (status == B_OK)
++		status = info->virtio->queue_setup_interrupt(info->txQueue, prpt_tx_callback, info);
++	if (status == B_OK)
++		status = info->virtio->queue_setup_interrupt(info->rxQueue, prpt_rx_callback, info);
++	if (status != B_OK) {
++		ERROR("interrupt setup failed: %s\n", strerror(status));
++		goto error;
++	}
++	for (uint32 i = 0; i < BUFFER_COUNT; i++)
++		prpt_post_rx(info, i);
++
++	INFO("ready\n");
++	*_cookie = info;
++	return B_OK;
++
++error:
++	prpt_teardown(info);
++	return status;
++}
++
++
++static void
++prpt_uninit_driver(void* cookie)
++{
++	prpt_teardown((prpt_info*)cookie);
++}
++
++
++static status_t
++prpt_register_child_devices(void* cookie)
++{
++	prpt_info* info = (prpt_info*)cookie;
++	int32 id = sDeviceManager->create_id(PRPT_DEVICE_ID_GENERATOR);
++	if (id < 0)
++		return id;
++	info->id = id;
++	snprintf(info->name, sizeof(info->name), "misc/prose/portal/%" B_PRId32, id);
++	return sDeviceManager->publish_device(info->node, info->name, PRPT_DEVICE_MODULE_NAME);
++}
++
++
++//	#pragma mark - device
++
++
++static status_t
++prpt_init_device(void* driverCookie, void** _cookie)
++{
++	*_cookie = driverCookie;
++	return B_OK;
++}
++
++
++static void
++prpt_uninit_device(void* cookie)
++{
++}
++
++
++/*!	One opener: two daemons taking turns at the frames would each see half
++	of them. */
++static status_t
++prpt_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
++{
++	prpt_info* info = (prpt_info*)deviceCookie;
++	if (atomic_add(&info->openCount, 1) != 0) {
++		atomic_add(&info->openCount, -1);
++		return B_BUSY;
++	}
++	*_cookie = info;
++	return B_OK;
++}
++
++
++static status_t
++prpt_close(void* cookie)
++{
++	return B_OK;
++}
++
++
++static status_t
++prpt_free(void* cookie)
++{
++	prpt_info* info = (prpt_info*)cookie;
++	atomic_add(&info->openCount, -1);
++	return B_OK;
++}
++
++
++/*!	One whole request from the host; blocks until there is one. A buffer
++	shorter than the request gets the request's start and the rest is lost,
++	so the daemon reads with PROSE_PORTAL_REQUEST_SIZE. */
++static status_t
++prpt_read(void* cookie, off_t position, void* buffer, size_t* _length)
++{
++	prpt_info* info = (prpt_info*)cookie;
++	status_t status = acquire_sem_etc(info->rxAvailable, 1, B_CAN_INTERRUPT, 0);
++	if (status != B_OK) {
++		*_length = 0;
++		return status;
++	}
++
++	MutexLocker locker(info->rxLock);
++	uint32 index, length;
++	{
++		InterruptsSpinLocker spin(info->lock);
++		index = info->rxIndex[info->rxTail % BUFFER_COUNT];
++		length = info->rxLength[info->rxTail % BUFFER_COUNT];
++		info->rxTail++;
++	}
++	size_t count = min_c((size_t)length, *_length);
++	status = user_memcpy(buffer, prpt_rx_buffer(info, index), count);
++	prpt_post_rx(info, index);		// the host may fill it again
++	if (status != B_OK) {
++		*_length = 0;
++		return B_BAD_ADDRESS;
++	}
++	*_length = count;
++	return B_OK;
++}
++
++
++/*!	One whole frame to the host, of up to REPLY_SIZE bytes. */
++static status_t
++prpt_write(void* cookie, off_t position, const void* buffer, size_t* _length)
++{
++	prpt_info* info = (prpt_info*)cookie;
++	if (*_length > REPLY_SIZE) {
++		*_length = 0;
++		return B_BAD_VALUE;
++	}
++	MutexLocker locker(info->txLock);
++	status_t status = acquire_sem_etc(info->txFree, 1, B_CAN_INTERRUPT, 0);
++	if (status != B_OK) {
++		*_length = 0;
++		return status;
++	}
++	uint32 index;
++	{
++		InterruptsSpinLocker spin(info->lock);
++		index = info->txFreeList[info->txFreeTail % BUFFER_COUNT];
++		info->txFreeTail++;
++	}
++	if (user_memcpy(prpt_tx_buffer(info, index), buffer, *_length) != B_OK) {
++		*_length = 0;
++		return B_BAD_ADDRESS;
++	}
++	physical_entry entry = { info->phys + index * REPLY_SIZE, *_length };
++	status = info->virtio->queue_request_v(info->txQueue, &entry, 1, 0,
++		(void*)(addr_t)(index + 1));
++	if (status != B_OK) {
++		ERROR("queueing %" B_PRIuSIZE " bytes failed: %s\n", *_length, strerror(status));
++		*_length = 0;
++		return status;
++	}
++	info->framesOut++;
++	return B_OK;
++}
++
++
++static status_t
++prpt_control(void* cookie, uint32 op, void* buffer, size_t length)
++{
++	return B_DEV_INVALID_IOCTL;
++}
++
++
++module_dependency module_dependencies[] = {
++	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info**)&sDeviceManager },
++	{}
++};
++
++
++struct device_module_info sPrptDevice = {
++	{
++		PRPT_DEVICE_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	prpt_init_device,
++	prpt_uninit_device,
++	NULL,	// remove
++
++	prpt_open,
++	prpt_close,
++	prpt_free,
++	prpt_read,
++	prpt_write,
++	NULL,	// io
++	prpt_control,
++
++	NULL,	// select
++	NULL,	// deselect
++};
++
++
++struct driver_module_info sPrptDriver = {
++	{
++		PRPT_DRIVER_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	prpt_supports_device,
++	prpt_register_device,
++	prpt_init_driver,
++	prpt_uninit_driver,
++	prpt_register_child_devices,
++	NULL,	// rescan
++	NULL,	// removed
++};
++
++
++module_info* modules[] = {
++	(module_info*)&sPrptDriver,
++	(module_info*)&sPrptDevice,
++	NULL
++};
+diff --git a/src/servers/prose_portal/Jamfile b/src/servers/prose_portal/Jamfile
+index 48cb323e52..592b1e1e0f 100644
+--- a/src/servers/prose_portal/Jamfile
++++ b/src/servers/prose_portal/Jamfile
+@@ -4,5 +4,5 @@ UsePrivateHeaders prose ;
+ 
+ Application prose_portal :
+ 	prose_portal.cpp
+-	: be network [ TargetLibsupc++ ]
++	: be [ TargetLibsupc++ ]
+ 	;
+diff --git a/src/servers/prose_portal/prose_portal.cpp b/src/servers/prose_portal/prose_portal.cpp
+index b677098a5f..9a38a47812 100644
+--- a/src/servers/prose_portal/prose_portal.cpp
++++ b/src/servers/prose_portal/prose_portal.cpp
+@@ -3,23 +3,27 @@
+  * Distributed under the terms of the MIT License.
+  *
+  * Prose Portal: lets the host ask this machine to do something and hear what
+- * happened. Without it the host can only type at the screen and photograph the
++ * happened. Without it the host can type at the screen and photograph the
+  * result, which is enough to drive a machine and not enough to know anything
+  * about it -- there is no exit status in a screenshot.
+  *
+- * It listens only on the virtual machine's own network, which under
+- * Virtualization.framework reaches no further than the Mac hosting it, and it
+- * does not start unless the owner of that Mac allowed automation: hvgpu writes
+- * the marker file this looks for when the machine starts.
++ * The other end is the host application itself, through the Prose Portal
++ * virtio device (headers/private/prose/prose_portal.h). There is no network
++ * involved and nothing listens on a port. If the device is not there, the
++ * owner of the Mac has not allowed automation, and this exits quietly.
++ *
++ * Each request is read as one whole frame and answered on its own thread, so a
++ * long command never delays a ping, and nothing a caller does or fails to do
++ * can leave this waiting on it.
+  */
+ 
+ 
+ #include <errno.h>
+-#include <netinet/in.h>
++#include <fcntl.h>
++#include <pthread.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/wait.h>
+ #include <syslog.h>
+@@ -32,141 +36,179 @@
+ #include <prose_portal.h>
+ 
+ 
+-// Create this to stop the portal listening. It is the wrong way round on
+-// purpose: the host cannot write into this machine's disk before it has a
+-// channel to it, so a file the host must create first could never be created.
+-// The host's own setting is the gate that matters -- nothing connects unless
+-// the owner of the Mac allowed automation -- and this is the switch on the
+-// inside, for someone using the guest who would rather it did not listen.
++// Create this to keep the portal from answering. The gate that matters is on
++// the host -- the device is not even attached unless the owner of the Mac
++// allowed automation -- and this is the switch on the inside, for someone
++// using the guest who would rather it did not answer at all.
+ static const char* kStopFile = "/boot/home/config/settings/prose/no-automation";
+-static void serve(int socket);
+-
+ static const char* kTrackerSignature = "application/x-vnd.Be-TRAK";
+ static const char* kDeskbarSignature = "application/x-vnd.Be-TSKB";
+ 
++static const size_t kFramePayload = PROSE_PORTAL_REPLY_SIZE - sizeof(prose_portal_header);
+ 
+-static bool
+-read_exactly(int socket, void* into, size_t length)
+-{
+-	uint8* at = (uint8*)into;
+-	while (length > 0) {
+-		ssize_t got = recv(socket, at, length, 0);
+-		if (got <= 0)
+-			return false;
+-		at += got;
+-		length -= got;
+-	}
+-	return true;
+-}
++static int sDevice = -1;
++static pthread_mutex_t sWriteLock = PTHREAD_MUTEX_INITIALIZER;
+ 
+ 
++/*!	One frame to the host: a header and up to kFramePayload bytes. Frames from
++	different threads must not interleave, hence the lock. */
+ static bool
+-write_exactly(int socket, const void* from, size_t length)
++send_frame(uint16 type, uint32 id, const void* payload, size_t length)
+ {
+-	const uint8* at = (const uint8*)from;
+-	while (length > 0) {
+-		ssize_t sent = send(socket, at, length, 0);
+-		if (sent <= 0)
+-			return false;
+-		at += sent;
+-		length -= sent;
+-	}
+-	return true;
++	if (length > kFramePayload)
++		return false;
++	uint8* frame = (uint8*)malloc(sizeof(prose_portal_header) + length);
++	if (frame == NULL)
++		return false;
++	prose_portal_header* header = (prose_portal_header*)frame;
++	header->magic = PROSE_PORTAL_MAGIC;
++	header->version = PROSE_PORTAL_VERSION;
++	header->type = type;
++	header->id = id;
++	header->length = length;
++	if (length > 0)
++		memcpy(frame + sizeof(*header), payload, length);
++
++	pthread_mutex_lock(&sWriteLock);
++	ssize_t written = write(sDevice, frame, sizeof(*header) + length);
++	pthread_mutex_unlock(&sWriteLock);
++	free(frame);
++	if (written < 0)
++		syslog(LOG_ERR, "prose_portal: write: %s\n", strerror(errno));
++	return written >= 0;
+ }
+ 
+ 
+-/*!	One frame out: a header, then up to three payload pieces. */
+-static bool
+-send_frame(int socket, uint16 type, uint32 id,
+-	const void* a = NULL, size_t aLength = 0,
+-	const void* b = NULL, size_t bLength = 0,
+-	const void* c = NULL, size_t cLength = 0)
++static void
++send_error(uint32 id, const char* message)
+ {
+-	prose_portal_header header;
+-	header.magic = PROSE_PORTAL_MAGIC;
+-	header.version = PROSE_PORTAL_VERSION;
+-	header.type = type;
+-	header.id = id;
+-	header.length = aLength + bLength + cLength;
+-	if (!write_exactly(socket, &header, sizeof(header)))
+-		return false;
+-	if (aLength > 0 && !write_exactly(socket, a, aLength))
+-		return false;
+-	if (bLength > 0 && !write_exactly(socket, b, bLength))
+-		return false;
+-	return cLength == 0 || write_exactly(socket, c, cLength);
++	send_frame(PROSE_PORTAL_ERROR, id, message, strlen(message));
+ }
+ 
+ 
++/*!	A result, however long: the RESULT frame carries the totals and the start
++	of the body, RESULT_MORE frames carry the rest. Frames of one result go
++	out back to back under the lock so another thread's reply cannot land in
++	the middle of them -- the host reassembles by id, but in order. */
+ static void
+-send_error(int socket, uint32 id, const char* message)
++send_result(uint32 id, int32 status, const BString& out, const BString& error, bool truncated)
+ {
+-	send_frame(socket, PROSE_PORTAL_ERROR, id, message, strlen(message));
++	prose_portal_result result;
++	result.status = status;
++	result.out_length = out.Length();
++	result.error_length = error.Length();
++	result.flags = truncated ? PROSE_PORTAL_RESULT_TRUNCATED : 0;
++
++	BString body(out);
++	body << error;
++	const char* at = body.String();
++	size_t left = body.Length();
++
++	size_t first = min_c(left, kFramePayload - sizeof(result));
++	uint8* frame = (uint8*)malloc(sizeof(prose_portal_header) + sizeof(result) + first);
++	if (frame == NULL)
++		return;
++	prose_portal_header* header = (prose_portal_header*)frame;
++	header->magic = PROSE_PORTAL_MAGIC;
++	header->version = PROSE_PORTAL_VERSION;
++	header->type = PROSE_PORTAL_RESULT;
++	header->id = id;
++	header->length = sizeof(result) + first;
++	memcpy(frame + sizeof(*header), &result, sizeof(result));
++	if (first > 0)
++		memcpy(frame + sizeof(*header) + sizeof(result), at, first);
++
++	pthread_mutex_lock(&sWriteLock);
++	bool ok = write(sDevice, frame, sizeof(*header) + sizeof(result) + first) >= 0;
++	at += first;
++	left -= first;
++	while (ok && left > 0) {
++		size_t chunk = min_c(left, kFramePayload);
++		header->type = PROSE_PORTAL_RESULT_MORE;
++		header->length = chunk;
++		memcpy(frame + sizeof(*header), at, chunk);
++		ok = write(sDevice, frame, sizeof(*header) + chunk) >= 0;
++		at += chunk;
++		left -= chunk;
++	}
++	pthread_mutex_unlock(&sWriteLock);
++	free(frame);
++	if (!ok)
++		syslog(LOG_ERR, "prose_portal: writing a result: %s\n", strerror(errno));
+ }
+ 
+ 
+-/*!	Run a command line, collecting what it writes. stderr is kept apart from
++struct run_job {
++	uint32	id;
++	char*	command;
++};
++
++
++/*!	Run a command line and collect what it writes, stderr kept apart from
+ 	stdout: a caller that cannot see the screen needs to tell a result from a
+-	complaint. */
+-static void
+-run_command(int socket, uint32 id, const char* command)
++	complaint. On its own thread, so a slow command holds up nothing else. */
++static int32
++run_thread(void* data)
+ {
+-	char errorFile[64];
+-	snprintf(errorFile, sizeof(errorFile), "/tmp/prose_portal_%" B_PRIu32 ".err", id);
++	run_job* job = (run_job*)data;
+ 
+-	BString line(command);
++	char errorFile[64];
++	snprintf(errorFile, sizeof(errorFile), "/tmp/prose_portal_%" B_PRIu32 ".err", job->id);
++	BString line(job->command);
+ 	line << " 2>" << errorFile;
+ 
+-	BString out;
++	BString out, error;
++	bool truncated = false;
+ 	FILE* pipe = popen(line.String(), "r");
+ 	if (pipe == NULL) {
+-		send_error(socket, id, strerror(errno));
+-		return;
++		send_error(job->id, strerror(errno));
++		free(job->command);
++		delete job;
++		return 1;
+ 	}
+ 	char buffer[4096];
+ 	size_t got;
+ 	while ((got = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
++		if (out.Length() + got > PROSE_PORTAL_MAX_OUTPUT) {
++			truncated = true;
++			continue;			// keep draining so the command finishes
++		}
+ 		out.Append(buffer, got);
+-		if (out.Length() > PROSE_PORTAL_MAX)
+-			break;
+ 	}
+ 	int status = pclose(pipe);
+ 
+-	BString error;
+ 	FILE* errors = fopen(errorFile, "r");
+ 	if (errors != NULL) {
+ 		while ((got = fread(buffer, 1, sizeof(buffer), errors)) > 0) {
+-			error.Append(buffer, got);
+-			if (error.Length() > PROSE_PORTAL_MAX)
++			if (error.Length() + got > PROSE_PORTAL_MAX_OUTPUT) {
++				truncated = true;
+ 				break;
++			}
++			error.Append(buffer, got);
+ 		}
+ 		fclose(errors);
+ 	}
+ 	unlink(errorFile);
+ 
+-	prose_portal_result result;
+-	result.status = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+-	result.out_length = out.Length();
+-	result.error_length = error.Length();
+-	send_frame(socket, PROSE_PORTAL_RESULT, id, &result, sizeof(result),
+-		out.String(), out.Length(), error.String(), error.Length());
++	send_result(job->id, WIFEXITED(status) ? WEXITSTATUS(status) : -1, out, error, truncated);
++	free(job->command);
++	delete job;
++	return 0;
+ }
+ 
+ 
+ /*!	What the host cannot see from outside. "desktop" is the one that matters:
+-	the host's own guesses at it -- a picture, a DHCP lease, drawing settling --
+-	are all true long before there is a desktop, or true again whenever the
+-	machine pauses for breath. */
++	every guess at it from the host -- a picture, a lease, drawing settling --
++	is either true long before there is a desktop or true again whenever the
++	machine pauses for breath. Tracker and the Deskbar are running or not. */
+ static void
+-send_info(int socket, uint32 id)
++send_info(uint32 id)
+ {
+ 	system_info system;
+ 	get_system_info(&system);
+-
+ 	BRoster roster;
+ 	bool tracker = roster.IsRunning(kTrackerSignature);
+ 	bool deskbar = roster.IsRunning(kDeskbarSignature);
+-
+ 	char host[128];
+ 	if (gethostname(host, sizeof(host)) != 0)
+ 		strcpy(host, "?");
+@@ -180,71 +222,66 @@ send_info(int socket, uint32 id)
+ 	info << "tracker=" << (tracker ? "yes" : "no") << "\n";
+ 	info << "deskbar=" << (deskbar ? "yes" : "no") << "\n";
+ 	info << "desktop=" << ((tracker && deskbar) ? "yes" : "no") << "\n";
+-	send_frame(socket, PROSE_PORTAL_INFO_REPLY, id, info.String(), info.Length());
+-}
+-
+-
+-/*!	One connection, on its own thread. Serving them one at a time was wrong: a
+-	client that connects and then says nothing -- a host that timed out, a port
+-	scan, a script killed between connecting and asking -- leaves this blocked
+-	in recv() for ever, and every later connection completes its handshake and
+-	is then met with silence, which looks exactly like a machine that has died.
+-*/
+-static int32
+-connection_thread(void* data)
+-{
+-	int connection = (int)(addr_t)data;
+-	serve(connection);
+-	close(connection);
+-	return 0;
++	send_frame(PROSE_PORTAL_INFO_REPLY, id, info.String(), info.Length());
+ }
+ 
+ 
+ static void
+-serve(int socket)
++handle(const prose_portal_header& header, const char* payload)
+ {
+-	send_frame(socket, PROSE_PORTAL_HELLO, 0);
+-
+-	while (true) {
+-		prose_portal_header header;
+-		if (!read_exactly(socket, &header, sizeof(header)))
+-			return;
+-		if (header.magic != PROSE_PORTAL_MAGIC
+-			|| header.version != PROSE_PORTAL_VERSION
+-			|| header.length > PROSE_PORTAL_MAX) {
+-			syslog(LOG_ERR, "prose_portal: a frame that is not one; closing\n");
+-			return;
+-		}
+-
+-		char* payload = NULL;
+-		if (header.length > 0) {
+-			payload = (char*)malloc(header.length + 1);
+-			if (payload == NULL || !read_exactly(socket, payload, header.length)) {
+-				free(payload);
+-				return;
+-			}
+-			payload[header.length] = '\0';
+-		}
+-
+-		switch (header.type) {
+-			case PROSE_PORTAL_PING:
+-				send_frame(socket, PROSE_PORTAL_PONG, header.id);
+-				break;
+-			case PROSE_PORTAL_INFO:
+-				send_info(socket, header.id);
++	switch (header.type) {
++		case PROSE_PORTAL_PING:
++			send_frame(PROSE_PORTAL_PONG, header.id, NULL, 0);
++			break;
++		case PROSE_PORTAL_INFO:
++			send_info(header.id);
++			break;
++		case PROSE_PORTAL_RUN:
++		{
++			if (header.length == 0) {
++				send_error(header.id, "no command");
+ 				break;
+-			case PROSE_PORTAL_RUN:
+-				if (payload == NULL)
+-					send_error(socket, header.id, "no command");
+-				else
+-					run_command(socket, header.id, payload);
++			}
++			run_job* job = new(std::nothrow) run_job;
++			if (job == NULL || (job->command = strndup(payload, header.length)) == NULL) {
++				delete job;
++				send_error(header.id, "out of memory");
+ 				break;
+-			default:
+-				send_error(socket, header.id, "unknown request");
++			}
++			job->id = header.id;
++			thread_id thread = spawn_thread(run_thread, "prose portal run", B_NORMAL_PRIORITY, job);
++			if (thread < 0) {
++				send_error(header.id, strerror(thread));
++				free(job->command);
++				delete job;
+ 				break;
++			}
++			resume_thread(thread);
++			break;
++		}
++		default:
++			send_error(header.id, "unknown request");
++			break;
++	}
++}
++
++
++/*!	The device is published by a driver the device manager finds during a
++	/dev scan that may not have happened yet when this starts; wait for it. */
++static int
++open_device()
++{
++	for (int attempt = 0; attempt < 120; attempt++) {
++		int fd = open(PROSE_PORTAL_DEVICE, O_RDWR);
++		if (fd >= 0)
++			return fd;
++		if (errno != ENOENT) {
++			syslog(LOG_ERR, "prose_portal: %s: %s\n", PROSE_PORTAL_DEVICE, strerror(errno));
++			return -1;
+ 		}
+-		free(payload);
++		snooze(500000);
+ 	}
++	return -1;
+ }
+ 
+ 
+@@ -255,60 +292,43 @@ main()
+ 
+ 	struct stat stopFile;
+ 	if (stat(kStopFile, &stopFile) == 0) {
+-		syslog(LOG_INFO, "prose_portal: %s is there; not listening\n", kStopFile);
++		syslog(LOG_INFO, "prose_portal: %s is there; not answering\n", kStopFile);
+ 		return 0;
+ 	}
+ 
+-	int listener = socket(AF_INET, SOCK_STREAM, 0);
+-	if (listener < 0) {
+-		syslog(LOG_ERR, "prose_portal: socket: %s\n", strerror(errno));
+-		return 1;
+-	}
+-	int one = 1;
+-	setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+-
+-	struct sockaddr_in address;
+-	memset(&address, 0, sizeof(address));
+-	address.sin_family = AF_INET;
+-	address.sin_port = htons(PROSE_PORTAL_PORT);
+-	address.sin_addr.s_addr = htonl(INADDR_ANY);
+-	if (bind(listener, (struct sockaddr*)&address, sizeof(address)) != 0
+-		|| listen(listener, 16) != 0) {
+-		syslog(LOG_ERR, "prose_portal: cannot listen on %d: %s\n",
+-			PROSE_PORTAL_PORT, strerror(errno));
+-		close(listener);
+-		return 1;
++	sDevice = open_device();
++	if (sDevice < 0) {
++		syslog(LOG_INFO, "prose_portal: no %s: automation is off on the host\n",
++			PROSE_PORTAL_DEVICE);
++		return 0;
+ 	}
+-	syslog(LOG_INFO, "prose_portal: listening on %d\n", PROSE_PORTAL_PORT);
++	syslog(LOG_INFO, "prose_portal: answering on %s\n", PROSE_PORTAL_DEVICE);
++	send_frame(PROSE_PORTAL_HELLO, 0, NULL, 0);
+ 
++	uint8* buffer = (uint8*)malloc(PROSE_PORTAL_REQUEST_SIZE);
++	if (buffer == NULL)
++		return 1;
+ 	while (true) {
+-		int connection = accept(listener, NULL, NULL);
+-		if (connection < 0) {
++		ssize_t got = read(sDevice, buffer, PROSE_PORTAL_REQUEST_SIZE);
++		if (got < 0) {
+ 			if (errno == EINTR)
+ 				continue;
+-			// Never give up the listener over one bad accept: a daemon that
+-			// stops listening can only be fixed by rebooting the machine.
+-			syslog(LOG_ERR, "prose_portal: accept: %s\n", strerror(errno));
+-			snooze(500000);
++			syslog(LOG_ERR, "prose_portal: read: %s\n", strerror(errno));
++			break;
++		}
++		if ((size_t)got < sizeof(prose_portal_header))
++			continue;
++		prose_portal_header header;
++		memcpy(&header, buffer, sizeof(header));
++		if (header.magic != PROSE_PORTAL_MAGIC || header.version != PROSE_PORTAL_VERSION) {
++			syslog(LOG_ERR, "prose_portal: a frame that is not one; ignored\n");
+ 			continue;
+ 		}
+-
+-		// A client that stops talking mid-request must not hold a thread for
+-		// ever, and one that never starts must not hold one either.
+-		struct timeval patience;
+-		patience.tv_sec = 30;
+-		patience.tv_usec = 0;
+-		setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &patience, sizeof(patience));
+-		setsockopt(connection, SOL_SOCKET, SO_SNDTIMEO, &patience, sizeof(patience));
+-
+-		thread_id thread = spawn_thread(connection_thread, "prose portal connection",
+-			B_NORMAL_PRIORITY, (void*)(addr_t)connection);
+-		if (thread < 0) {
+-			serve(connection);			// no thread to be had: serve it here
+-			close(connection);
+-		} else
+-			resume_thread(thread);
++		if (header.length > (size_t)got - sizeof(header))
++			header.length = got - sizeof(header);
++		handle(header, (const char*)buffer + sizeof(header));
+ 	}
+-	close(listener);
+-	return 0;
++	free(buffer);
++	close(sDevice);
++	return 1;
+ }
+diff --git a/src/system/kernel/device_manager/device_manager.cpp b/src/system/kernel/device_manager/device_manager.cpp
+index 693c18033f..7ce9f366ff 100644
+--- a/src/system/kernel/device_manager/device_manager.cpp
++++ b/src/system/kernel/device_manager/device_manager.cpp
+@@ -2032,6 +2032,10 @@ device_node::Probe(const char* devicePath, uint32 updateCycle)
+ 			} else if (!strcmp(devicePath, "midi")) {
+ 				// PROSE fork: MIDI ports on multimedia-class devices (the Prose MIDI device)
+ 				matches = type == PCI_multimedia;
++			} else if (!strcmp(devicePath, "misc")) {
++				// PROSE fork: the Prose Portal, a multimedia-class device by the
++				// same reasoning as the MIDI port, published under /dev/misc
++				matches = type == PCI_multimedia;
+ 			}
+ 		} else {
+ 			// This driver does not support types, but still wants to its
