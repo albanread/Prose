@@ -1,0 +1,33 @@
+From 991c0953d708ef833e92bae5de75cc4ce183539a Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 19:53:23 +0100
+Subject: [PATCH] prose_display: no colour-bar test card by default
+
+The kernel test pattern was milestone A scaffolding, from before the
+accelerant existed: it proved the pipe by drawing colour bars and an
+animated box from a kernel thread. With the accelerant driving the
+display it only flashes for a moment during boot, and the host now shows
+analogue static until the guest's first commit, so the bars interrupt
+that rather than adding anything. PRDS_TEST_PATTERN 1 restores it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ .../kernel/drivers/graphics/prose_display/prose_display.cpp     | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index 2ee1cdb250..c6b3410062 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -38,7 +38,7 @@
+ 
+ #define PRDS_EVENT_BUFFERS		8
+ #define PRDS_RESPONSE_OFFSET	2048	// in the command page
+-#define PRDS_TEST_PATTERN		1		// milestone A: draw and animate ourselves
++#define PRDS_TEST_PATTERN		0		// the host shows TV static instead (hvgpu); 1 restores the self-test
+ 
+ #define ALIGN_UP(x, a) ((((x) + (a) - 1) / (a)) * (a))
+ 
+-- 
+2.54.0 (Apple Git-157)
+

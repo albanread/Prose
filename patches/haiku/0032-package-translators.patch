@@ -1,0 +1,40 @@
+From 7cc9c8d4217f1c24c18702bee58cd2e32d62d14f Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 19:31:12 +0100
+Subject: [PATCH] Package the translators the image profile asks for
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SYSTEM_ADD_ONS_TRANSLATORS was set in every image profile but
+build/jam/packages/Haiku never added it to the package, so no translator
+ever reached the image (STXTTranslator included). Add the missing
+AddFilesToPackage line.
+
+This is why the default desktop background has never appeared: Tracker
+installs it at every start, but with no image translator it cannot decode
+the PNG. The remaining piece is a PNG translator, which needs libpng for
+arm64 (built in prose-packages, but this build resolves packages from the
+remote HaikuPorts repository, whose list is checksummed — a local package
+needs its own repository definition).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ build/jam/packages/Haiku | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 173116883c..6ebb5e98a0 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -395,6 +395,7 @@ AddFilesToPackage add-ons mail_daemon outbound_filters :
+ 	;
+ 
+ AddFilesToPackage add-ons media : $(SYSTEM_ADD_ONS_MEDIA) ;
++AddFilesToPackage add-ons Translators : $(SYSTEM_ADD_ONS_TRANSLATORS) ;
+ 
+ AddFilesToPackage add-ons Network\ Settings :
+ 	IPv4Interface
+-- 
+2.54.0 (Apple Git-157)
+

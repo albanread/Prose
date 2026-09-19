@@ -1,0 +1,91 @@
+From dc3646649c925eb1be83b0b292e1d4de84101184 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 20:12:12 +0100
+Subject: [PATCH] Use none of the upstream project's marks
+
+This build is not entitled to the Haiku name or logos, so it stops using
+them:
+
+- AboutSystem named the system in the project's own wordmark styling. It
+  now names it in plain body text, "The Haiku operating system", because
+  naming what this is a port of is necessary; presenting their mark is
+  not.
+- The trademark assertion that followed is gone. In its place: the
+  copyright belongs to Haiku, Inc. or the respective authors, their name
+  and logos belong to them, this build uses none of them and claims no
+  rights in them nor any association with the project - and claims
+  nothing here but gratitude.
+- The package no longer ships "HAIKU logo - white on blue" artwork. It was
+  only still there because Tracker's default background used to reference
+  it; the default is the PROSE wallpaper now.
+
+AboutSystem's own logo resources were already the PROSE marks.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ build/jam/packages/Haiku             |  7 +++----
+ src/apps/aboutsystem/AboutSystem.cpp | 19 ++++++++++---------
+ 2 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 2146f81b9c..155155b27b 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -275,11 +275,10 @@ SEARCH on $(firstLoginFiles)
+ AddFilesToPackage boot first-login : $(firstLoginFiles) ;
+ 
+ # artwork and sounds
++# PROSE fork branding only: the upstream logos are that project's marks and
++# this build ships none of them. The wallpaper is the default desktop
++# background, see TrackerInitialState.cpp.
+ local logoArtwork =
+-	$(HAIKU_INCLUDE_TRADEMARKS)"HAIKU logo - white on blue - big.png"
+-	$(HAIKU_INCLUDE_TRADEMARKS)"HAIKU logo - white on blue - normal.png"
+-	# PROSE fork branding (the wallpaper is the default desktop background,
+-	# see TrackerInitialState.cpp)
+ 	"PROSE logo - paper on ink - big.png"
+ 	"PROSE wallpaper - ink dark.png"
+ 	"PROSE wallpaper - paper light.png" ;
+diff --git a/src/apps/aboutsystem/AboutSystem.cpp b/src/apps/aboutsystem/AboutSystem.cpp
+index da4ff912a8..c466f4972e 100644
+--- a/src/apps/aboutsystem/AboutSystem.cpp
++++ b/src/apps/aboutsystem/AboutSystem.cpp
+@@ -1565,12 +1565,13 @@ AboutView::_CreateCreditsView()
+ 		"this system for decades. This fork only adds host integration for one "
+ 		"class of machine. Our gratitude and full credit go to them.\n\n"));
+ 
+-	// Haiku copyright
++	// The system this is built from. Named in plain text, in the body face:
++	// this fork uses no Haiku branding.
+ 	BFont font(be_bold_font);
+ 	font.SetSize(font.Size() + 4);
+ 
+-	fCreditsView->SetFontAndColor(&font, B_FONT_ALL, &fHaikuGreenColor);
+-	fCreditsView->Insert("Haiku\n");
++	fCreditsView->SetFontAndColor(be_plain_font, B_FONT_ALL, &fTextColor);
++	fCreditsView->Insert(B_TRANSLATE("The Haiku operating system\n"));
+ 
+ 	time_t time = ::time(NULL);
+ 	struct tm* tm = localtime(&time);
+@@ -1586,12 +1587,12 @@ AboutView::_CreateCreditsView()
+ 	fCreditsView->Insert(text.String());
+ 
+ 	fCreditsView->SetFontAndColor(be_plain_font, B_FONT_ALL, &fTextColor);
+-	fCreditsView->Insert(B_TRANSLATE("The copyright to the Haiku code is "
+-		"property of Haiku, Inc. or of the respective authors where expressly "
+-		"noted in the source. Haiku" B_UTF8_REGISTERED
+-		" and the HAIKU logo" B_UTF8_REGISTERED
+-		" are registered trademarks of Haiku, Inc."
+-		"\n\n"));
++	fCreditsView->Insert(B_TRANSLATE("The copyright to this code is property "
++		"of Haiku, Inc. or of the respective authors where expressly noted in "
++		"the source. The name of that project, and its logos, belong to it; "
++		"this build uses none of them and claims no rights of any kind in "
++		"them, nor any association with the project. We claim nothing here "
++		"but gratitude.\n\n"));
+ 
+ 	fCreditsView->SetFontAndColor(be_plain_font, B_FONT_ALL, &fLinkColor);
+ 	fCreditsView->InsertHyperText(B_TRANSLATE("Visit the Haiku website"),
+-- 
+2.54.0 (Apple Git-157)
+

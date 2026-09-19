@@ -1,0 +1,103 @@
+From d6bed84b5d842e8378600691ec489f369b56196f Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 20:10:46 +0100
+Subject: [PATCH] Image formats: the translators, from packages built in
+ prose-packages
+
+The image shipped no translators at all until the packaging fix, and then
+only PNG. It now carries the full set this build can produce:
+
+  no external dependency - BMP, GIF, HVIF, ICO, PCX, PPM, PSD, RTF, SGI,
+  STXT, TGA. These needed nothing but listing; they were simply absent.
+
+  from local packages - JPEG (libjpeg_turbo), PNG (libpng16), TIFF (tiff),
+  WebP (libwebp). Verified to link: libjpeg.so.62, libtiff.so.6,
+  libwebp.so.7. giflib rides along because libwebp requires lib:libgif.
+
+The libraries are installed into the image through UserBuildConfig so the
+translators can load at runtime.
+
+Not available: AVIF needs libavif1.0_devel, JPEG2000 needs jasper, ICNS
+needs libicns_devel and RAW needs libraw - none built yet. Audio and video
+decoding is a bigger gap: Haiku decodes media through its ffmpeg plugin,
+so the audio and video codec libraries that exist in prose-packages
+(vorbis, opus, flac, speex, mpg123, lame, theora, vpx, dav1d, wavpack)
+cannot be used by the media kit on their own; they are dependencies for
+building ffmpeg, which is the package that would actually give playback.
+
+Note: the JPEG translator's catalog (translation string) pass fails on a
+missing jpeglib.h because that pass does not get build-feature headers.
+The translator itself builds and links; only its localisations are absent.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ build/jam/UserBuildConfig               |  2 +-
+ build/jam/images/definitions/minimum    | 21 ++++++++++++++++++---
+ build/jam/repositories/HaikuPorts/arm64 |  8 ++++++++
+ 3 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/build/jam/UserBuildConfig b/build/jam/UserBuildConfig
+index b41a619728..a634cdbc2d 100644
+--- a/build/jam/UserBuildConfig
++++ b/build/jam/UserBuildConfig
+@@ -2,4 +2,4 @@
+ # libpng16 provides the runtime library for PNGTranslator, which Tracker needs
+ # to decode the desktop wallpaper. The package is built in prose-packages and
+ # resolved locally (HAIKU_NO_DOWNLOADS=1, see private_workspace/README.md).
+-AddHaikuImageSystemPackages libpng16 ;
++AddHaikuImageSystemPackages libpng16 libjpeg_turbo tiff libwebp giflib ;
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 0ff4abcdc5..345175f0f8 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -281,10 +281,25 @@ SYSTEM_ADD_ONS_ACCELERANTS = [ FFilterByBuildFeatures
+ 	}@ # riscv64
+ ] ;
+ 
+-SYSTEM_ADD_ONS_TRANSLATORS =
+-	PNGTranslator@libpng
++SYSTEM_ADD_ONS_TRANSLATORS = [ FFilterByBuildFeatures
++	# no external dependency
++	BMPTranslator
++	GIFTranslator
++	HVIFTranslator
++	ICOTranslator
++	PCXTranslator
++	PPMTranslator
++	PSDTranslator
++	RTFTranslator
++	SGITranslator
+ 	STXTTranslator
+-;
++	TGATranslator
++	# from packages built in prose-packages
++	JPEGTranslator@jpeg
++	PNGTranslator@libpng
++	TIFFTranslator@tiff
++	WebPTranslator@libwebp
++] ;
+ 
+ SYSTEM_ADD_ONS_LOCALE_CATALOGS =
+ 	<catalog-addon>plaintext
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index ffd377c1f9..00987c9ad3 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -40,6 +40,14 @@ RemotePackageRepository HaikuPorts
+ 	sed-4.9_bootstrap-1
+ 	texinfo-7.2_bootstrap-1
+ 	libpng16-1.6.53-1
++	libjpeg_turbo-3.1.4.1-1
++	libjpeg_turbo_devel-3.1.4.1-1
++	tiff-4.7.0-1
++	tiff_devel-4.7.0-1
++	libwebp-1.6.0-3
++	libwebp_devel-1.6.0-3
++	giflib-5.2.2-1
++	giflib_devel-5.2.2-1
+ 	libpng16_devel-1.6.53-1
+ 	zlib-1.2.13_bootstrap-1
+ 	zlib_devel-1.2.13_bootstrap-1
+-- 
+2.54.0 (Apple Git-157)
+

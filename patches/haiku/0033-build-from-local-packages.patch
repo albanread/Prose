@@ -1,0 +1,82 @@
+From f91a42f170ee479ecf35e69ea3f9050bd823b889 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Fri, 18 Sep 2026 19:43:18 +0100
+Subject: [PATCH] Build from local packages: no remote resolution, libpng from
+ prose-packages
+
+The build resolved third-party packages from eu.hpkg.haiku-os.org: the
+package list in build/jam/repositories/HaikuPorts/<arch> is checksummed
+and that checksum selects a server-side repository snapshot, so a locally
+built package could not be added at all (adding one made the build fetch
+a snapshot that does not exist - 404).
+
+Haiku already supports building without that: with HAIKU_NO_DOWNLOADS=1
+the build synthesises the repository from whatever .hpkg files are in
+generated/download/ and only offers packages whose files are actually
+present. Set it in generated/build/BuildConfig (not tracked - see
+private_workspace/README.md) and drop packages into generated/download/.
+
+With that, libpng16 and libpng16_devel (built in prose-packages) are
+listed in the repository and PNGTranslator builds and ships. libpng16 is
+added to the image through UserBuildConfig so the translator has its
+runtime library.
+
+Note: locally built packages must carry the vendor the repository expects
+("Haiku Project"); package_repo rejects a foreign vendor outright. The
+prose-packages builds say "Prose", so their .PackageInfo is rewritten and
+the package recreated before use.
+
+Result: the PROSE wallpaper renders on the desktop.
+
+Testing note: verify the desktop in a windowed run. A headless
+--screenshot dumps the surface pool, and with no window, no display link
+and no input the desktop never repaints the background into the front
+buffer, so it shows the pre-wallpaper state and looks like a failure.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ build/jam/UserBuildConfig               | 5 +++++
+ build/jam/images/definitions/minimum    | 1 +
+ build/jam/repositories/HaikuPorts/arm64 | 2 ++
+ 3 files changed, 8 insertions(+)
+ create mode 100644 build/jam/UserBuildConfig
+
+diff --git a/build/jam/UserBuildConfig b/build/jam/UserBuildConfig
+new file mode 100644
+index 0000000000..b41a619728
+--- /dev/null
++++ b/build/jam/UserBuildConfig
+@@ -0,0 +1,5 @@
++# PROSE fork: packages this image needs beyond the profile's own list.
++# libpng16 provides the runtime library for PNGTranslator, which Tracker needs
++# to decode the desktop wallpaper. The package is built in prose-packages and
++# resolved locally (HAIKU_NO_DOWNLOADS=1, see private_workspace/README.md).
++AddHaikuImageSystemPackages libpng16 ;
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index d15c95d3ec..0ff4abcdc5 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -282,6 +282,7 @@ SYSTEM_ADD_ONS_ACCELERANTS = [ FFilterByBuildFeatures
+ ] ;
+ 
+ SYSTEM_ADD_ONS_TRANSLATORS =
++	PNGTranslator@libpng
+ 	STXTTranslator
+ ;
+ 
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 85ff062d54..ffd377c1f9 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -39,6 +39,8 @@ RemotePackageRepository HaikuPorts
+ 	python3.10-3.10.19_bootstrap-1
+ 	sed-4.9_bootstrap-1
+ 	texinfo-7.2_bootstrap-1
++	libpng16-1.6.53-1
++	libpng16_devel-1.6.53-1
+ 	zlib-1.2.13_bootstrap-1
+ 	zlib_devel-1.2.13_bootstrap-1
+ 	:
+-- 
+2.54.0 (Apple Git-157)
+
