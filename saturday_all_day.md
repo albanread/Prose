@@ -130,31 +130,23 @@ Worth writing down because each one wasted an hour or more.
 - **`CADisplayLink` stops when the host display sleeps.** "0 vsyncs" is usually
   the Mac being asleep, not a bug. The guest never waits on vsync without a
   timeout.
-
----
-
-## Mistakes, honestly
-
-- **The cursor overlay was reverted.** Moving the Haiku cursor to a host layer
-  cost an hour and was abandoned on time grounds. The cause was found one
-  minute too late: the accelerant's own pool-bandwidth test memsets the last
-  4 MiB of the pool with `0x5a`, which lands exactly on the cursor block. A
-  two-line fix if we come back to it.
-- **I reported the wallpaper as broken when it worked.** I tested with headless
-  `--screenshot` runs, which dump the surface pool; with no window, no display
-  link and no input, the desktop never repaints the background into the front
-  buffer, so I kept capturing the pre-wallpaper state. I stated that result as
-  fact and pushed for more libpng work on the strength of it. **Verify the
-  desktop in a windowed run.**
-- **I called the inherited artwork good** having reviewed only its wiring. The
-  design needed replacing, and its wiring had three real faults: 1920×626 logos
-  labelled "tiny" that would have blown out the About window ~12×, deletion of
-  the file Tracker hardcodes as the default background, and wallpapers shipped
-  that nothing referenced.
-- **The harness hid a working feature.** `run-vz.sh` copied a fresh image every
-  run, which is right for tests and wrong for use: Tracker writes the desktop
-  background at first boot and it renders from the *next* one, so we never saw
-  it. `--keep` now reuses the disk.
+- **The accelerant's pool-bandwidth test overwrites the end of the pool.** At
+  init it memsets the last 4 MiB with `0x5a`, which is exactly where the cursor
+  block sits (`poolSize - 128 KiB`), so a host cursor overlay reads a block of
+  `0x5a`. The overlay was reverted on time grounds; this is the two-line fix if
+  it comes back.
+- **A headless `--screenshot` run captures a desktop that never repainted.** It
+  dumps the surface pool, and with no window, no display link and no input
+  app_server never draws the background into the front buffer, so the capture
+  shows the pre-wallpaper state however long the run is. Check the desktop in a
+  windowed run.
+- **`run-vz.sh` copied a fresh image every run**, which is right for tests and
+  wrong for use: Tracker writes the desktop background at first boot and renders
+  it from the *next* one, so it never appeared. `--keep` reuses the disk.
+- **The inherited artwork's wiring had three faults**: logos of 1920×626
+  labelled "tiny", which would have blown out the About window about 12×;
+  deletion of the file Tracker hardcodes as the default background; and
+  wallpapers shipped that nothing referenced.
 
 ---
 
