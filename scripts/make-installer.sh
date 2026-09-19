@@ -77,7 +77,10 @@ say "putting the machine inside the application ($(du -m "$IMAGE" | cut -f1) MiB
 cp "$IMAGE" "$STAGED/Contents/Resources/prose.image"
 
 # the version the installer and the Finder show
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0" \
+# 0.1, not 1.0: the README calls this an unofficial, experimental, lightly
+# tested port, and the version a person reads in Get Info should not say
+# otherwise. $VERSION is the build number (commits on main).
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${PROSE_SHORT_VERSION:-0.1}" \
 	-c "Set :CFBundleVersion $VERSION" "$STAGED/Contents/Info.plist" >/dev/null
 
 # ------------------------------------------------------------------- sign
