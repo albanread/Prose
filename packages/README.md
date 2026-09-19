@@ -23,6 +23,13 @@ Results: [RESULTS.md](RESULTS.md) (regenerated on every build), packages in
 
 ## Putting packages on our image
 
+The fork's image (`private_workspace/build.sh`, patch 0040) is built with the
+codec set in it: the Haiku build takes the packages from its
+`generated/download/`, where `private_workspace/addpkg.sh` puts them (see
+`private_workspace/README.md`, "Local packages"). After rebuilding a codec, run
+addpkg.sh for it and rebuild the image. `install` is for everything else, and
+for trying packages without rebuilding the image:
+
 ```sh
 scripts/prosepkg install <image> libwebp flac     # + their requirements
 scripts/prosepkg install <image> @codecs          # a set: packages/sets/codecs
@@ -33,7 +40,7 @@ packages/boot-test.sh packages/tests/codecs.sh codec_check   # boot test, see be
 
 `install` copies the packages into the image's `system/packages`, and
 packagefs activates them at the next boot. Requirements are resolved against
-what the image already has. System packages the image lacks come from the
+what the image already has, whether system packages or ours. System packages the image lacks come from the
 base set (the minimum image has no `grep`, for example). Older versions of
 the same packages are removed, and the result is checked by remounting. The
 run scripts install into their fresh copy, never into the build output.

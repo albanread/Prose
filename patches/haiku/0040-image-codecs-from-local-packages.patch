@@ -1,0 +1,123 @@
+From 4023acbd36eccf0b5861f27434fb9da8227f3834 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 03:30:34 +0100
+Subject: [PATCH] Codecs: every codec library built in prose-packages goes into
+ the image
+
+The image carried only the five libraries the image translators link
+against. It now carries all 19 codecs built in prose-packages (HaikuArmQemu
+packages/sets/codecs, verified on arm64 by its codec_check boot test):
+
+  images - libpng16, libjpeg_turbo, tiff, libwebp, giflib, openjpeg, lcms
+  audio  - libogg, libvorbis, flac, opus, speex, speexdsp, mpg123, lame,
+           wavpack
+  video  - libtheora, libvpx, dav1d
+
+The build resolves what they require from the same local repository and
+adds libiconv (lame) and libtool_libltdl (mpg123) itself.
+
+All of them are the builds for the Apple M1 feature floor with NEON on
+(libvpx and mpg123 with their NEON code paths). This includes the five that
+were already here: the copies in generated/download/ were made before that
+rebuild and have been replaced.
+
+The repository list keeps all locally built packages in one sorted block.
+The package files are put into generated/download/ by HaikuArmQemu
+private_workspace/addpkg.sh, which rewrites the vendor as before.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ build/jam/UserBuildConfig               | 18 ++++++---
+ build/jam/repositories/HaikuPorts/arm64 | 49 +++++++++++++++++++++----
+ 2 files changed, 54 insertions(+), 13 deletions(-)
+
+diff --git a/build/jam/UserBuildConfig b/build/jam/UserBuildConfig
+index a634cdbc2d..173447c276 100644
+--- a/build/jam/UserBuildConfig
++++ b/build/jam/UserBuildConfig
+@@ -1,5 +1,13 @@
+-# PROSE fork: packages this image needs beyond the profile's own list.
+-# libpng16 provides the runtime library for PNGTranslator, which Tracker needs
+-# to decode the desktop wallpaper. The package is built in prose-packages and
+-# resolved locally (HAIKU_NO_DOWNLOADS=1, see private_workspace/README.md).
+-AddHaikuImageSystemPackages libpng16 libjpeg_turbo tiff libwebp giflib ;
++# PROSE fork: packages this image needs beyond the profile's own list. They
++# are built in prose-packages and resolved locally (HAIKU_NO_DOWNLOADS=1, see
++# private_workspace/README.md); the build adds what they require on top
++# (libiconv, libtool_libltdl).
++#
++# Image codecs. libpng16 provides the runtime library for PNGTranslator, which
++# Tracker needs to decode the desktop wallpaper; the JPEG, TIFF and WebP
++# translators need the next three, and libwebp needs giflib.
++AddHaikuImageSystemPackages libpng16 libjpeg_turbo tiff libwebp giflib
++	openjpeg lcms ;
++# Audio and video codecs.
++AddHaikuImageSystemPackages libogg libvorbis flac opus speex speexdsp mpg123
++	lame wavpack libtheora libvpx dav1d ;
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 00987c9ad3..996609cad1 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -39,18 +39,51 @@ RemotePackageRepository HaikuPorts
+ 	python3.10-3.10.19_bootstrap-1
+ 	sed-4.9_bootstrap-1
+ 	texinfo-7.2_bootstrap-1
+-	libpng16-1.6.53-1
++	zlib-1.2.13_bootstrap-1
++	zlib_devel-1.2.13_bootstrap-1
++	# built in prose-packages, vendor rewritten by HaikuArmQemu
++	# private_workspace/addpkg.sh (resolved from generated/download/)
++	dav1d-1.5.4-2
++	dav1d_devel-1.5.4-2
++	flac-1.5.0-1
++	flac_devel-1.5.0-1
++	giflib-5.2.2-1
++	giflib_devel-5.2.2-1
++	lame-3.100-4
++	lame_devel-3.100-4
++	lcms-2.19.1-1
++	lcms_devel-2.19.1-1
++	libiconv-1.18-1
++	libiconv_devel-1.18-1
+ 	libjpeg_turbo-3.1.4.1-1
+ 	libjpeg_turbo_devel-3.1.4.1-1
+-	tiff-4.7.0-1
+-	tiff_devel-4.7.0-1
++	libogg-1.3.6-2
++	libogg_devel-1.3.6-2
++	libpng16-1.6.53-1
++	libpng16_devel-1.6.53-1
++	libtheora-1.1.1-8
++	libtheora_devel-1.1.1-8
++	libtool_libltdl-2.5.4-1
++	libvorbis-1.3.7-1
++	libvorbis_devel-1.3.7-1
++	libvpx-1.13.1-1
++	libvpx_devel-1.13.1-1
+ 	libwebp-1.6.0-3
+ 	libwebp_devel-1.6.0-3
+-	giflib-5.2.2-1
+-	giflib_devel-5.2.2-1
+-	libpng16_devel-1.6.53-1
+-	zlib-1.2.13_bootstrap-1
+-	zlib_devel-1.2.13_bootstrap-1
++	mpg123-1.32.9-1
++	mpg123_devel-1.32.9-1
++	openjpeg-2.5.4-1
++	openjpeg_devel-2.5.4-1
++	opus-1.3.1-2
++	opus_devel-1.3.1-2
++	speex-1.2.1-2
++	speex_devel-1.2.1-2
++	speexdsp-1.2.1-1
++	speexdsp_devel-1.2.1-1
++	tiff-4.7.0-1
++	tiff_devel-4.7.0-1
++	wavpack-5.5.0-3
++	wavpack_devel-5.5.0-3
+ 	:
+ 	# source packages
+ 	bash
+-- 
+2.54.0 (Apple Git-157)
+

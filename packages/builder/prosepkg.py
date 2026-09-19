@@ -1565,12 +1565,15 @@ def install_closure(specs, image_names):
 	for hpkg in sorted((BASE / 'packages').glob('*.hpkg')):
 		info = package_info(hpkg)
 		system[info['name'][0]] = (hpkg, info)
+	# what the image provides: its packages, system or built by us (an image
+	# built with our codecs already has lib:libpng16, for example)
 	in_image = set(image_names)
+	for name, (hpkg, info) in list(system.items()) + list(packages.items()):
+		if name in image_names:
+			in_image.update(entry_name(p) for p in info.get('provides', []))
 	system_provides = {}
 	for name, (hpkg, info) in system.items():
 		for p in info.get('provides', []) + [name]:
-			if name in image_names:
-				in_image.add(entry_name(p))
 			system_provides.setdefault(entry_name(p), name)
 	results = load_json(RESULTS, {})
 	todo = []

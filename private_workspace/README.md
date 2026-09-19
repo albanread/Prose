@@ -4,7 +4,7 @@ The main Haiku tree (`/Volumes/HaikuSrc/haiku`) and its image (`haiku-mmc.image`
 
 | What | Where |
 |---|---|
-| Haiku source | `/Volumes/HaikuSrc/private_workspace/haiku`: a git **worktree** of the main repo, branch `vz-fork` (hrev60122 + `patches/haiku/0001`–`0008` as one commit each) |
+| Haiku source | `/Volumes/HaikuSrc/private_workspace/haiku`: a git **worktree** of the main repo, branch `vz-fork` (hrev60122 + `patches/haiku/0001`–`0040` as one commit each) |
 | Build output | its own `generated/` (cross-tools are reused from the main tree, read-only) |
 | Image | `/Volumes/HaikuSrc/private_workspace/haiku/haiku-mmc.image` |
 | Run scratch (copies of the image, logs) | `private_workspace/work/` (gitignored) |
@@ -70,3 +70,15 @@ $P create -q /Volumes/HaikuSrc/private_workspace/haiku/generated/download/<pkg>.
 4. To install a package into the image (not just make it available to the
    build), add it to `build/jam/UserBuildConfig` with
    `AddHaikuImageSystemPackages <name> ;`.
+
+`private_workspace/addpkg.sh <name>...` does step 3 and the copy of step 2 for
+packages built by prosepkg: it takes `<name>` and `<name>_devel` from
+prose-packages' `repo/` and prints the lines for the repository list. The image
+carries the whole codec set this way (patch 0040). When prosepkg rebuilds a
+codec, copy it again and rebuild the image, or the image keeps the old build:
+
+```bash
+private_workspace/addpkg.sh $(grep -v '^#' packages/sets/codecs) libiconv libtool_libltdl
+private_workspace/build.sh
+packages/boot-test.sh packages/tests/codecs.sh codec_check   # 19/19 on the image's own packages
+```
