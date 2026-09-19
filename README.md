@@ -8,6 +8,9 @@ running under macOS 27's Virtualization.framework with a host-GPU-backed display
 > **This is not Haiku.** Haiku itself — the real thing, and very much worth your
 > time — is at **[haiku-os.org](https://www.haiku-os.org)**.
 
+*This repo does not accept issues, does not accept pull requests. Open source,
+please do fork, copy, rewrite and reuse.*
+
 ---
 
 ## Why "prose"?
