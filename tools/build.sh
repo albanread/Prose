@@ -48,6 +48,12 @@ build_app() {
 	# the scripting dictionary: AppleScript, Shortcuts and osascript read this
 	mkdir -p "$app/Contents/Resources"
 	cp "$src/Prose.sdef" "$app/Contents/Resources/Prose.sdef"
+	# the Finder icon: the app draws its own, at every size Apple wants, and
+	# iconutil packs them. Generated, so it can never drift from the Dock icon.
+	rm -rf "$app/Contents/Resources/Prose.iconset"
+	"$exe" --write-iconset "$app/Contents/Resources/Prose.iconset"
+	iconutil -c icns "$app/Contents/Resources/Prose.iconset" -o "$app/Contents/Resources/Prose.icns"
+	rm -rf "$app/Contents/Resources/Prose.iconset"
 	codesign --force -s - --entitlements "$ENT" "$app"
 	rm -f "$OUT/hvgpu"
 	printf '#!/bin/sh\n# hvgpu runs as the Prose app: see tools/build.sh\nexec "$(dirname "$0")/../Prose.app/Contents/MacOS/hvgpu" "$@"\n' \

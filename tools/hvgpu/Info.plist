@@ -25,6 +25,8 @@
 	<true/>
 	<key>OSAScriptingDefinition</key>
 	<string>Prose.sdef</string>
+	<key>CFBundleIconFile</key>
+	<string>Prose</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
