@@ -1,6 +1,7 @@
 #!/bin/sh
 # The Prose profile's applications (patch 0042): Haiku's regular apps and
-# demos, and the ported ones. Counts what is there, then starts a few in the
+# demos, and the ported ones, less what build/jam/ProseBlocklist leaves out
+# (patch 0060). Counts what is there, then starts a few in the
 # background and checks they are still running after a moment (a program
 # that cannot load its libraries, or crashes at startup, is gone by then).
 # Runs on the target from boot-test.sh; the last line is PASS or FAIL.
@@ -14,7 +15,7 @@ say "apps: $(count /boot/system/apps), demos: $(count /boot/system/demos), prefe
 for f in /boot/system/apps/ActivityMonitor /boot/system/apps/Icon-O-Matic /boot/system/apps/MediaPlayer \
 		/boot/system/apps/People /boot/system/demos/Chart /boot/system/demos/Mandelbrot \
 		/boot/system/apps/Pe/Pe /boot/system/apps/ArtPaint/ArtPaint /boot/system/apps/BeShare \
-		/boot/system/apps/Vision/Vision /boot/system/lib/libmail.so /boot/system/lib/libmidi.so \
+		/boot/system/lib/libmail.so /boot/system/lib/libmidi.so \
 		/boot/system/data/fonts/otfonts/NotoSansCJKjp-VF.otf; do
 	if [ -e "$f" ]; then say "present: $f"; else say "MISSING: $f"; fail=1; fi
 done

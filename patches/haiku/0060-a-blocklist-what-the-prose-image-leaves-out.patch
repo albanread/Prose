@@ -1,4 +1,4 @@
-From b22cd70fce8784fb734c646046b3ee809d2f588b Mon Sep 17 00:00:00 2001
+From db6ce27e36d34706e8ba805a3202321788b2cea1 Mon Sep 17 00:00:00 2001
 From: albanread <albanread@googlemail.com>
 Date: Sat, 19 Sep 2026 19:32:26 +0100
 Subject: [PATCH] A blocklist: what the Prose image leaves out
@@ -21,14 +21,14 @@ line, in two lists, and no image gets them:
   of that package when local-packages copies it in.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-Prose-Patch: 0060-a-blocklist-what-the-prose-image-leaves-out.patch 2e717b919bd946dec6db0ec34fccf8a5743612ff09460cb12554af6b3ad4903a
+Prose-Patch: 0060-a-blocklist-what-the-prose-image-leaves-out.patch f352f43c4f8a08aece678613e011b750eb9498a52b557453d515dc90d4778ef8
 ---
  build/jam/DefaultBuildProfiles  |  4 +++
- build/jam/ImageRules            |  9 ++++++
- build/jam/ProseBlocklist        | 57 +++++++++++++++++++++++++++++++++
+ build/jam/ImageRules            |  9 +++++
+ build/jam/ProseBlocklist        | 62 +++++++++++++++++++++++++++++++++
  build/jam/images/HaikuImage     |  8 +++++
- build/scripts/build_haiku_image |  9 ++++++
- 5 files changed, 87 insertions(+)
+ build/scripts/build_haiku_image |  9 +++++
+ 5 files changed, 92 insertions(+)
  create mode 100644 build/jam/ProseBlocklist
 
 diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
@@ -72,10 +72,10 @@ index 52a724f86c..fccb777342 100644
  			Echo "AddHaikuImagePackages: package" $(package)
 diff --git a/build/jam/ProseBlocklist b/build/jam/ProseBlocklist
 new file mode 100644
-index 0000000000..f8871f9abe
+index 0000000000..4e9739cf50
 --- /dev/null
 +++ b/build/jam/ProseBlocklist
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,62 @@
 +# What the Prose image leaves out (Prose fork): of no use on Prose, or
 +# crashing. Two lists, one name a line, with what it is.
 +#
@@ -110,9 +110,14 @@ index 0000000000..f8871f9abe
 +	becheckers			# BeCheckers
 +	bong				# Bong
 +	w6					# W6
++	ponyexpress			# PonyExpress
++	vision				# Vision, the IRC client
++	cdplayer			# CDPlayer
++	phantomlimb			# PhantomLimb
 +	;
 +
 +PROSE_BLOCKED_APPS =
++	CodyCam				# a webcam viewer
 +	DiskProbe			# a hex editor for files and disks
 +	DiskUsage			# which files take up a disk
 +	SerialConnect		# a terminal for serial ports
