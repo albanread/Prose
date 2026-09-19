@@ -1,0 +1,54 @@
+From 21f96a838359850921d0b1a94bbd06080579bb2d Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 08:34:24 +0100
+Subject: [PATCH] Prose profile: the General MIDI soundfont
+
+Haiku's own softsynth (BSynth, src/kits/midi/SoftSynth.cpp:124) loads
+data/synth/TimGM6mb.sf2 from the timgmsoundfont package. The stock
+regular profile asks for it, but the package does not exist for arm64 in
+build/jam/repositories/HaikuPorts/arm64, and the Prose profile's own
+package list did not name it either.
+
+So the image had no soundfont at all: BSynth had nothing to load and
+MidiPlayer -- and every other app that plays through the internal synth
+-- was silent. The only working MIDI output was the Prose MIDI port,
+which sends the guest's notes to the Mac's General MIDI synth.
+
+The package is data only (ARCHITECTURES="any", a no-op BUILD, an INSTALL
+that copies one .sf2), built by HaikuArmQemu's prosepkg from the
+haiku-data/timgmsoundfont recipe.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0046-prose-profile-the-general-midi-soundfont.patch 4eb04df662477307942f656b8c2f52cbbe7cb26e3914a79f4e74df39d04aa354
+---
+ build/jam/DefaultBuildProfiles          | 4 ++++
+ build/jam/repositories/HaikuPorts/arm64 | 1 +
+ 2 files changed, 5 insertions(+)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 466b087ba4..b20ce36e5b 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -216,6 +216,10 @@ rule DefineDefaultBuildProfiles
+ 				gzip
+ 				tar
+ 				which
++				# the General MIDI soundfont Haiku's own softsynth loads
++				# (BSynth: data/synth/TimGM6mb.sf2); without it MidiPlayer
++				# and every BSynth app are silent
++				timgmsoundfont
+ 				# the web browser
+ 				netsurf
+ 				# applications
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 6de0bff221..87f35d8d26 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -5,6 +5,7 @@ RemotePackageRepository HaikuPorts
+ 	# architecture "any" packages
+ 	# from prose-packages (the server has no arm64 snapshot of this list)
+ 	ca_root_certificates-2026_07_16-1
++	timgmsoundfont-2011.12.11-1
+ 	noto_sans_cjk_jp-2.004-2
+ 	haikuporter-0_bootstrap-1
+ 	noto-20170202_bootstrap-7

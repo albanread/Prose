@@ -1341,8 +1341,11 @@ class Builder:
 			source_dir = port.keys.get('SOURCE_DIR' + sfx, '')
 			base = work / ('sources' if index == '1' else 'sources-' + index)
 			base.mkdir()
-			self._unpack(uris, checksum, filename, source_dir, base, log)
-			sdir = base / source_dir.split('/')[0] if source_dir else base
+			self._unpack(uris, checksum, filename, source_dir, base, log, port.recipe.parent)
+			# the whole relative path, not just its first component: haikuporter's
+			# sourceSubDir may be nested (timgmsoundfont: common/data/synth).
+			# Unpacking still filters on the top-level member above.
+			sdir = base / source_dir if source_dir else base
 			if not sdir.is_dir():
 				raise BuildError('source dir %s missing after unpacking (SOURCE_DIR?)'
 					% source_dir)
@@ -1362,7 +1365,7 @@ class Builder:
 			log.write('applying overlay patch %s\n' % patch.name)
 			run(['git', 'apply', '--verbose', '-p1', patch], cwd=sdir, log=log)
 
-	def _unpack(self, uris, checksum, filename, source_dir, base, log):
+	def _unpack(self, uris, checksum, filename, source_dir, base, log, recipe_dir):
 		uri = uris[0]
 		if uri.startswith('git+') or uri.startswith('git://'):
 			url, _, rev = uri[4 if uri.startswith('git+') else 0:].partition('#')
@@ -1375,12 +1378,29 @@ class Builder:
 		urls = [u.split('#')[0] for u in uris]
 		name = filename or urls[0].rstrip('/').rsplit('/', 1)[-1]
 		cached = DOWNLOADS / name
-		if not cached.exists() or (checksum and sha256(cached) != checksum):
+		# A file:// source is a file in the recipe's own directory, so there is
+		# nothing to verify it against: haikuporter's SourceFetcherForLocalFile
+		# sets sourceShouldBeValidated = False and never checksums one (several
+		# haiku-data recipes carry a CHECKSUM_SHA256 that does not match their
+		# own file). Copy it afresh every time, as haikuporter symlinks it.
+		local_source = urls[0].startswith('file://')
+		if local_source or not cached.exists() or (checksum and sha256(cached) != checksum):
 			# curl, not urllib: urllib's macOS proxy lookup loads Network.framework
 			# into this process, whose atfork handler then crashes forked
 			# children (SIGSEGV before exec) on macOS 27
 			tmp = cached.with_name(cached.name + '.part')
 			for url in urls:
+				if url.startswith('file://'):
+					# as haikuporter: a file:// URI names a file kept beside the
+					# recipe (haiku-data ports ship their data that way)
+					local = recipe_dir / url[len('file://'):]
+					log.write('copying %s\n' % local)
+					if not local.is_file():
+						log.write('  not there\n')
+						continue
+					shutil.copy2(local, tmp)
+					os.replace(tmp, cached)
+					break
 				log.write('downloading %s\n' % url)
 				log.flush()
 				proc = subprocess.run(['curl', '-fsSL', '--retry', '3', '--connect-timeout', '30',
@@ -1392,9 +1412,9 @@ class Builder:
 			else:
 				tmp.unlink(missing_ok=True)
 				raise BuildError('cannot download %s' % name)
-		if checksum and sha256(cached) != checksum:
+		if checksum and not local_source and sha256(cached) != checksum:
 			raise BuildError('checksum mismatch for %s' % name)
-		if not checksum:
+		if not checksum and not local_source:
 			log.write('warning: no CHECKSUM_SHA256 for %s\n' % name)
 		if noarchive:
 			# as haikuporter: the file goes into the source dir itself

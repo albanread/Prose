@@ -267,6 +267,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | timebomb | 0.4.0-1 | built | timebomb-0.4.0-1-arm64.hpkg |
 | timecop | 0.61-6 | built | timecop-0.61-6-arm64.hpkg |
 | timetracker | 0.2-4 | built | timetracker-0.2-4-arm64.hpkg |
+| timgmsoundfont | 2011.12.11-1 | built | timgmsoundfont-2011.12.11-1-any.hpkg |
 | tinyxml | 2.6.2-6 | built | tinyxml-2.6.2-6-arm64.hpkg, tinyxml_devel-2.6.2-6-arm64.hpkg |
 | tinyxml2 | 11.0.0-1 | built | tinyxml2-11.0.0-1-arm64.hpkg, tinyxml2_devel-11.0.0-1-arm64.hpkg |
 | tipster | 1.1.3-2 | built | tipster-1.1.3-2-arm64.hpkg |
