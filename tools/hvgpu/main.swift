@@ -151,6 +151,34 @@ func installedMachine() -> String? {
     }
 }
 
+/// --write-iconset DIR: the Finder icon, from the same drawing as the Dock icon.
+/// The build turns the set into Contents/Resources/Prose.icns; one drawing, one
+/// look everywhere, and no image file to keep in step with the code.
+///
+/// Before the installed-machine logic below, which treats "no disk argument"
+/// as "launched by the system" -- and would open a log and look for a machine.
+if let dir = option("--write-iconset") {
+    _ = NSApplication.shared
+    let folder = URL(fileURLWithPath: dir, isDirectory: true)
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    for points in [16, 32, 128, 256, 512] {
+        for scale in [1, 2] {
+            let pixels = points * scale
+            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                  let context = NSGraphicsContext(bitmapImageRep: rep) else { continue }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            ProseIcon.image(size: CGFloat(pixels)).draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
+            NSGraphicsContext.restoreGraphicsState()
+            let name = "icon_\(points)x\(points)\(scale == 2 ? "@2x" : "").png"
+            try? rep.representation(using: .png, properties: [:])?.write(to: folder.appendingPathComponent(name))
+        }
+    }
+    exit(0)
+}
+
 var diskArgument: String? = args.count >= 2 && !args[1].hasPrefix("--") ? args[1] : nil
 /// No disk on the command line: this is an installed copy, opened rather than run
 /// by a script. It sets up its own folders (hostfs.swift shares one by default).
