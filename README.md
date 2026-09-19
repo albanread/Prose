@@ -258,8 +258,9 @@ table there also records why each one exists.
 
 ## Licence
 
-The patches are against Haiku and carry Haiku's MIT licence. The host
-application and tools in this repository are MIT licensed. The demo tunes are
+The host application and the tools in this repository are MIT licensed; see
+[LICENSE](LICENSE). The patches are against Haiku and carry Haiku's own MIT
+licence. The demo tunes are
 arrangements of works long out of copyright.
 
 ---
