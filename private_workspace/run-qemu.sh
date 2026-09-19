@@ -69,7 +69,10 @@ echo ">>> serial: $D/serial.log"
 if [ -n "$SECONDS_LIMIT" ]; then
 	# system_powerdown first so the guest syncs its disk (a hard kill loses written files)
 	( sleep $((SECONDS_LIMIT - 30)); echo system_powerdown | nc -U "$MON" > /dev/null 2>&1 ) &
+	POWERDOWN=$!
 	gtimeout "$SECONDS_LIMIT" qemu-system-aarch64 "${args[@]}" ${EXTRA[@]+"${EXTRA[@]}"} || true
+	# the next run may use the same socket: this run's powerdown must not reach it
+	kill "$POWERDOWN" 2>/dev/null || true
 	python3 "$PW_ROOT/sprint0/boot_markers.py" "$D/serial.log" || true
 else
 	exec qemu-system-aarch64 "${args[@]}" ${EXTRA[@]+"${EXTRA[@]}"}

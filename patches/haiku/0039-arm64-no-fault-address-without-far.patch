@@ -1,0 +1,50 @@
+From 798fd9a09765107dfe012b5f5603f3618dc035db Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 03:14:03 +0100
+Subject: [PATCH] arm64: no fault address from an abort whose FAR is not valid
+
+Follow-up to "every exception from user mode becomes a real signal",
+from a review of it:
+- An external abort that the ISS marks FnV has no valid FAR. SIGBUS now
+  carries address 0 instead of whatever FAR held. The syslog line still
+  prints the ESR, so FnV is visible there.
+- The comment on EXCP_ILL_STATE said an illegal exception return sets
+  PSTATE.IL. An illegal return does not change the exception level, so
+  PSTATE.IL at EL0 comes from a legal return whose SPSR had IL set.
+
+trap_check (HaikuArmQemu private_workspace/trap-test.sh) still passes
+14/14 under QEMU+HVF.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ src/system/kernel/arch/arm64/arch_int.cpp | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/src/system/kernel/arch/arm64/arch_int.cpp b/src/system/kernel/arch/arm64/arch_int.cpp
+index dcf7c4aad4..58002391c1 100644
+--- a/src/system/kernel/arch/arm64/arch_int.cpp
++++ b/src/system/kernel/arch/arm64/arch_int.cpp
+@@ -298,8 +298,8 @@ do_sync_handler(iframe * frame)
+ 	bool isExec = false;
+ 	switch (ESR_ELx_EXCEPTION(frame->esr)) {
+ 		case EXCP_ILL_STATE:
+-			// PSTATE.IL, set by an illegal exception return. Clear it, or
+-			// the signal handler could not run either.
++			// PSTATE.IL: the exception return into this thread had SPSR.IL
++			// set. Clear it, or the signal handler could not run either.
+ 			frame->spsr &= ~PSR_IL;
+ 			// fall through
+ 		case EXCP_UNKNOWN:
+@@ -403,7 +403,8 @@ do_sync_handler(iframe * frame)
+ 					signalCode = BUS_ADRERR;
+ 				}
+ 				signalNumber = SIGBUS;
+-				signalAddress = frame->far;
++				// FAR is not valid when the ISS says FnV (external aborts)
++				signalAddress = (frame->esr & ISS_DATA_FnV) != 0 ? 0 : frame->far;
+ 				break;
+ 			}
+ 
+-- 
+2.54.0 (Apple Git-157)
+
