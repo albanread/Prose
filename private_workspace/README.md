@@ -1,19 +1,21 @@
-# private_workspace: Claude's isolated build and test area
+# private_workspace: build, run and test scripts
 
-The main Haiku tree (`/Volumes/HaikuSrc/haiku`) and its image (`haiku-mmc.image`) belong to the package work. Nothing in this folder touches them.
+Historically Claude's separate checkout of the Haiku fork, so the main tree was
+left alone. Since 2026-09-19 there is one Haiku tree and these scripts run
+against it; the separate checkout is gone.
 
 | What | Where |
 |---|---|
-| Haiku source | `/Volumes/HaikuSrc/private_workspace/haiku`: a git **worktree** of the main repo, branch `vz-fork` (hrev60122 + `patches/haiku/0001`–`0040` as one commit each) |
-| Build output | its own `generated/` (cross-tools are reused from the main tree, read-only) |
-| Image | `/Volumes/HaikuSrc/private_workspace/haiku/haiku-mmc.image` |
+| Haiku source | `/Volumes/HaikuSrc/haiku`, branch `prose` (hrev60122 + `patches/haiku/0001`–`0040` as one commit each, applied by `scripts/apply-patches.sh`) |
+| Build output | its `generated/` |
+| Image | `/Volumes/HaikuSrc/haiku/haiku-mmc.image` (`PW_IMAGE` overrides) |
 | Run scratch (copies of the image, logs) | `private_workspace/work/` (gitignored) |
 
 ## Commands
 
 ```sh
 source private_workspace/env.sh
-private_workspace/build.sh               # jam @minimum-mmc in the worktree
+private_workspace/build.sh               # = scripts/build-image.sh (patches applied, local packages, jam)
 private_workspace/run-vz.sh smoke        # hvgpu, windowed, 8 vCPUs, NVMe, fresh copy in work/smoke
 private_workspace/run-vz.sh t1 --headless --seconds 100 --disk virtio
 private_workspace/run-vz.sh s2 --display s2 --screenshot private_workspace/work/s2/shot.png   # S2 Prose Display instead of the S1 virtio-gpu
@@ -35,9 +37,8 @@ private_workspace/syslog.sh smoke        # copy Haiku's syslog out of work/smoke
 `run-vz.sh` always boots a **fresh copy** of the image, so every run starts from first boot and `first login` is a reliable marker.
 
 ## Rules
-- Edit Haiku only in the worktree; commit there on `vz-fork`. Refresh `patches/haiku/` from the commits (`git format-patch` or `git diff` per file) when a patch changes.
-- Never run `scripts/build-image.sh` (main tree) from here.
-- Cross-tools live in the main tree's `generated/cross-tools-arm64`; a `git clean` or reconfigure there would break this workspace's build, so the main tree should keep them.
+- Change Haiku as commits on `prose`; export each as the next `patches/haiku/NNNN-*.patch` (`git format-patch -1`), so main carries it. The build refuses a tree with uncommitted changes.
+- The image is only ever built by `scripts/build-image.sh` (or `build.sh`, which runs it).
 
 ## Local packages (no remote resolution)
 
@@ -47,7 +48,7 @@ checksummed and that checksum picks a server-side snapshot, so you cannot add a
 locally built package to it (the build then fetches a snapshot that does not
 exist and fails with a 404).
 
-Our worktree builds from local packages instead:
+The `prose` build uses local packages instead:
 
 1. `generated/build/BuildConfig` has `HAIKU_NO_DOWNLOADS ?= "1" ;` (not tracked -
    re-running `configure` resets it, so check it after). The build then
@@ -60,11 +61,11 @@ Our worktree builds from local packages instead:
    rewrite it first:
 
 ```bash
-P=/Volumes/HaikuSrc/private_workspace/haiku/generated/objects/darwin/arm64/release/tools/package/package
-export DYLD_LIBRARY_PATH=/Volumes/HaikuSrc/private_workspace/haiku/generated/objects/darwin/lib
+P=/Volumes/HaikuSrc/haiku/generated/objects/darwin/arm64/release/tools/package/package
+export DYLD_LIBRARY_PATH=/Volumes/HaikuSrc/haiku/generated/objects/darwin/lib
 mkdir -p /tmp/fix && cd /tmp/fix && $P extract <pkg>.hpkg
 sed -i '' 's/^vendor.*$/vendor\t\t"Haiku Project"/' .PackageInfo
-$P create -q /Volumes/HaikuSrc/private_workspace/haiku/generated/download/<pkg>.hpkg
+$P create -q /Volumes/HaikuSrc/haiku/generated/download/<pkg>.hpkg
 ```
 
 4. To install a package into the image (not just make it available to the

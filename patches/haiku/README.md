@@ -47,24 +47,25 @@ These apply on top of Haiku **hrev60122**. We maintain our own fork; see `haiku_
 
 From 0009 on, patches are `git format-patch` output of single commits on the `vz-fork` branch (they may touch several files) and apply with `git apply` or `git am`. 0031–0038 sit between 0023 and 0024 on the branch and were exported later. They apply after 0030, and the whole series reproduces `vz-fork` exactly (0001–0038 checked file by file on a clean hrev60122). 0031 and 0035 carry PNG files as git binary patches, which `patch(1)` cannot apply. 0033, 0037 and 0040 need the local packages (`private_workspace/README.md`, "Local packages"). `../prose-branding-01-artwork.patch` is the earlier branding for the main tree (it also sets `uname` to "Kronkite"); it applies to a plain hrev60122 but not on top of this series.
 
-Apply to a clean tree, then rebuild the image:
+Building applies them: `scripts/build-image.sh` runs `scripts/apply-patches.sh`,
+which puts `/Volumes/HaikuSrc/haiku` on the branch `prose` (upstream's
+hrev60122 + these patches, one commit each, `Prose-Patch: <file> <sha256>`
+recorded in every commit) and applies whatever is missing; then
+`scripts/local-packages.sh`, which copies the packages 0033, 0037 and 0040
+list (built by `scripts/prosepkg`; the package server has none of them) into
+`generated/download/` and turns downloads off. See BUILDING.md §5 and §7.
+
+The `vz-fork` branch of the same repository, where 0001–0040 were made, has
+the same tree as `prose` (`94f281d`); its checkout under
+`/Volumes/HaikuSrc/private_workspace/` was removed on 2026-09-19.
+
+To add a change: commit it on `prose`, then
 
 ```sh
-cd /Volumes/HaikuSrc/haiku
-git apply /Volumes/xb/HaikuArmQemu/patches/haiku/*.patch
-/Volumes/xb/HaikuArmQemu/scripts/build-image.sh
+git format-patch -1 --stdout HEAD > /Volumes/xb/HaikuArmQemu/patches/haiku/<NNNN-name>.patch
 ```
 
-`build-image.sh` first runs `scripts/local-packages.sh`. That script copies the
-packages that 0033, 0037 and 0040 list (built by `scripts/prosepkg`; the
-package server has none of them) into `generated/download/` and turns downloads
-off. It stops, naming them, if any are not built. On a tree without these
-patches it does nothing.
-
-To refresh the patches after editing the tree:
-
-```sh
-git diff -- <file> > /Volumes/xb/HaikuArmQemu/patches/haiku/<NNNN-name>.patch
-```
-
-0001–0008 each cover one file.
+A patch edited after it was applied makes `apply-patches.sh` stop and say so
+(the hash no longer matches the commit's record); refresh the patch from the
+commit, or rebuild `prose` from the patches (`git branch -D prose`, build).
+0001–0008 are plain `git diff` output and each cover one file.

@@ -30,11 +30,12 @@ from pathlib import Path
 # -- configuration --------------------------------------------------------------
 
 ROOT = Path(os.environ.get('PROSEPKG_ROOT', '/Volumes/HaikuSrc/prose-packages'))
-# toolchain and host tools come from the main Haiku tree ...
+# the Haiku tree: toolchain and host tools, and (SYSTEM_TREE, the same tree
+# unless overridden) the system packages of the Prose build whose image we
+# target -- /Volumes/HaikuSrc/haiku on the branch "prose", built by
+# scripts/build-image.sh
 HAIKU_TREE = Path(os.environ.get('PROSEPKG_HAIKU_TREE', '/Volumes/HaikuSrc/haiku'))
-# ... the system packages from the Prose OS build whose image we target
-SYSTEM_TREE = Path(os.environ.get('PROSEPKG_SYSTEM_TREE',
-	'/Volumes/HaikuSrc/private_workspace/haiku'))
+SYSTEM_TREE = Path(os.environ.get('PROSEPKG_SYSTEM_TREE', str(HAIKU_TREE)))
 BUILDER_DIR = Path(__file__).resolve().parent
 OVERLAY_DIR = BUILDER_DIR / 'overlay'
 RUNTIME_SH = BUILDER_DIR / 'recipe-runtime.sh'

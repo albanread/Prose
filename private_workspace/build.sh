@@ -1,14 +1,6 @@
 #!/bin/bash
-# Build the private worktree's image (default target @minimum-mmc).
-# usage: build.sh [jam target]
-set -euo pipefail
-source "$(dirname "$0")/env.sh"
-[ -d "$PW_HAIKU/generated/build" ] || { echo "worktree not configured: $PW_HAIKU (see README.md)" >&2; exit 1; }
-ulimit -n 1024
-# packages beyond upstream's list, from prosepkg (see scripts/local-packages.sh)
-"$PW_ROOT/scripts/local-packages.sh" "$PW_HAIKU"
-cd "$PW_HAIKU"
-TARGET=${1:-@minimum-mmc}
-echo ">>> $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD): jam -q -j$(sysctl -n hw.ncpu) $TARGET"
-jam -q -j"$(sysctl -n hw.ncpu)" "$TARGET"
-ls -lh "$PW_IMAGE"
+# Build the image. There is one way to do that now: scripts/build-image.sh
+# builds /Volumes/HaikuSrc/haiku on the branch "prose" (main's patches applied,
+# the fork's packages from prosepkg, then jam). This just runs it.
+# usage: build.sh [jam target]   (default @minimum-mmc)
+exec "$(dirname "$0")/../scripts/build-image.sh" "$@"

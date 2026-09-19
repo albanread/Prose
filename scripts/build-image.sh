@@ -1,5 +1,11 @@
 #!/bin/sh
-# Build the Haiku ARM64 image (minimum profile -- see BUILDING.md §5).
+# Build the Prose image (Haiku arm64, minimum profile -- see BUILDING.md §5)
+# from the one Haiku tree, /Volumes/HaikuSrc/haiku:
+#   1. main's changes to Haiku (patches/haiku/) are applied as commits on the
+#      branch "prose" -- only what is missing (scripts/apply-patches.sh)
+#   2. the packages the tree lists beyond upstream's (codecs, the translators'
+#      libraries) are put in place from prosepkg (scripts/local-packages.sh)
+#   3. jam
 # Requires: build volume mounted (scripts/mount-src.sh), cross-tools configured.
 #
 # Usage: build-image.sh [jam target]   (default: @minimum-mmc)
@@ -12,8 +18,7 @@ export PATH="$HOME/bin:/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/gettext/bin
 # jam opens a lot of files at once
 ulimit -n 1024
 
-# packages the tree lists beyond upstream's (codecs, the translators'
-# libraries) come from prosepkg, not the package server; no-op otherwise
+"$(dirname "$0")/apply-patches.sh" "$ROOT"
 "$(dirname "$0")/local-packages.sh" "$ROOT"
 
 cd "$ROOT"

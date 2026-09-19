@@ -123,17 +123,29 @@ Notes:
 
 ```sh
 scripts/build-image.sh              # default: @minimum-mmc
-# which is: scripts/local-packages.sh, then cd /Volumes/HaikuSrc/haiku && jam -q -j14 @minimum-mmc
+# which is: scripts/apply-patches.sh, scripts/local-packages.sh,
+#           then cd /Volumes/HaikuSrc/haiku && jam -q -j14 @minimum-mmc
 ```
 
-* `scripts/local-packages.sh` is a no-op on a stock tree. With the fork's
-  patches applied (`patches/haiku/`), the tree's HaikuPorts list names
-  packages the package server does not have: the codecs and the translators'
-  libraries, built by `scripts/prosepkg` (see `packages/README.md`). It copies
-  them into `generated/download/` and sets `HAIKU_NO_DOWNLOADS` in
-  `generated/build/BuildConfig`, which re-running `configure` resets; running
-  it on every build puts it back. It stops, naming the packages, if one
-  isn't built.
+There is one Haiku tree, `/Volumes/HaikuSrc/haiku`, and the image is built
+from its branch **`prose`**: upstream's `master` (hrev60122) plus this repo's
+changes to Haiku, `patches/haiku/0001`–`0040`, one commit each. `master`
+itself stays upstream's.
+
+* `scripts/apply-patches.sh` puts the tree on `prose` (creating it from the
+  current commit the first time) and applies the patches that aren't there
+  yet. Each commit records its patch file and that file's hash
+  (`Prose-Patch:`), so a second run does nothing, and a patch edited in
+  this repo after it was applied is reported rather than silently left out.
+  A tree with uncommitted changes to tracked files is refused. `--dry-run`
+  applies the series to a scratch index and reports.
+* `scripts/local-packages.sh` is a no-op on a stock tree. On `prose`, the
+  tree's HaikuPorts list names packages the package server does not have:
+  the codecs and the translators' libraries, built by `scripts/prosepkg`
+  (see `packages/README.md`). It copies them into `generated/download/`
+  and sets `HAIKU_NO_DOWNLOADS` in `generated/build/BuildConfig`, which
+  re-running `configure` resets; running it on every build puts it back.
+  It stops, naming the packages, if one isn't built.
 
 * Output: `/Volumes/HaikuSrc/haiku/haiku-mmc.image` — **in the haiku source
   root, not `generated/`**: the MMC image target isn't `MakeLocate`d, so jam
@@ -216,15 +228,28 @@ HaikuPorts packages unavailable for arm64; see §5).
 
 ```sh
 scripts/mount-src.sh
-cd /Volumes/HaikuSrc/haiku      && git pull
-cd /Volumes/HaikuSrc/buildtools && git pull
-cd /Volumes/HaikuSrc/haiku
-./configure -j14 --cross-tools-source ../buildtools --build-cross-tools arm64  # re-run, quick
-scripts/build-image.sh
+scripts/build-image.sh              # the usual case: nothing pulled, just rebuild
 ```
 
 Rebuilding after touching kernel/driver sources only needs `jam` — it is
 incremental. To force-rebuild one component: `jam -qa <Target>`.
+
+Changing Haiku: commit on `prose` in `/Volumes/HaikuSrc/haiku`, then export
+the commit as the next `patches/haiku/NNNN-*.patch` (`git format-patch -1`)
+so that main carries it. A tree with uncommitted changes will not build
+(`apply-patches.sh` refuses it).
+
+Moving to a newer upstream:
+
+```sh
+cd /Volumes/HaikuSrc/haiku
+git checkout master && git pull
+cd /Volumes/HaikuSrc/buildtools && git pull
+cd /Volumes/HaikuSrc/haiku
+./configure -j14 --cross-tools-source ../buildtools --build-cross-tools arm64  # re-run, quick
+git branch -D prose                 # rebuilt from the patches by the next line
+scripts/build-image.sh              # stops at the first patch that no longer applies
+```
 
 ## 8. Troubleshooting
 
