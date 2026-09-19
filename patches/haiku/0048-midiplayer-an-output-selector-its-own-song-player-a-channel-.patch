@@ -1,0 +1,2906 @@
+From 359f222201b344a1216ae4415808e4220ba4ecd5 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sat, 19 Sep 2026 09:59:40 +0100
+Subject: [PATCH] MidiPlayer: an output selector, its own song player, a
+ channel view
+
+MidiPlayer could only play through the built-in synthesizer and crashed
+when its window closed with a song loaded. It now has:
+
+- Output: the built-in synthesizer or any MIDI consumer -- the Mac through
+  the Prose MIDI device ("Mac (Prose MIDI)"), MIDI devices, other
+  applications. Live input plays through the chosen output too.
+- Its own song player (Song, SongPlayer): a Standard MIDI File parser
+  (formats 0-2, RIFF RMID, running status, tempo map, SMPTE time) and a
+  thread that sends each message through a Midi Kit 2 producer at its
+  time. Pause, seek, stop and quitting wake it at once; seeking and
+  switching outputs set the channels up as the song had them there
+  (programs, controllers, pitch bend, system exclusive), and volume
+  scales each channel's controller 7, so it works on any output.
+- A channel view: the 16 channels with their General MIDI instruments and
+  a bar that lights up with the notes -- for every output, where the scope
+  only sees the built-in synthesizer (it stays, for that one).
+- A position slider that seeks, elapsed and total time, Play/Pause, Stop,
+  Loop, Tempo (25-200%), the song's title, a File menu with Open
+  (starting in data/music), and "MidiPlayer --output <name> <file>".
+- Settings keep the output, tempo and loop; the volume setting is read
+  back into the volume at last (it was read into the window position).
+
+The crash: BMidiSynthFile's player thread outlived it. BMidi::Stop() only
+forgets the thread's id, and ~BMidi then waits for thread -1, which
+returns at once; the thread wakes into the freed BMidiStore and calls the
+song hook with the destroyed window, and the writes into freed memory
+surfaced as a double free in ~BLooper. MidiPlayer no longer uses
+BMidiSynthFile.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0048-midiplayer-an-output-selector-its-own-song-player-a-channel-.patch 5035704b9acf9c99897f114d4c6c2d76bb6520234ee65b61547b7ad8e11fed79
+---
+ src/apps/midiplayer/ChannelView.cpp      | 335 +++++++++++
+ src/apps/midiplayer/ChannelView.h        |  57 ++
+ src/apps/midiplayer/Jamfile              |  14 +-
+ src/apps/midiplayer/MidiPlayer.rdef      |   4 +-
+ src/apps/midiplayer/MidiPlayerApp.cpp    |  36 +-
+ src/apps/midiplayer/MidiPlayerWindow.cpp | 706 +++++++++++++++++------
+ src/apps/midiplayer/MidiPlayerWindow.h   | 104 +++-
+ src/apps/midiplayer/Song.cpp             | 408 +++++++++++++
+ src/apps/midiplayer/Song.h               |  78 +++
+ src/apps/midiplayer/SongPlayer.cpp       | 599 +++++++++++++++++++
+ src/apps/midiplayer/SongPlayer.h         | 113 ++++
+ 11 files changed, 2242 insertions(+), 212 deletions(-)
+ create mode 100644 src/apps/midiplayer/ChannelView.cpp
+ create mode 100644 src/apps/midiplayer/ChannelView.h
+ create mode 100644 src/apps/midiplayer/Song.cpp
+ create mode 100644 src/apps/midiplayer/Song.h
+ create mode 100644 src/apps/midiplayer/SongPlayer.cpp
+ create mode 100644 src/apps/midiplayer/SongPlayer.h
+
+diff --git a/src/apps/midiplayer/ChannelView.cpp b/src/apps/midiplayer/ChannelView.cpp
+new file mode 100644
+index 0000000000..27163bc916
+--- /dev/null
++++ b/src/apps/midiplayer/ChannelView.cpp
+@@ -0,0 +1,335 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "ChannelView.h"
++
++#include <Catalog.h>
++#include <Window.h>
++
++#include <math.h>
++#include <stdio.h>
++
++#include "SongPlayer.h"
++
++
++#undef B_TRANSLATION_CONTEXT
++#define B_TRANSLATION_CONTEXT "Channel View"
++
++
++static const int32 kRows = 8;
++static const float kSpacing = 6;
++static const float kDecay = 0.80f;
++	// per pulse (25 a second), once a channel's notes have ended
++static const float kHeldDecay = 0.97f;
++static const float kHeldFloor = 0.55f;
++	// while notes sound: a slow fade, down to this part of their velocity
++
++static const rgb_color kBackground = { 30, 32, 36, 255 };
++static const rgb_color kTrack = { 48, 52, 60, 255 };
++static const rgb_color kText = { 228, 232, 238, 255 };
++static const rgb_color kDimText = { 112, 118, 128, 255 };
++
++
++// General MIDI level 1 instruments
++static const char* kInstruments[128] = {
++	"Acoustic Grand Piano", "Bright Acoustic Piano", "Electric Grand Piano",
++	"Honky-tonk Piano", "Electric Piano 1", "Electric Piano 2", "Harpsichord",
++	"Clavinet", "Celesta", "Glockenspiel", "Music Box", "Vibraphone",
++	"Marimba", "Xylophone", "Tubular Bells", "Dulcimer", "Drawbar Organ",
++	"Percussive Organ", "Rock Organ", "Church Organ", "Reed Organ",
++	"Accordion", "Harmonica", "Tango Accordion", "Nylon Guitar",
++	"Steel Guitar", "Jazz Guitar", "Clean Guitar", "Muted Guitar",
++	"Overdriven Guitar", "Distortion Guitar", "Guitar Harmonics",
++	"Acoustic Bass", "Fingered Bass", "Picked Bass", "Fretless Bass",
++	"Slap Bass 1", "Slap Bass 2", "Synth Bass 1", "Synth Bass 2", "Violin",
++	"Viola", "Cello", "Contrabass", "Tremolo Strings", "Pizzicato Strings",
++	"Orchestral Harp", "Timpani", "String Ensemble 1", "String Ensemble 2",
++	"Synth Strings 1", "Synth Strings 2", "Choir Aahs", "Voice Oohs",
++	"Synth Voice", "Orchestra Hit", "Trumpet", "Trombone", "Tuba",
++	"Muted Trumpet", "French Horn", "Brass Section", "Synth Brass 1",
++	"Synth Brass 2", "Soprano Sax", "Alto Sax", "Tenor Sax", "Baritone Sax",
++	"Oboe", "English Horn", "Bassoon", "Clarinet", "Piccolo", "Flute",
++	"Recorder", "Pan Flute", "Blown Bottle", "Shakuhachi", "Whistle",
++	"Ocarina", "Square Lead", "Sawtooth Lead", "Calliope Lead", "Chiff Lead",
++	"Charang Lead", "Voice Lead", "Fifths Lead", "Bass + Lead", "New Age Pad",
++	"Warm Pad", "Polysynth Pad", "Choir Pad", "Bowed Pad", "Metallic Pad",
++	"Halo Pad", "Sweep Pad", "Rain", "Soundtrack", "Crystal", "Atmosphere",
++	"Brightness", "Goblins", "Echoes", "Sci-fi", "Sitar", "Banjo",
++	"Shamisen", "Koto", "Kalimba", "Bagpipe", "Fiddle", "Shanai",
++	"Tinkle Bell", "Agogo", "Steel Drums", "Woodblock", "Taiko Drum",
++	"Melodic Tom", "Synth Drum", "Reverse Cymbal", "Guitar Fret Noise",
++	"Breath Noise", "Seashore", "Bird Tweet", "Telephone Ring", "Helicopter",
++	"Applause", "Gunshot"
++};
++
++
++static rgb_color
++ChannelColor(int32 channel)
++{
++	if (channel == 9) {
++		rgb_color drums = { 214, 150, 72, 255 };
++		return drums;
++	}
++	// hues around the circle, skipping the drums' orange
++	float hue = fmodf(channel * 360.0f / 15 + 200, 360) / 60;
++	float saturation = 0.50f;
++	float value = 0.86f;
++	int32 sector = (int32)hue;
++	float fraction = hue - sector;
++	float p = value * (1 - saturation);
++	float q = value * (1 - saturation * fraction);
++	float t = value * (1 - saturation * (1 - fraction));
++	float r, g, b;
++	switch (sector % 6) {
++		case 0: r = value; g = t; b = p; break;
++		case 1: r = q; g = value; b = p; break;
++		case 2: r = p; g = value; b = t; break;
++		case 3: r = p; g = q; b = value; break;
++		case 4: r = t; g = p; b = value; break;
++		default: r = value; g = p; b = q; break;
++	}
++	rgb_color color = { (uint8)(r * 255), (uint8)(g * 255), (uint8)(b * 255),
++		255 };
++	return color;
++}
++
++
++ChannelView::ChannelView(SongPlayer* player)
++	:
++	BView("channels", B_WILL_DRAW | B_PULSE_NEEDED | B_FRAME_EVENTS),
++	fPlayer(player),
++	fHasSong(false)
++{
++	for (int32 i = 0; i < 16; i++) {
++		fLevel[i] = 0;
++		fSeenNotes[i] = 0;
++		fShownProgram[i] = -2;
++		fShownUsed[i] = false;
++	}
++	SetViewColor(B_TRANSPARENT_COLOR);
++	SetLowColor(kBackground);
++
++	BFont font(be_plain_font);
++	font.SetSize(ceilf(font.Size() * 0.9f));
++	SetFont(&font);
++	_Measure();
++}
++
++
++void
++ChannelView::AttachedToWindow()
++{
++	BView::AttachedToWindow();
++	// the bars move 25 times a second
++	Window()->SetPulseRate(40000);
++}
++
++
++void
++ChannelView::Draw(BRect updateRect)
++{
++	SetHighColor(kBackground);
++	FillRect(updateRect);
++
++	if (!fHasSong) {
++		SetHighColor(kDimText);
++		SetLowColor(kBackground);
++		BRect bounds = Bounds();
++		float width = StringWidth(fEmptyText.String());
++		DrawString(fEmptyText.String(),
++			BPoint(floorf((bounds.Width() - width) / 2),
++				floorf(bounds.Height() / 2 + fTextBaseline / 2)));
++		return;
++	}
++
++	for (int32 channel = 0; channel < 16; channel++) {
++		if (_CellFrame(channel).Intersects(updateRect))
++			_DrawCell(channel);
++	}
++}
++
++
++void
++ChannelView::Pulse()
++{
++	if (!fHasSong || fPlayer == NULL)
++		return;
++
++	for (int32 channel = 0; channel < 16; channel++) {
++		float level = fLevel[channel];
++		int32 notes = fPlayer->NoteCount(channel);
++		float velocity = fPlayer->Velocity(channel);
++		if (notes != fSeenNotes[channel]) {
++			fSeenNotes[channel] = notes;
++			if (velocity > level)
++				level = velocity;
++		} else if (fPlayer->HeldNotes(channel) > 0) {
++			level *= kHeldDecay;
++			if (level < velocity * kHeldFloor)
++				level = velocity * kHeldFloor;
++		} else {
++			level *= kDecay;
++			if (level < 1)
++				level = 0;
++		}
++
++		int32 program = fPlayer->Program(channel);
++		bool used = fPlayer->UsesChannel(channel);
++		if ((int32)level != (int32)fLevel[channel]
++			|| program != fShownProgram[channel]
++			|| used != fShownUsed[channel]) {
++			fLevel[channel] = level;
++			Invalidate(_CellFrame(channel));
++		} else
++			fLevel[channel] = level;
++	}
++}
++
++
++BSize
++ChannelView::MinSize()
++{
++	return BSize(2 * fCellWidth + 3 * kSpacing,
++		kRows * fRowHeight + 2 * kSpacing);
++}
++
++
++BSize
++ChannelView::MaxSize()
++{
++	return BSize(B_SIZE_UNLIMITED, MinSize().height);
++}
++
++
++BSize
++ChannelView::PreferredSize()
++{
++	return MinSize();
++}
++
++
++void
++ChannelView::SetHasSong(bool hasSong)
++{
++	fHasSong = hasSong;
++	for (int32 i = 0; i < 16; i++) {
++		fLevel[i] = 0;
++		fSeenNotes[i] = fPlayer != NULL ? fPlayer->NoteCount(i) : 0;
++		fShownProgram[i] = -2;
++	}
++	Invalidate();
++}
++
++
++void
++ChannelView::SetEmptyText(const char* text)
++{
++	fEmptyText = text;
++	if (!fHasSong)
++		Invalidate();
++}
++
++
++// #pragma mark - private
++
++
++BRect
++ChannelView::_CellFrame(int32 channel) const
++{
++	float width = (Bounds().Width() - 3 * kSpacing) / 2;
++	float left = kSpacing + (channel / kRows) * (width + kSpacing);
++	float top = kSpacing + (channel % kRows) * fRowHeight;
++	return BRect(left, top, left + width, top + fRowHeight - 3);
++}
++
++
++void
++ChannelView::_DrawCell(int32 channel)
++{
++	BRect frame = _CellFrame(channel);
++	int32 program = fPlayer->Program(channel);
++	bool used = fPlayer->UsesChannel(channel);
++	fShownProgram[channel] = program;
++	fShownUsed[channel] = used;
++
++	SetHighColor(kBackground);
++	FillRect(frame);
++
++	// the channel number
++	char number[12];
++	snprintf(number, sizeof(number), "%" B_PRId32, channel + 1);
++	SetHighColor(used ? kText : kDimText);
++	SetLowColor(kBackground);
++	float numberWidth = StringWidth(number);
++	DrawString(number, BPoint(frame.left + fNumberWidth - numberWidth,
++		frame.top + fTextBaseline));
++
++	// the bar, and the instrument over it
++	BRect bar(frame.left + fNumberWidth + 6, frame.top, frame.right,
++		frame.bottom);
++	SetHighColor(kTrack);
++	FillRoundRect(bar, 3, 3);
++
++	float level = fLevel[channel] / 127;
++	if (level > 0) {
++		BRect fill = bar;
++		fill.right = bar.left + roundf(bar.Width() * level);
++		if (fill.right > fill.left + 1) {
++			rgb_color color = ChannelColor(channel);
++			SetHighColor(color);
++			FillRoundRect(fill, 3, 3);
++		}
++	}
++
++	BString label = used ? _Instrument(channel) : BString("–");
++	SetHighColor(used ? kText : kDimText);
++	SetDrawingMode(B_OP_OVER);
++	BFont font;
++	GetFont(&font);
++	font.TruncateString(&label, B_TRUNCATE_END, bar.Width() - 10);
++	DrawString(label.String(), BPoint(bar.left + 6,
++		frame.top + fTextBaseline));
++	SetDrawingMode(B_OP_COPY);
++}
++
++
++void
++ChannelView::_Measure()
++{
++	font_height height;
++	GetFontHeight(&height);
++	float textHeight = ceilf(height.ascent + height.descent);
++	fRowHeight = textHeight + 8;
++	fTextBaseline = floorf((fRowHeight - 3 - textHeight) / 2 + height.ascent);
++	fNumberWidth = StringWidth("16");
++	fCellWidth = ceilf(StringWidth("Acoustic Grand Piano") + fNumberWidth
++		+ 40);
++}
++
++
++BString
++ChannelView::_Instrument(int32 channel) const
++{
++	int32 program = fPlayer->Program(channel);
++	if (channel == 9) {
++		// on the percussion channel the program picks a drum kit
++		switch (program) {
++			case 8: return B_TRANSLATE("Drums (Room)");
++			case 16: return B_TRANSLATE("Drums (Power)");
++			case 24: return B_TRANSLATE("Drums (Electronic)");
++			case 25: return B_TRANSLATE("Drums (TR-808)");
++			case 32: return B_TRANSLATE("Drums (Jazz)");
++			case 40: return B_TRANSLATE("Drums (Brush)");
++			case 48: return B_TRANSLATE("Drums (Orchestra)");
++			case 56: return B_TRANSLATE("Drums (Sound effects)");
++			default: return B_TRANSLATE("Drums");
++		}
++	}
++	if (program < 0 || program > 127)
++		return kInstruments[0];
++			// what General MIDI plays without a program change
++	return kInstruments[program];
++}
+diff --git a/src/apps/midiplayer/ChannelView.h b/src/apps/midiplayer/ChannelView.h
+new file mode 100644
+index 0000000000..a4f5bcfeaf
+--- /dev/null
++++ b/src/apps/midiplayer/ChannelView.h
+@@ -0,0 +1,57 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * ChannelView: the song's 16 MIDI channels, each with its instrument and a
++ * bar that lights up with the notes it plays. It shows what the player
++ * sends, so it works whatever the output is.
++ */
++#ifndef _CHANNEL_VIEW_H
++#define _CHANNEL_VIEW_H
++
++
++#include <String.h>
++#include <View.h>
++
++
++class SongPlayer;
++
++
++class ChannelView : public BView {
++public:
++								ChannelView(SongPlayer* player);
++
++	virtual	void				AttachedToWindow();
++	virtual	void				Draw(BRect updateRect);
++	virtual	void				Pulse();
++
++	virtual	BSize				MinSize();
++	virtual	BSize				MaxSize();
++	virtual	BSize				PreferredSize();
++
++			void				SetHasSong(bool hasSong);
++			void				SetEmptyText(const char* text);
++
++private:
++			BRect				_CellFrame(int32 channel) const;
++			void				_DrawCell(int32 channel);
++			void				_Measure();
++			BString				_Instrument(int32 channel) const;
++
++			SongPlayer*			fPlayer;
++			bool				fHasSong;
++			BString				fEmptyText;
++
++			float				fLevel[16];
++			int32				fSeenNotes[16];
++			int32				fShownProgram[16];
++			bool				fShownUsed[16];
++
++			float				fRowHeight;
++			float				fCellWidth;
++			float				fNumberWidth;
++			float				fTextBaseline;
++};
++
++
++#endif	// _CHANNEL_VIEW_H
+diff --git a/src/apps/midiplayer/Jamfile b/src/apps/midiplayer/Jamfile
+index c0f9dd5dbc..c1d493b76b 100644
+--- a/src/apps/midiplayer/Jamfile
++++ b/src/apps/midiplayer/Jamfile
+@@ -3,18 +3,22 @@ SubDir HAIKU_TOP src apps midiplayer ;
+ UsePrivateHeaders interface ;
+ 
+ Application MidiPlayer :
+-	MidiPlayerApp.cpp 
+-	MidiPlayerWindow.cpp 
++	ChannelView.cpp
++	MidiPlayerApp.cpp
++	MidiPlayerWindow.cpp
+ 	ScopeView.cpp
++	Song.cpp
++	SongPlayer.cpp
+ 	SynthBridge.cpp
+-	: be midi midi2 [ TargetLibsupc++ ] localestub
++	: be midi midi2 tracker [ TargetLibstdc++ ] localestub
+ 	: MidiPlayer.rdef
+ ;
+ 
+ DoCatalogs MidiPlayer :
+ 	x-vnd.Haiku-MidiPlayer
+ 	:
+-	MidiPlayerApp.cpp 
+-	MidiPlayerWindow.cpp 
++	ChannelView.cpp
++	MidiPlayerApp.cpp
++	MidiPlayerWindow.cpp
+ 	ScopeView.cpp
+ ;
+diff --git a/src/apps/midiplayer/MidiPlayer.rdef b/src/apps/midiplayer/MidiPlayer.rdef
+index 1befb7cec4..d631fe6720 100644
+--- a/src/apps/midiplayer/MidiPlayer.rdef
++++ b/src/apps/midiplayer/MidiPlayer.rdef
+@@ -5,8 +5,8 @@ resource app_name_catalog_entry "x-vnd.Haiku-MidiPlayer:System name:MidiPlayer";
+ 
+ resource app_version {
+ 	major      = 1,
+-	middle     = 0,
+-	minor      = 1,
++	middle     = 1,
++	minor      = 0,
+ 	variety    = B_APPV_FINAL,
+ 	internal   = 0,
+ 	short_info = "MidiPlayer",
+diff --git a/src/apps/midiplayer/MidiPlayerApp.cpp b/src/apps/midiplayer/MidiPlayerApp.cpp
+index e1d31e100a..d80428db99 100644
+--- a/src/apps/midiplayer/MidiPlayerApp.cpp
++++ b/src/apps/midiplayer/MidiPlayerApp.cpp
+@@ -30,6 +30,8 @@
+ #include <Locale.h>
+ #include <StorageKit.h>
+ 
++#include <string.h>
++
+ #include "MidiPlayerWindow.h"
+ 
+ 
+@@ -104,20 +106,30 @@ MidiPlayerApp::RefsReceived(BMessage* message)
+ void
+ MidiPlayerApp::ArgvReceived(int32 argc, char** argv)
+ {
+-	// Note: we only load the first file, even if more than one is specified.
+-	// For some reason, BeOS R5 MidiPlayer loads them all but will only play
+-	// the last one. That's not very useful.
+-
+-	if (argc > 1) {
+-		BMessage msg;
+-		msg.what = B_SIMPLE_DATA;
++	// MidiPlayer [--output <name>] [file]
++	// --output picks the output by (part of) its name, as the Output menu
++	// shows it ("Mac", "built-in"). Only the first file is loaded: BeOS R5
++	// MidiPlayer loaded them all but only played the last one.
++
++	const char* file = NULL;
++	for (int32 i = 1; i < argc; i++) {
++		if ((strcmp(argv[i], "--output") == 0 || strcmp(argv[i], "-o") == 0)
++			&& i + 1 < argc) {
++			BMessage message(MSG_SELECT_OUTPUT);
++			message.AddString("name", argv[++i]);
++			window->PostMessage(&message);
++		} else if (file == NULL)
++			file = argv[i];
++	}
+ 
+-		BEntry entry(argv[1]);
++	if (file != NULL) {
++		BEntry entry(file, true);
+ 		entry_ref ref;
+-		entry.GetRef(&ref);
+-		msg.AddRef("refs", &ref);
+-
+-		window->PostMessage(&msg);
++		if (entry.GetRef(&ref) == B_OK) {
++			BMessage message(B_SIMPLE_DATA);
++			message.AddRef("refs", &ref);
++			window->PostMessage(&message);
++		}
+ 	}
+ }
+ 
+diff --git a/src/apps/midiplayer/MidiPlayerWindow.cpp b/src/apps/midiplayer/MidiPlayerWindow.cpp
+index 97dc116325..b4c6f0a06d 100644
+--- a/src/apps/midiplayer/MidiPlayerWindow.cpp
++++ b/src/apps/midiplayer/MidiPlayerWindow.cpp
+@@ -1,6 +1,7 @@
+ /*
+  * Copyright (c) 2004 Matthijs Hollemans
+  * Copyright (c) 2008-2014 Haiku, Inc. All rights reserved.
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining a
+  * copy of this software and associated documentation files (the "Software"),
+@@ -25,27 +26,62 @@
+ #include "MidiPlayerWindow.h"
+ 
+ #include <Catalog.h>
++#include <FilePanel.h>
+ #include <LayoutBuilder.h>
+ #include <Locale.h>
++#include <MessageRunner.h>
++#include <MidiConsumer.h>
+ #include <MidiProducer.h>
+ #include <MidiRoster.h>
++#include <Roster.h>
+ #include <SeparatorView.h>
+ #include <StorageKit.h>
+-#include <SpaceLayoutItem.h>
+ 
++#include <stdio.h>
++#include <string.h>
++
++#include "ChannelView.h"
+ #include "MidiPlayerApp.h"
+ #include "ScopeView.h"
++#include "Song.h"
++#include "SongPlayer.h"
+ #include "SynthBridge.h"
+ 
+ 
+-#define _W(a) (a->Frame().Width())
+-#define _H(a) (a->Frame().Height())
+-
+-
+ #undef B_TRANSLATION_CONTEXT
+ #define B_TRANSLATION_CONTEXT "Main Window"
+ 
+ 
++static const bigtime_t kTickInterval = 100000;
++static const int32 kPositionSteps = 1000;
++static const char* kMusicDirectory = "/boot/system/data/music";
++
++
++// MIDI devices' endpoints are named after their device files; the Prose MIDI
++// device plays on the Mac
++static BString
++EndpointLabel(const char* name)
++{
++	BString label(name);
++	if (label.FindFirst("midi/prose/") >= 0)
++		return BString(B_TRANSLATE("Mac (Prose MIDI)"));
++	if (label.StartsWith("/dev/midi/"))
++		label.Remove(0, 10);
++	return label;
++}
++
++
++static BString
++TimeString(bigtime_t time)
++{
++	int32 seconds = (int32)(time / 1000000);
++	BString string;
++	string.SetToFormat("%" B_PRId32 ":%02" B_PRId32, seconds / 60,
++		seconds % 60);
++	return string;
++}
++
++
+ //	#pragma mark - MidiPlayerWindow
+ 
+ 
+@@ -53,33 +89,61 @@ MidiPlayerWindow::MidiPlayerWindow()
+ 	:
+ 	BWindow(BRect(0, 0, 1, 1), B_TRANSLATE_SYSTEM_NAME("MidiPlayer"),
+ 		B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS | B_NOT_RESIZABLE
+-			| B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS)
++			| B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
++	fOpenPanel(NULL),
++	fTicker(NULL),
++	fOutput(NULL),
++	fOutputId(-1),
++	fInputId(-1),
++	fInputProducer(NULL),
++	fInputTarget(NULL),
++	fScopeEnabled(true),
++	fLoop(false),
++	fSeeking(false),
++	fShowingPlaying(false),
++	fInstrumentLoaded(false),
++	fReverbMode(B_REVERB_BALLROOM),
++	fVolume(80),
++	fTempo(100),
++	fWindowX(-1),
++	fWindowY(-1)
+ {
+-	fIsPlaying = false;
+-	fScopeEnabled = true;
+-	fReverbMode = B_REVERB_BALLROOM;
+-	fVolume = 75;
+-	fWindowX = -1;
+-	fWindowY = -1;
+-	fInputId = -1;
+-	fInstrumentLoaded = false;
+-
++	// the built-in synthesizer: its BMidiSynth brings be_synth into being
++	fSynthBridge = new SynthBridge;
+ 	be_synth->SetSamplingRate(44100);
+ 
+-	fSynthBridge = new SynthBridge;
+-	//fSynthBridge->Register();
++	fPlayer = new SongPlayer(BMessenger(this));
+ 
+ 	CreateViews();
+ 	LoadSettings();
+ 	InitControls();
++
++	BMessage tick(MSG_TICK);
++	fTicker = new BMessageRunner(BMessenger(this), &tick, kTickInterval);
+ }
+ 
+ 
+ MidiPlayerWindow::~MidiPlayerWindow()
+ {
+-	StopSynth();
++	delete fTicker;
++	delete fOpenPanel;
++
++	// The built-in synthesizer goes away with the application: nothing to
++	// silence there. Other outputs get "all notes off" as the player goes.
++	if (fOutputId == -1)
++		fPlayer->SetOutput(NULL, false);
++	delete fPlayer;
++
++	if (fInputProducer != NULL) {
++		if (fInputTarget != NULL)
++			fInputProducer->Disconnect(fInputTarget);
++		fInputProducer->Release();
++	}
++	if (fInputTarget != NULL)
++		fInputTarget->Release();
++	if (fOutput != NULL)
++		fOutput->Release();
+ 
+-	//fSynthBridge->Unregister();
+ 	fSynthBridge->Release();
+ }
+ 
+@@ -96,18 +160,44 @@ void
+ MidiPlayerWindow::MessageReceived(BMessage* message)
+ {
+ 	switch (message->what) {
+-		case MSG_PLAY_STOP:
+-			OnPlayStop();
++		case MSG_PLAY_PAUSE:
++			OnPlayPause();
++			break;
++
++		case MSG_STOP:
++			OnStop();
+ 			break;
+ 
+ 		case MSG_SHOW_SCOPE:
+ 			OnShowScope();
+ 			break;
+ 
++		case MSG_LOOP:
++			fLoop = fLoopCheckBox->Value() == B_CONTROL_ON;
++			fPlayer->SetLoop(fLoop);
++			SaveSettings();
++			break;
++
+ 		case MSG_INPUT_CHANGED:
+ 			OnInputChanged(message);
+ 			break;
+ 
++		case MSG_OUTPUT_CHANGED:
++		{
++			int32 id;
++			if (message->FindInt32("id", &id) == B_OK)
++				SetOutput(id);
++			break;
++		}
++
++		case MSG_SELECT_OUTPUT:
++		{
++			const char* name;
++			if (message->FindString("name", &name) == B_OK)
++				SelectOutput(name);
++			break;
++		}
++
+ 		case MSG_REVERB_NONE:
+ 			OnReverb(B_REVERB_NONE);
+ 			break;
+@@ -136,6 +226,57 @@ MidiPlayerWindow::MessageReceived(BMessage* message)
+ 			OnVolume();
+ 			break;
+ 
++		case MSG_TEMPO:
++			OnTempo();
++			break;
++
++		case MSG_SEEKING:
++		{
++			// while the slider is dragged: show where it would go
++			fSeeking = true;
++			bigtime_t duration = fPlayer->Duration();
++			BString text;
++			text << TimeString((bigtime_t)fPositionSlider->Value() * duration
++					/ kPositionSteps)
++				<< " / " << TimeString(duration);
++			fTimeView->SetText(text);
++			break;
++		}
++
++		case MSG_SEEK:
++		{
++			fSeeking = false;
++			bigtime_t position = (bigtime_t)fPositionSlider->Value()
++				* fPlayer->Duration() / kPositionSteps;
++			fPlayer->Seek(position);
++			UpdatePosition(position);
++			break;
++		}
++
++		case MSG_TICK:
++			if (!fSeeking)
++				UpdatePosition(fPlayer->Position());
++			UpdateTransport();
++			break;
++
++		case MSG_SONG_ENDED:
++			UpdateTransport();
++			UpdatePosition(fPlayer->Position());
++			break;
++
++		case MSG_OPEN:
++			if (fOpenPanel == NULL) {
++				BMessenger target(this);
++				fOpenPanel = new BFilePanel(B_OPEN_PANEL, &target, NULL,
++					B_FILE_NODE, false);
++				BEntry music(kMusicDirectory);
++				if (music.Exists())
++					fOpenPanel->SetPanelDirectory(kMusicDirectory);
++			}
++			fOpenPanel->Show();
++			break;
++
++		case B_REFS_RECEIVED:
+ 		case B_SIMPLE_DATA:
+ 			OnDrop(message);
+ 			break;
+@@ -160,27 +301,42 @@ MidiPlayerWindow::FrameMoved(BPoint origin)
+ void
+ MidiPlayerWindow::MenusBeginning()
+ {
+-	for (int32 t = fInputPopUpMenu->CountItems() - 1; t > 0; --t)
+-		delete fInputPopUpMenu->RemoveItem(t);
++	// the endpoints come and go: list the ones there are now
++	UpdateEndpointMenu(fOutputPopUpMenu, false, fOutputId);
++	UpdateEndpointMenu(fInputPopUpMenu, true, fInputId);
++}
+ 
+-	// Note: if the selected endpoint no longer exists, then no endpoint is
+-	// marked. However, we won't disconnect it until you choose another one.
+ 
+-	fInputOffMenuItem->SetMarked(fInputId == -1);
++void
++MidiPlayerWindow::UpdateEndpointMenu(BPopUpMenu* menu, bool producers,
++	int32 selectedId)
++{
++	// the first item stays: "Built-in synthesizer" or "Off"
++	for (int32 i = menu->CountItems() - 1; i > 0; i--)
++		delete menu->RemoveItem(i);
+ 
++	bool first = true;
+ 	int32 id = 0;
+ 	while (BMidiEndpoint* endpoint = BMidiRoster::NextEndpoint(&id)) {
+-		if (endpoint->IsProducer()) {
+-			BMessage* message = new BMessage(MSG_INPUT_CHANGED);
+-			message->AddInt32("id", id);
+-
+-			BMenuItem* item = new BMenuItem(endpoint->Name(), message);
+-			fInputPopUpMenu->AddItem(item);
+-			item->SetMarked(fInputId == id);
++		// ours (the player, the built-in synthesizer) are local; the ones
++		// of devices and other applications are remote
++		if (endpoint->IsRemote() && endpoint->IsProducer() == producers) {
++			if (first) {
++				menu->AddSeparatorItem();
++				first = false;
++			}
++			BMessage* message = new BMessage(producers
++				? MSG_INPUT_CHANGED : MSG_OUTPUT_CHANGED);
++			message->AddInt32("id", endpoint->ID());
++			BMenuItem* item = new BMenuItem(
++				EndpointLabel(endpoint->Name()).String(), message);
++			menu->AddItem(item);
++			item->SetMarked(endpoint->ID() == selectedId);
+ 		}
+-
+ 		endpoint->Release();
+ 	}
++
++	menu->ItemAt(0)->SetMarked(selectedId == -1);
+ }
+ 
+ 
+@@ -200,6 +356,23 @@ MidiPlayerWindow::CreateInputMenu()
+ }
+ 
+ 
++void
++MidiPlayerWindow::CreateOutputMenu()
++{
++	fOutputPopUpMenu = new BPopUpMenu("outputPopUp");
++
++	BMessage* message = new BMessage(MSG_OUTPUT_CHANGED);
++	message->AddInt32("id", -1);
++
++	fBuiltInMenuItem = new BMenuItem(B_TRANSLATE("Built-in synthesizer"),
++		message);
++	fOutputPopUpMenu->AddItem(fBuiltInMenuItem);
++
++	fOutputMenuField = new BMenuField(B_TRANSLATE("Output:"),
++		fOutputPopUpMenu);
++}
++
++
+ void
+ MidiPlayerWindow::CreateReverbMenu()
+ {
+@@ -231,64 +404,125 @@ MidiPlayerWindow::CreateReverbMenu()
+ void
+ MidiPlayerWindow::CreateViews()
+ {
+-	// Set up needed views
++	BMenuBar* menuBar = new BMenuBar("menu");
++	BMenu* fileMenu = new BMenu(B_TRANSLATE("File"));
++	fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Open" B_UTF8_ELLIPSIS),
++		new BMessage(MSG_OPEN), 'O'));
++	fileMenu->AddSeparatorItem();
++	BMenuItem* aboutItem = new BMenuItem(B_TRANSLATE("About MidiPlayer"),
++		new BMessage(B_ABOUT_REQUESTED));
++	aboutItem->SetTarget(be_app);
++	fileMenu->AddItem(aboutItem);
++	fileMenu->AddSeparatorItem();
++	fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Quit"),
++		new BMessage(B_QUIT_REQUESTED), 'Q'));
++	menuBar->AddItem(fileMenu);
++
++	fTitleView = new BStringView("title", B_TRANSLATE("No song"));
++	fTitleView->SetFont(be_bold_font);
++	fTitleView->SetTruncation(B_TRUNCATE_END);
++	fTitleView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
++
++	fChannelView = new ChannelView(fPlayer);
++	fChannelView->SetEmptyText(B_TRANSLATE("Drop a MIDI file here"));
++
+ 	fScopeView = new ScopeView();
++	BSize scopeSize(fScopeView->Frame().Width(), fScopeView->Frame().Height());
++	fScopeView->SetExplicitMinSize(scopeSize);
++	fScopeView->SetExplicitMaxSize(scopeSize);
++
++	fPositionSlider = new BSlider("position", NULL, new BMessage(MSG_SEEK), 0,
++		kPositionSteps, B_HORIZONTAL);
++	fPositionSlider->SetModificationMessage(new BMessage(MSG_SEEKING));
++	fPositionSlider->SetBarThickness(6);
++	fPositionSlider->SetEnabled(false);
++
++	fTimeView = new BStringView("time", "0:00 / 0:00");
++	fTimeView->SetAlignment(B_ALIGN_RIGHT);
++	fTimeView->SetExplicitMinSize(BSize(
++		fTimeView->StringWidth("00:00 / 00:00") + 4, B_SIZE_UNSET));
++
++	fPlayButton = new BButton("playButton", B_TRANSLATE("Pause"),
++		new BMessage(MSG_PLAY_PAUSE));
++	fPlayButton->SetExplicitMinSize(fPlayButton->PreferredSize());
++		// as wide as "Pause", so that it does not jump
++	fPlayButton->SetLabel(B_TRANSLATE("Play"));
++	fPlayButton->SetEnabled(false);
++
++	fStopButton = new BButton("stopButton", B_TRANSLATE("Stop"),
++		new BMessage(MSG_STOP));
++	fStopButton->SetEnabled(false);
++
++	fLoopCheckBox = new BCheckBox("loop", B_TRANSLATE("Loop"),
++		new BMessage(MSG_LOOP));
+ 
+ 	fShowScopeCheckBox = new BCheckBox("showScope", B_TRANSLATE("Scope"),
+ 		new BMessage(MSG_SHOW_SCOPE));
+ 	fShowScopeCheckBox->SetValue(B_CONTROL_ON);
+ 
++	CreateOutputMenu();
+ 	CreateInputMenu();
+ 	CreateReverbMenu();
+ 
++	fTempoLabel = new BStringView("tempoLabel", "");
++	fTempoLabel->SetExplicitMinSize(BSize(
++		fTempoLabel->StringWidth(B_TRANSLATE("Tempo: 200%")) + 4,
++		B_SIZE_UNSET));
++	fTempoSlider = new BSlider("tempo", NULL, new BMessage(MSG_TEMPO), 25,
++		200, B_HORIZONTAL);
++	fTempoSlider->SetModificationMessage(new BMessage(MSG_TEMPO));
++	fTempoSlider->SetHashMarks(B_HASH_MARKS_BOTTOM);
++	fTempoSlider->SetHashMarkCount(8);
++
++	BStringView* volumeLabel = new BStringView(NULL, B_TRANSLATE("Volume:"));
+ 	fVolumeSlider = new BSlider("volumeSlider", NULL, NULL, 0, 100,
+ 		B_HORIZONTAL);
+ 	rgb_color color = ui_color(B_CONTROL_HIGHLIGHT_COLOR);
+ 	fVolumeSlider->UseFillColor(true, &color);
+ 	fVolumeSlider->SetModificationMessage(new BMessage(MSG_VOLUME));
+-	fVolumeSlider->SetExplicitMinSize(
+-		BSize(fScopeView->Frame().Width(), B_SIZE_UNSET));
+-
+-	fPlayButton = new BButton("playButton", B_TRANSLATE("Play"),
+-		new BMessage(MSG_PLAY_STOP));
+-	fPlayButton->SetEnabled(false);
+-
+-	BStringView* volumeLabel = new BStringView(NULL, B_TRANSLATE("Volume:"));
+-	volumeLabel->SetAlignment(B_ALIGN_LEFT);
+ 
+-	// Build the layout
+ 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
+-		.Add(fScopeView)
+-		.AddGroup(B_VERTICAL, 0)
+-			.AddGrid(B_USE_DEFAULT_SPACING, B_USE_SMALL_SPACING)
+-				.Add(fShowScopeCheckBox, 1, 0)
+-
+-				.Add(fReverbMenuField->CreateLabelLayoutItem(), 0, 1)
+-				.AddGroup(B_HORIZONTAL, 0.0f, 1, 1)
+-					.Add(fReverbMenuField->CreateMenuBarLayoutItem())
+-					.AddGlue()
+-					.End()
+-
+-				.Add(fInputMenuField->CreateLabelLayoutItem(), 0, 2)
+-				.AddGroup(B_HORIZONTAL, 0.0f, 1, 2)
+-					.Add(fInputMenuField->CreateMenuBarLayoutItem())
+-					.AddGlue()
+-					.End()
+-
+-				.Add(volumeLabel, 0, 3)
+-				.Add(fVolumeSlider, 0, 4, 2, 1)
+-				.End()
+-			.AddGlue()
++		.Add(menuBar)
++		.AddGroup(B_VERTICAL, B_USE_SMALL_SPACING)
+ 			.SetInsets(B_USE_WINDOW_SPACING, B_USE_DEFAULT_SPACING,
+ 				B_USE_WINDOW_SPACING, B_USE_DEFAULT_SPACING)
+-
++			.Add(fTitleView)
++			.Add(fChannelView)
++			.AddGroup(B_HORIZONTAL, 0)
++				.AddGlue()
++				.Add(fScopeView)
++				.AddGlue()
++				.End()
++			.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
++				.Add(fPositionSlider)
++				.Add(fTimeView)
++				.End()
++			.AddGroup(B_HORIZONTAL)
++				.Add(fPlayButton)
++				.Add(fStopButton)
++				.AddGlue()
++				.Add(fLoopCheckBox)
++				.Add(fShowScopeCheckBox)
++				.End()
+ 			.End()
+ 		.Add(new BSeparatorView(B_HORIZONTAL))
+-		.AddGroup(B_VERTICAL, 0)
+-			.Add(fPlayButton)
+-			.SetInsets(0, B_USE_DEFAULT_SPACING, 0, B_USE_WINDOW_SPACING)
++		.AddGrid(B_USE_DEFAULT_SPACING, B_USE_SMALL_SPACING)
++			.SetInsets(B_USE_WINDOW_SPACING, B_USE_DEFAULT_SPACING,
++				B_USE_WINDOW_SPACING, B_USE_WINDOW_SPACING)
++			.Add(fOutputMenuField->CreateLabelLayoutItem(), 0, 0)
++			.Add(fOutputMenuField->CreateMenuBarLayoutItem(), 1, 0)
++			.Add(fReverbMenuField->CreateLabelLayoutItem(), 0, 1)
++			.Add(fReverbMenuField->CreateMenuBarLayoutItem(), 1, 1)
++			.Add(fInputMenuField->CreateLabelLayoutItem(), 0, 2)
++			.Add(fInputMenuField->CreateMenuBarLayoutItem(), 1, 2)
++			.Add(fTempoLabel, 0, 3)
++			.Add(fTempoSlider, 1, 3)
++			.Add(volumeLabel, 0, 4)
++			.Add(fVolumeSlider, 1, 4)
+ 			.End()
+ 		.End();
++
++	SetDefaultButton(fPlayButton);
+ }
+ 
+ 
+@@ -300,6 +534,9 @@ MidiPlayerWindow::InitControls()
+ 	fShowScopeCheckBox->SetValue(fScopeEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
+ 	fScopeView->SetEnabled(fScopeEnabled);
+ 
++	fLoopCheckBox->SetValue(fLoop ? B_CONTROL_ON : B_CONTROL_OFF);
++	fPlayer->SetLoop(fLoop);
++
+ 	fInputOffMenuItem->SetMarked(true);
+ 
+ 	fReverbNoneMenuItem->SetMarked(fReverbMode == B_REVERB_NONE);
+@@ -310,7 +547,13 @@ MidiPlayerWindow::InitControls()
+ 	fReverbDungeon->SetMarked(fReverbMode == B_REVERB_DUNGEON);
+ 	be_synth->SetReverb(fReverbMode);
+ 
++	fTempoSlider->SetValue(fTempo);
++	OnTempo();
+ 	fVolumeSlider->SetValue(fVolume);
++	fPlayer->SetVolume(fVolume / 100.0f);
++
++	// the output of last time, if it is still there
++	SelectOutput(fOutputName.String());
+ 
+ 	if (fWindowX != -1 && fWindowY != -1)
+ 		MoveTo(fWindowX, fWindowY);
+@@ -330,11 +573,21 @@ MidiPlayerWindow::LoadSettings()
+ 
+ 	file.ReadAttr("Scope", B_BOOL_TYPE, 0, &fScopeEnabled, sizeof(bool));
+ 	file.ReadAttr("Reverb", B_INT32_TYPE, 0, &fReverbMode, sizeof(int32));
+-	file.ReadAttr("Volume", B_INT32_TYPE, 0, &fWindowX, sizeof(int32));
++	file.ReadAttr("Volume", B_INT32_TYPE, 0, &fVolume, sizeof(int32));
++	file.ReadAttr("Tempo", B_INT32_TYPE, 0, &fTempo, sizeof(int32));
++	file.ReadAttr("Loop", B_BOOL_TYPE, 0, &fLoop, sizeof(bool));
++	file.ReadAttrString("Output", &fOutputName);
+ 	file.ReadAttr("WindowX", B_FLOAT_TYPE, 0, &fWindowX, sizeof(float));
+ 	file.ReadAttr("WindowY", B_FLOAT_TYPE, 0, &fWindowY, sizeof(float));
+ 
+ 	file.Unlock();
++
++	if (fReverbMode < B_REVERB_NONE || fReverbMode > B_REVERB_DUNGEON)
++		fReverbMode = B_REVERB_BALLROOM;
++	if (fVolume < 0 || fVolume > 100)
++		fVolume = 80;
++	if (fTempo < 25 || fTempo > 200)
++		fTempo = 100;
+ }
+ 
+ 
+@@ -348,6 +601,9 @@ MidiPlayerWindow::SaveSettings()
+ 	file.WriteAttr("Scope", B_BOOL_TYPE, 0, &fScopeEnabled, sizeof(bool));
+ 	file.WriteAttr("Reverb", B_INT32_TYPE, 0, &fReverbMode, sizeof(int32));
+ 	file.WriteAttr("Volume", B_INT32_TYPE, 0, &fVolume, sizeof(int32));
++	file.WriteAttr("Tempo", B_INT32_TYPE, 0, &fTempo, sizeof(int32));
++	file.WriteAttr("Loop", B_BOOL_TYPE, 0, &fLoop, sizeof(bool));
++	file.WriteAttrString("Output", &fOutputName);
+ 	file.WriteAttr("WindowX", B_FLOAT_TYPE, 0, &fWindowX, sizeof(float));
+ 	file.WriteAttr("WindowY", B_FLOAT_TYPE, 0, &fWindowY, sizeof(float));
+ 
+@@ -359,114 +615,246 @@ MidiPlayerWindow::SaveSettings()
+ void
+ MidiPlayerWindow::LoadFile(entry_ref* ref)
+ {
+-	if (fIsPlaying) {
+-		fScopeView->SetPlaying(false);
+-		fScopeView->Invalidate();
+-		UpdateIfNeeded();
++	Song* song = new Song;
++	if (song->SetTo(*ref) != B_OK) {
++		delete song;
++		BAlert* alert = new BAlert(NULL, B_TRANSLATE("Could not load song"),
++			B_TRANSLATE("OK"), NULL, NULL, B_WIDTH_AS_USUAL, B_STOP_ALERT);
++		alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
++		alert->Go(NULL);
++		return;
++	}
+ 
+-		StopSynth();
++	BString title = song->Title();
++	if (title.IsEmpty()) {
++		// the file's name, without ".mid"
++		title = ref->name;
++		int32 dot = title.FindLast('.');
++		if (dot > 0)
++			title.Truncate(dot);
+ 	}
++	fTitleView->SetText(title);
++	be_roster->AddToRecentDocuments(ref, MIDI_PLAYER_SIGNATURE);
+ 
+-	fMidiSynthFile.UnloadFile();
++	if (fOutputId == -1)
++		LoadInstruments();
+ 
+-	if (fMidiSynthFile.LoadFile(ref) == B_OK) {
+-		// Ideally, we would call SetVolume() in InitControls(),
+-		// but for some reason that doesn't work: BMidiSynthFile
+-		// will use the default volume instead. So we do it here.
+-		fMidiSynthFile.SetVolume(fVolume / 100.0f);
++	fPlayer->SetSong(song);
++	fChannelView->SetHasSong(true);
++	fScopeView->SetHaveFile(true);
++	fPlayer->Play();
+ 
+-		fPlayButton->SetEnabled(true);
+-		fPlayButton->SetLabel(B_TRANSLATE("Stop"));
+-		fScopeView->SetHaveFile(true);
+-		fScopeView->SetPlaying(true);
+-		fScopeView->Invalidate();
++	UpdateTransport();
++	UpdatePosition(0);
++}
+ 
+-		StartSynth();
+-	} else {
+-		fPlayButton->SetEnabled(false);
+-		fPlayButton->SetLabel(B_TRANSLATE("Play"));
+-		fScopeView->SetHaveFile(false);
+-		fScopeView->SetPlaying(false);
+-		fScopeView->Invalidate();
+ 
+-		BAlert* alert = new BAlert(NULL, B_TRANSLATE("Could not load song"),
+-			B_TRANSLATE("OK"), NULL, NULL,
+-			B_WIDTH_AS_USUAL, B_STOP_ALERT);
+-		alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+-		alert->Go();
+-	}
++bool
++MidiPlayerWindow::LoadInstruments()
++{
++	if (fInstrumentLoaded)
++		return true;
++
++	fScopeView->SetLoading(true);
++	fScopeView->Invalidate();
++	UpdateIfNeeded();
++
++	fInstrumentLoaded = fSynthBridge->Init(B_BIG_SYNTH);
++	if (fInstrumentLoaded)
++		be_synth->SetReverb(fReverbMode);
++
++	fScopeView->SetLoading(false);
++	fScopeView->Invalidate();
++	return fInstrumentLoaded;
+ }
+ 
+ 
+ void
+-MidiPlayerWindow::StartSynth()
++MidiPlayerWindow::SetOutput(int32 id)
+ {
+-	fMidiSynthFile.Start();
+-	fMidiSynthFile.SetFileHook(_StopHook, (int32)(addr_t)this);
+-	fIsPlaying = true;
++	BMidiConsumer* consumer = NULL;
++	if (id >= 0) {
++		consumer = BMidiRoster::FindConsumer(id);
++		if (consumer == NULL)
++			id = -1;
++				// gone: the built-in synthesizer again
++	}
++	if (id == -1) {
++		consumer = fSynthBridge;
++		consumer->Acquire();
++	}
++
++	if (fOutput != NULL)
++		fOutput->Release();
++	fOutput = consumer;
++	fOutputId = id;
++	fOutputName = id == -1 ? "" : consumer->Name();
++
++	bool builtIn = id == -1;
++	if (builtIn && fPlayer->HasSong())
++		LoadInstruments();
++	fPlayer->SetOutput(consumer);
++	ConnectInput();
++
++	// reverb and the scope are the built-in synthesizer's
++	fReverbMenuField->SetEnabled(builtIn);
++	fShowScopeCheckBox->SetEnabled(builtIn);
++	ShowScope(builtIn && fScopeEnabled);
++
++	UpdateEndpointMenu(fOutputPopUpMenu, false, fOutputId);
++	SaveSettings();
+ }
+ 
+ 
++// Picks the output whose name (as the menu shows it, or the endpoint's) has
++// this in it; "" or "built-in" is the built-in synthesizer
+ void
+-MidiPlayerWindow::StopSynth()
++MidiPlayerWindow::SelectOutput(const char* name)
+ {
+-	if (!fMidiSynthFile.IsFinished())
+-		fMidiSynthFile.Fade();
++	BString wanted(name);
++	if (wanted.IsEmpty() || wanted.IFindFirst("built-in") >= 0
++		|| wanted.IFindFirst("internal") >= 0) {
++		SetOutput(-1);
++		return;
++	}
+ 
+-	fIsPlaying = false;
++	int32 found = -1;
++	int32 id = 0;
++	while (BMidiConsumer* consumer = BMidiRoster::NextConsumer(&id)) {
++		if (found < 0 && consumer->IsRemote()
++			&& (strcmp(consumer->Name(), name) == 0
++				|| BString(consumer->Name()).IFindFirst(wanted) >= 0
++				|| EndpointLabel(consumer->Name()).IFindFirst(wanted) >= 0)) {
++			found = consumer->ID();
++		}
++		consumer->Release();
++	}
++	if (found < 0)
++		fprintf(stderr, "MidiPlayer: no output \"%s\"\n", name);
++	SetOutput(found);
+ }
+ 
+ 
++// The live input plays through the current output
+ void
+-MidiPlayerWindow::_StopHook(int32 arg)
++MidiPlayerWindow::ConnectInput()
+ {
+-	((MidiPlayerWindow*)(addr_t)arg)->StopHook();
++	if (fInputProducer != NULL) {
++		if (fInputTarget != NULL)
++			fInputProducer->Disconnect(fInputTarget);
++		fInputProducer->Release();
++		fInputProducer = NULL;
++	}
++	if (fInputTarget != NULL) {
++		fInputTarget->Release();
++		fInputTarget = NULL;
++	}
++	fScopeView->SetLiveInput(false);
++	fScopeView->Invalidate();
++
++	if (fInputId < 0 || fOutput == NULL)
++		return;
++
++	fInputProducer = BMidiRoster::FindProducer(fInputId);
++	if (fInputProducer == NULL) {
++		fInputId = -1;
++		return;
++	}
++	// a device's input into its own output would echo
++	if (strcmp(fInputProducer->Name(), fOutput->Name()) == 0)
++		return;
++
++	if (fOutputId == -1)
++		LoadInstruments();
++	fInputTarget = fOutput;
++	fInputTarget->Acquire();
++	fInputProducer->Connect(fInputTarget);
++
++	fScopeView->SetLiveInput(fOutputId == -1);
++	fScopeView->Invalidate();
+ }
+ 
+ 
++// The scope shows the built-in synthesizer's sound; without it the window
++// is that much smaller (it cannot be resized, so it is resized here)
+ void
+-MidiPlayerWindow::StopHook()
++MidiPlayerWindow::ShowScope(bool show)
+ {
+-	if (Lock()) {
+-		// we may be called from the synth's thread
++	if (show == !fScopeView->IsHidden(fScopeView))
++		return;
++	if (show)
++		fScopeView->Show();
++	else
++		fScopeView->Hide();
++	ResizeToPreferred();
++}
+ 
+-		fIsPlaying = false;
+ 
+-		fScopeView->SetPlaying(false);
++void
++MidiPlayerWindow::UpdateTransport()
++{
++	bool hasSong = fPlayer->HasSong();
++	bool playing = fPlayer->IsPlaying();
++
++	fPlayButton->SetEnabled(hasSong);
++	fStopButton->SetEnabled(hasSong);
++	fPositionSlider->SetEnabled(hasSong);
++
++	if (playing != fShowingPlaying) {
++		fShowingPlaying = playing;
++		fPlayButton->SetLabel(playing
++			? B_TRANSLATE("Pause") : B_TRANSLATE("Play"));
++		fScopeView->SetPlaying(playing);
+ 		fScopeView->Invalidate();
+-		fPlayButton->SetEnabled(true);
+-		fPlayButton->SetLabel(B_TRANSLATE("Play"));
+-
+-		Unlock();
+ 	}
+ }
+ 
+ 
+ void
+-MidiPlayerWindow::OnPlayStop()
++MidiPlayerWindow::UpdatePosition(bigtime_t position)
+ {
+-	if (fIsPlaying) {
+-		fPlayButton->SetEnabled(false);
+-		fScopeView->SetPlaying(false);
+-		fScopeView->Invalidate();
+-		UpdateIfNeeded();
++	bigtime_t duration = fPlayer->Duration();
++	if (!fSeeking) {
++		fPositionSlider->SetValue(duration > 0
++			? (int32)(position * kPositionSteps / duration) : 0);
++	}
++
++	BString text;
++	text << TimeString(position) << " / " << TimeString(duration);
++	if (text != fTimeView->Text())
++		fTimeView->SetText(text);
++}
+ 
+-		StopSynth();
+-	} else {
+-		fPlayButton->SetLabel(B_TRANSLATE("Stop"));
+-		fScopeView->SetPlaying(true);
+-		fScopeView->Invalidate();
+ 
+-		StartSynth();
++void
++MidiPlayerWindow::OnPlayPause()
++{
++	if (fPlayer->IsPlaying())
++		fPlayer->Pause();
++	else {
++		if (fOutputId == -1)
++			LoadInstruments();
++		fPlayer->Play();
+ 	}
++	UpdateTransport();
++}
++
++
++void
++MidiPlayerWindow::OnStop()
++{
++	fPlayer->Stop();
++	UpdateTransport();
++	UpdatePosition(0);
+ }
+ 
+ 
+ void
+ MidiPlayerWindow::OnShowScope()
+ {
+-	fScopeEnabled = !fScopeEnabled;
++	fScopeEnabled = fShowScopeCheckBox->Value() == B_CONTROL_ON;
+ 	fScopeView->SetEnabled(fScopeEnabled);
++	ShowScope(fOutputId == -1 && fScopeEnabled);
+ 	fScopeView->Invalidate();
+ 	SaveSettings();
+ }
+@@ -475,40 +863,13 @@ MidiPlayerWindow::OnShowScope()
+ void
+ MidiPlayerWindow::OnInputChanged(BMessage* message)
+ {
+-	int32 newId;
+-	if (message->FindInt32("id", &newId) == B_OK) {
+-		BMidiProducer* endpoint = BMidiRoster::FindProducer(fInputId);
+-		if (endpoint != NULL) {
+-			endpoint->Disconnect(fSynthBridge);
+-			endpoint->Release();
+-		}
+-
+-		fInputId = newId;
+-
+-		endpoint = BMidiRoster::FindProducer(fInputId);
+-		if (endpoint != NULL) {
+-			if (!fInstrumentLoaded) {
+-				fScopeView->SetLoading(true);
+-				fScopeView->Invalidate();
+-				UpdateIfNeeded();
+-
+-				fSynthBridge->Init(B_BIG_SYNTH);
+-				fInstrumentLoaded = true;
+-
+-				fScopeView->SetLoading(false);
+-				fScopeView->Invalidate();
+-			}
+-
+-			endpoint->Connect(fSynthBridge);
+-			endpoint->Release();
++	int32 id;
++	if (message->FindInt32("id", &id) != B_OK)
++		return;
+ 
+-			fScopeView->SetLiveInput(true);
+-			fScopeView->Invalidate();
+-		} else {
+-			fScopeView->SetLiveInput(false);
+-			fScopeView->Invalidate();
+-		}
+-	}
++	fInputId = id;
++	ConnectInput();
++	UpdateEndpointMenu(fInputPopUpMenu, true, fInputId);
+ }
+ 
+ 
+@@ -525,7 +886,20 @@ void
+ MidiPlayerWindow::OnVolume()
+ {
+ 	fVolume = fVolumeSlider->Value();
+-	fMidiSynthFile.SetVolume(fVolume / 100.0f);
++	fPlayer->SetVolume(fVolume / 100.0f);
++	SaveSettings();
++}
++
++
++void
++MidiPlayerWindow::OnTempo()
++{
++	fTempo = fTempoSlider->Value();
++	fPlayer->SetTempo(fTempo / 100.0f);
++
++	BString label;
++	label.SetToFormat(B_TRANSLATE("Tempo: %" B_PRId32 "%%"), fTempo);
++	fTempoLabel->SetText(label);
+ 	SaveSettings();
+ }
+ 
+diff --git a/src/apps/midiplayer/MidiPlayerWindow.h b/src/apps/midiplayer/MidiPlayerWindow.h
+index 2db5db5e3a..1f3d4e9bf3 100644
+--- a/src/apps/midiplayer/MidiPlayerWindow.h
++++ b/src/apps/midiplayer/MidiPlayerWindow.h
+@@ -1,23 +1,24 @@
+ /*
+  * Copyright (c) 2004 Matthijs Hollemans
+  * Copyright (c) 2008-2014 Haiku, Inc. All rights reserved.
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
+  *
+- * Permission is hereby granted, free of charge, to any person obtaining a 
+- * copy of this software and associated documentation files (the "Software"), 
+- * to deal in the Software without restriction, including without limitation 
+- * the rights to use, copy, modify, merge, publish, distribute, sublicense, 
+- * and/or sell copies of the Software, and to permit persons to whom the 
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
+  * Software is furnished to do so, subject to the following conditions:
+  *
+- * The above copyright notice and this permission notice shall be included in 
++ * The above copyright notice and this permission notice shall be included in
+  * all copies or substantial portions of the Software.
+  *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
+- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
+- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
+- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  * DEALINGS IN THE SOFTWARE.
+  */
+ #ifndef _MIDI_PLAYER_WINDOW_H
+@@ -25,7 +26,8 @@
+ 
+ 
+ #include <InterfaceKit.h>
+-#include <MidiSynthFile.h>
++#include <MidiSynth.h>
++#include <String.h>
+ 
+ 
+ #define SETTINGS_FILE "/boot/home/config/settings/MidiPlayerSettings"
+@@ -33,9 +35,13 @@
+ 
+ enum
+ {
+-	MSG_PLAY_STOP = 1000,
++	MSG_PLAY_PAUSE = 1000,
++	MSG_STOP,
+ 	MSG_SHOW_SCOPE,
++	MSG_LOOP,
+ 	MSG_INPUT_CHANGED,
++	MSG_OUTPUT_CHANGED,
++	MSG_SELECT_OUTPUT,
+ 	MSG_REVERB_NONE,
+ 	MSG_REVERB_CLOSET,
+ 	MSG_REVERB_GARAGE,
+@@ -43,10 +49,21 @@ enum
+ 	MSG_REVERB_CAVERN,
+ 	MSG_REVERB_DUNGEON,
+ 	MSG_VOLUME,
++	MSG_TEMPO,
++	MSG_SEEKING,
++	MSG_SEEK,
++	MSG_TICK,
++	MSG_OPEN,
+ };
+ 
+ 
++class BFilePanel;
++class BMessageRunner;
++class BMidiConsumer;
++class BMidiProducer;
++class ChannelView;
+ class ScopeView;
++class SongPlayer;
+ class SynthBridge;
+ 
+ class MidiPlayerWindow : public BWindow {
+@@ -63,28 +80,48 @@ private:
+ 	typedef BWindow super;
+ 
+ 	void CreateInputMenu();
++	void CreateOutputMenu();
+ 	void CreateReverbMenu();
+ 	void CreateViews();
+ 	void InitControls();
+ 	void LoadSettings();
+ 	void SaveSettings();
+ 
++	void UpdateEndpointMenu(BPopUpMenu* menu, bool producers,
++		int32 selectedId);
+ 	void LoadFile(entry_ref* ref);
+-	void StartSynth();
+-	void StopSynth();
+-
+-	static void _StopHook(int32 arg);
+-	void StopHook();
+-
+-	void OnPlayStop();
++	bool LoadInstruments();
++	void SetOutput(int32 id);
++	void SelectOutput(const char* name);
++	void ConnectInput();
++	void ShowScope(bool show);
++	void UpdateTransport();
++	void UpdatePosition(bigtime_t position);
++
++	void OnPlayPause();
++	void OnStop();
+ 	void OnShowScope();
+ 	void OnInputChanged(BMessage* message);
+ 	void OnReverb(reverb_mode mode);
+ 	void OnVolume();
++	void OnTempo();
+ 	void OnDrop(BMessage* message);
+ 
++	SongPlayer* fPlayer;
++	SynthBridge* fSynthBridge;
++
++	BStringView* fTitleView;
++	ChannelView* fChannelView;
+ 	ScopeView* fScopeView;
+ 	BCheckBox* fShowScopeCheckBox;
++	BCheckBox* fLoopCheckBox;
++	BSlider* fPositionSlider;
++	BStringView* fTimeView;
++	BButton* fPlayButton;
++	BButton* fStopButton;
++	BMenuField* fOutputMenuField;
++	BPopUpMenu* fOutputPopUpMenu;
++	BMenuItem* fBuiltInMenuItem;
+ 	BMenuField* fInputMenuField;
+ 	BPopUpMenu* fInputPopUpMenu;
+ 	BMenuItem* fInputOffMenuItem;
+@@ -95,19 +132,32 @@ private:
+ 	BMenuItem* fReverbIgorMenuItem;
+ 	BMenuItem* fReverbCavern;
+ 	BMenuItem* fReverbDungeon;
++	BStringView* fTempoLabel;
++	BSlider* fTempoSlider;
+ 	BSlider* fVolumeSlider;
+-	BButton* fPlayButton;
++	BFilePanel* fOpenPanel;
++	BMessageRunner* fTicker;
++
++	BMidiConsumer* fOutput;
++	int32 fOutputId;
++		// -1: the built-in synthesizer
++	BString fOutputName;
++		// the endpoint's name, for the settings
++	int32 fInputId;
++	BMidiProducer* fInputProducer;
++	BMidiConsumer* fInputTarget;
++		// where the live input is connected
+ 
+-	bool fIsPlaying;
+ 	bool fScopeEnabled;
+-	int32 fInputId;
++	bool fLoop;
++	bool fSeeking;
++	bool fShowingPlaying;
++	bool fInstrumentLoaded;
+ 	reverb_mode fReverbMode;
+ 	int32 fVolume;
++	int32 fTempo;
+ 	float fWindowX;
+ 	float fWindowY;
+-	BMidiSynthFile fMidiSynthFile;
+-	SynthBridge* fSynthBridge;
+-	bool fInstrumentLoaded;
+ };
+ 
+ 
+diff --git a/src/apps/midiplayer/Song.cpp b/src/apps/midiplayer/Song.cpp
+new file mode 100644
+index 0000000000..4e2ed1833f
+--- /dev/null
++++ b/src/apps/midiplayer/Song.cpp
+@@ -0,0 +1,408 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "Song.h"
++
++#include <File.h>
++
++#include <algorithm>
++#include <string.h>
++
++
++// A MIDI file bigger than this is not a MIDI file
++static const off_t kMaxFileSize = 64 * 1024 * 1024;
++
++
++struct Song::RawEvent {
++	uint32		tick;
++	uint32		order;		// reading order: ties keep the file's order
++	uint32		tempo;		// != 0: a tempo change (microseconds per quarter
++							// note), which is not sent
++	SongEvent	event;
++};
++
++
++namespace {
++
++
++class Reader {
++public:
++	Reader(const uint8* data, size_t size)
++		:
++		fData(data),
++		fSize(size),
++		fPosition(0)
++	{
++	}
++
++	bool AtEnd() const { return fPosition >= fSize; }
++	size_t Remaining() const { return fSize - fPosition; }
++	const uint8* Here() const { return fData + fPosition; }
++
++	bool Byte(uint8& value)
++	{
++		if (fPosition >= fSize)
++			return false;
++		value = fData[fPosition++];
++		return true;
++	}
++
++	bool VariableLength(uint32& value)
++	{
++		value = 0;
++		for (int i = 0; i < 4; i++) {
++			uint8 byte;
++			if (!Byte(byte))
++				return false;
++			value = (value << 7) | (byte & 0x7f);
++			if ((byte & 0x80) == 0)
++				return true;
++		}
++		return false;
++	}
++
++	bool Skip(size_t count)
++	{
++		if (count > Remaining())
++			return false;
++		fPosition += count;
++		return true;
++	}
++
++private:
++	const uint8*	fData;
++	size_t			fSize;
++	size_t			fPosition;
++};
++
++
++uint32
++Big32(const uint8* p)
++{
++	return (uint32)p[0] << 24 | (uint32)p[1] << 16 | (uint32)p[2] << 8 | p[3];
++}
++
++
++uint16
++Big16(const uint8* p)
++{
++	return (uint16)(p[0] << 8 | p[1]);
++}
++
++
++bool
++IsUTF8(const uint8* text, size_t length)
++{
++	for (size_t i = 0; i < length;) {
++		uint8 c = text[i];
++		size_t more = c < 0x80 ? 0 : (c & 0xe0) == 0xc0 ? 1
++			: (c & 0xf0) == 0xe0 ? 2 : (c & 0xf8) == 0xf0 ? 3 : 4;
++		if (more == 4 || i + more >= length)
++			return false;
++		for (size_t j = 1; j <= more; j++) {
++			if ((text[i + j] & 0xc0) != 0x80)
++				return false;
++		}
++		i += more + 1;
++	}
++	return true;
++}
++
++
++// Text in MIDI files is ASCII, UTF-8 or (older files) Latin-1; BString
++// wants UTF-8
++BString
++TextFromMidi(const uint8* text, size_t length)
++{
++	size_t end = 0;
++	while (end < length && text[end] != 0)
++		end++;
++
++	BString result;
++	if (IsUTF8(text, end)) {
++		result.SetTo((const char*)text, end);
++	} else {
++		for (size_t i = 0; i < end; i++) {
++			uint8 c = text[i];
++			if (c < 0x80) {
++				result << (char)c;
++			} else {
++				char utf8[3] = { (char)(0xc0 | c >> 6),
++					(char)(0x80 | (c & 0x3f)), 0 };
++				result << utf8;
++			}
++		}
++	}
++	result.Trim();
++	return result;
++}
++
++
++}	// namespace
++
++
++Song::Song()
++	:
++	fDuration(0),
++	fUsedChannels(0)
++{
++	for (int32 i = 0; i < 16; i++)
++		fFirstProgram[i] = -1;
++}
++
++
++status_t
++Song::SetTo(const entry_ref& ref)
++{
++	BFile file(&ref, B_READ_ONLY);
++	status_t status = file.InitCheck();
++	if (status != B_OK)
++		return status;
++
++	off_t size;
++	status = file.GetSize(&size);
++	if (status != B_OK)
++		return status;
++	if (size <= 0 || size > kMaxFileSize)
++		return B_BAD_DATA;
++
++	std::vector<uint8> buffer(size);
++	ssize_t bytesRead = file.Read(&buffer[0], size);
++	if (bytesRead < 0)
++		return bytesRead;
++	if (bytesRead != size)
++		return B_IO_ERROR;
++
++	return SetTo(&buffer[0], size);
++}
++
++
++status_t
++Song::SetTo(const uint8* data, size_t size)
++{
++	fEvents.clear();
++	fData.clear();
++	fTitle = "";
++	fDuration = 0;
++	fUsedChannels = 0;
++	for (int32 i = 0; i < 16; i++)
++		fFirstProgram[i] = -1;
++
++	// RIFF MIDI ("RMID"): the Standard MIDI File is its "data" chunk
++	if (size >= 12 && memcmp(data, "RIFF", 4) == 0
++		&& memcmp(data + 8, "RMID", 4) == 0) {
++		size_t position = 12;
++		bool found = false;
++		while (position + 8 <= size) {
++			const uint8* chunk = data + position;
++			uint32 chunkSize = chunk[4] | chunk[5] << 8 | chunk[6] << 16
++				| (uint32)chunk[7] << 24;
++			if (memcmp(chunk, "data", 4) == 0) {
++				data = chunk + 8;
++				size = std::min((size_t)chunkSize, size - position - 8);
++				found = true;
++				break;
++			}
++			position += 8 + (size_t)chunkSize + (chunkSize & 1);
++		}
++		if (!found)
++			return B_BAD_DATA;
++	}
++
++	if (size < 14 || memcmp(data, "MThd", 4) != 0)
++		return B_BAD_DATA;
++	uint32 headerSize = Big32(data + 4);
++	if (headerSize < 6 || 8 + (size_t)headerSize > size)
++		return B_BAD_DATA;
++	uint16 format = Big16(data + 8);
++	uint16 trackCount = Big16(data + 10);
++	uint16 division = Big16(data + 12);
++	if (format > 2 || division == 0)
++		return B_BAD_DATA;
++
++	// all tracks, as they are in the file
++	std::vector<RawEvent> raw;
++	uint32 order = 0;
++	uint32 endTick = 0;
++	size_t position = 8 + headerSize;
++	uint16 track = 0;
++	while (track < trackCount && position + 8 <= size) {
++		const uint8* chunk = data + position;
++		size_t chunkSize = Big32(chunk + 4);
++		size_t available = size - position - 8;
++		// a chunk that claims more than the file has: read what there is
++		if (chunkSize > available)
++			chunkSize = available;
++		position += 8 + chunkSize;
++		if (memcmp(chunk, "MTrk", 4) != 0)
++			continue;
++			// unknown chunks are skipped, as the specification says
++		_ReadTrack(chunk + 8, chunkSize, track, raw, order, endTick);
++		track++;
++	}
++
++	// one list, in time order; at the same tick the file's order counts
++	std::stable_sort(raw.begin(), raw.end(),
++		[](const RawEvent& a, const RawEvent& b) {
++			return a.tick < b.tick
++				|| (a.tick == b.tick && a.order < b.order);
++		});
++
++	// ticks to microseconds, through the tempo changes
++	bool smpte = (division & 0x8000) != 0;
++	double smpteTickLength = 0;
++	if (smpte) {
++		int framesPerSecond = -(int8)(division >> 8);
++		int ticksPerFrame = division & 0xff;
++		if (framesPerSecond <= 0 || ticksPerFrame == 0)
++			return B_BAD_DATA;
++		smpteTickLength = 1000000.0 / ((framesPerSecond == 29
++			? 29.97 : framesPerSecond) * ticksPerFrame);
++	}
++
++	double time = 0;
++	uint32 lastTick = 0;
++	uint32 tempo = 500000;
++		// 120 beats per minute until the file says otherwise
++	fEvents.reserve(raw.size());
++	for (size_t i = 0; i < raw.size(); i++) {
++		RawEvent& event = raw[i];
++		time += (event.tick - lastTick)
++			* (smpte ? smpteTickLength : (double)tempo / division);
++		lastTick = event.tick;
++		if (event.tempo != 0) {
++			tempo = event.tempo;
++			continue;
++		}
++		event.event.time = (bigtime_t)time;
++		fEvents.push_back(event.event);
++
++		uint8 status = event.event.status;
++		if (status >= 0x80 && status < 0xF0) {
++			int32 channel = status & 0x0F;
++			if ((status & 0xF0) == 0x90 && event.event.data2 > 0)
++				fUsedChannels |= 1 << channel;
++			else if ((status & 0xF0) == 0xC0 && fFirstProgram[channel] < 0)
++				fFirstProgram[channel] = event.event.data1;
++		}
++	}
++	if (endTick > lastTick) {
++		time += (endTick - lastTick)
++			* (smpte ? smpteTickLength : (double)tempo / division);
++	}
++	fDuration = (bigtime_t)time;
++
++	return fEvents.empty() ? B_BAD_DATA : B_OK;
++}
++
++
++int32
++Song::IndexAt(bigtime_t time) const
++{
++	std::vector<SongEvent>::const_iterator found = std::lower_bound(
++		fEvents.begin(), fEvents.end(), time,
++		[](const SongEvent& event, bigtime_t value) {
++			return event.time < value;
++		});
++	return (int32)(found - fEvents.begin());
++}
++
++
++bool
++Song::_ReadTrack(const uint8* data, size_t size, uint16 track,
++	std::vector<RawEvent>& events, uint32& order, uint32& endTick)
++{
++	Reader reader(data, size);
++	uint32 tick = 0;
++	uint8 runningStatus = 0;
++
++	while (!reader.AtEnd()) {
++		uint32 delta;
++		uint8 status;
++		if (!reader.VariableLength(delta) || !reader.Byte(status))
++			break;
++		tick += delta;
++
++		RawEvent event = {};
++		event.tick = tick;
++
++		uint8 first = 0;
++		bool haveFirst = false;
++		if (status < 0x80) {
++			// running status: that was the first data byte
++			if (runningStatus == 0)
++				break;
++			first = status;
++			haveFirst = true;
++			status = runningStatus;
++		}
++
++		if (status < 0xF0) {
++			runningStatus = status;
++			uint8 data1 = first;
++			uint8 data2 = 0;
++			if (!haveFirst && !reader.Byte(data1))
++				break;
++			uint8 type = status & 0xF0;
++			if (type != 0xC0 && type != 0xD0 && !reader.Byte(data2))
++				break;
++			event.event.status = status;
++			event.event.data1 = data1 & 0x7f;
++			event.event.data2 = data2 & 0x7f;
++		} else if (status == 0xF0 || status == 0xF7) {
++			runningStatus = 0;
++			uint32 length;
++			if (!reader.VariableLength(length) || length > reader.Remaining())
++				break;
++			const uint8* body = reader.Here();
++			reader.Skip(length);
++			// "F0 <body> F7": SpraySystemExclusive() adds F0 and F7 itself;
++			// "F7 <bytes>" (an escape) is sent as it is
++			uint32 bodyLength = length;
++			if (status == 0xF0 && bodyLength > 0
++				&& body[bodyLength - 1] == 0xF7) {
++				bodyLength--;
++			}
++			event.event.status = status;
++			event.event.offset = (uint32)fData.size();
++			event.event.length = bodyLength;
++			fData.insert(fData.end(), body, body + bodyLength);
++		} else if (status == 0xFF) {
++			runningStatus = 0;
++			uint8 type;
++			uint32 length;
++			if (!reader.Byte(type) || !reader.VariableLength(length)
++				|| length > reader.Remaining()) {
++				break;
++			}
++			const uint8* body = reader.Here();
++			reader.Skip(length);
++			if (type == 0x2F)
++				break;
++					// end of track
++			if (type == 0x51 && length == 3) {
++				event.tempo = (uint32)body[0] << 16 | body[1] << 8 | body[2];
++				if (event.tempo == 0)
++					continue;
++			} else {
++				// the first track's name is the song's title
++				if (type == 0x03 && track == 0 && fTitle.IsEmpty())
++					fTitle = TextFromMidi(body, length);
++				continue;
++			}
++		} else {
++			// system common and real-time messages have no place in a file
++			break;
++		}
++
++		event.order = order++;
++		events.push_back(event);
++	}
++
++	if (tick > endTick)
++		endTick = tick;
++	return true;
++}
+diff --git a/src/apps/midiplayer/Song.h b/src/apps/midiplayer/Song.h
+new file mode 100644
+index 0000000000..4c1ba2a69f
+--- /dev/null
++++ b/src/apps/midiplayer/Song.h
+@@ -0,0 +1,78 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Song: a Standard MIDI File (format 0, 1 or 2, also in a RIFF "RMID"
++ * wrapper) read into one list of messages, each with its time from the start
++ * of the song in microseconds, following the file's tempo changes.
++ */
++#ifndef _SONG_H
++#define _SONG_H
++
++
++#include <String.h>
++#include <SupportDefs.h>
++
++#include <vector>
++
++
++struct entry_ref;
++
++
++struct SongEvent {
++	bigtime_t	time;
++	uint8		status;		// 0x80-0xEF: a channel message (data1, data2);
++							// 0xF0: a system exclusive, 0xF7: raw bytes,
++							// both with their body in Song::Data()
++	uint8		data1;
++	uint8		data2;
++	uint32		offset;
++	uint32		length;
++};
++
++
++class Song {
++public:
++								Song();
++
++			status_t			SetTo(const entry_ref& ref);
++			status_t			SetTo(const uint8* data, size_t size);
++
++			const BString&		Title() const { return fTitle; }
++			bigtime_t			Duration() const { return fDuration; }
++
++			int32				CountEvents() const
++									{ return (int32)fEvents.size(); }
++			const SongEvent&	EventAt(int32 index) const
++									{ return fEvents[index]; }
++			const uint8*		Data(const SongEvent& event) const
++									{ return &fData[event.offset]; }
++
++			// the first event at or after this time
++			int32				IndexAt(bigtime_t time) const;
++
++			// what the song plays on a channel: whether it has notes there,
++			// and its first program (-1 if it sets none)
++			bool				UsesChannel(int32 channel) const
++									{ return fUsedChannels & (1 << channel); }
++			int32				FirstProgram(int32 channel) const
++									{ return fFirstProgram[channel]; }
++
++private:
++			struct RawEvent;
++
++			bool				_ReadTrack(const uint8* data, size_t size,
++									uint16 track,
++									std::vector<RawEvent>& events,
++									uint32& order, uint32& endTick);
++
++			std::vector<SongEvent>	fEvents;
++			std::vector<uint8>		fData;
++			BString					fTitle;
++			bigtime_t				fDuration;
++			uint16					fUsedChannels;
++			int32					fFirstProgram[16];
++};
++
++
++#endif	// _SONG_H
+diff --git a/src/apps/midiplayer/SongPlayer.cpp b/src/apps/midiplayer/SongPlayer.cpp
+new file mode 100644
+index 0000000000..4f33e36b86
+--- /dev/null
++++ b/src/apps/midiplayer/SongPlayer.cpp
+@@ -0,0 +1,599 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "SongPlayer.h"
++
++#include <Autolock.h>
++#include <MidiConsumer.h>
++#include <MidiProducer.h>
++
++#include <new>
++#include <string.h>
++
++#include "Song.h"
++
++
++// Messages due this close are sent now rather than slept for
++static const bigtime_t kEarly = 500;
++
++
++SongPlayer::SongPlayer(const BMessenger& target)
++	:
++	fLock("song player"),
++	fTarget(target),
++	fOutput(NULL),
++	fSong(NULL),
++	fQuit(false),
++	fPlaying(false),
++	fLoop(false),
++	fTempo(1.0f),
++	fVolume(1.0f),
++	fPosition(0),
++	fAnchorSongTime(0),
++	fAnchorRealTime(0),
++	fNext(0),
++	fUsedChannels(0)
++{
++	for (int32 i = 0; i < 16; i++) {
++		fSongVolume[i] = 100;
++		fProgram[i] = -1;
++		fNoteCount[i] = 0;
++		fVelocity[i] = 0;
++		fHeld[i] = 0;
++	}
++
++	fProducer = new BMidiLocalProducer("MidiPlayer");
++	fWakeSemaphore = create_sem(0, "song player wake");
++	fThread = spawn_thread(_ThreadEntry, "song player", B_URGENT_PRIORITY,
++		this);
++	if (fThread >= 0)
++		resume_thread(fThread);
++}
++
++
++SongPlayer::~SongPlayer()
++{
++	fLock.Lock();
++	fQuit = true;
++	if (fPlaying) {
++		fPlaying = false;
++		_SilenceLocked();
++	}
++	fLock.Unlock();
++		// (the owner disconnects an output that must not get this first)
++
++	_Wake();
++	if (fThread >= 0) {
++		status_t result;
++		wait_for_thread(fThread, &result);
++	}
++	delete_sem(fWakeSemaphore);
++
++	SetOutput(NULL);
++	fProducer->Release();
++	delete fSong;
++}
++
++
++void
++SongPlayer::SetSong(Song* song)
++{
++	BAutolock _(fLock);
++
++	if (fPlaying) {
++		fPlaying = false;
++		_SilenceLocked();
++	}
++	delete fSong;
++	fSong = song;
++	fPosition = 0;
++	fNext = 0;
++	_ReleaseHeld();
++
++	fUsedChannels = 0;
++	for (int32 i = 0; i < 16; i++) {
++		fNoteCount[i] = 0;
++		fVelocity[i] = 0;
++		fProgram[i] = song != NULL ? song->FirstProgram(i) : -1;
++		if (song != NULL && song->UsesChannel(i))
++			fUsedChannels |= 1 << i;
++	}
++	_Wake();
++}
++
++
++int32
++SongPlayer::Program(int32 channel) const
++{
++	return atomic_get((int32*)&fProgram[channel]);
++}
++
++
++int32
++SongPlayer::NoteCount(int32 channel) const
++{
++	return atomic_get((int32*)&fNoteCount[channel]);
++}
++
++
++int32
++SongPlayer::Velocity(int32 channel) const
++{
++	return atomic_get((int32*)&fVelocity[channel]);
++}
++
++
++int32
++SongPlayer::HeldNotes(int32 channel) const
++{
++	return atomic_get((int32*)&fHeld[channel]);
++}
++
++
++bool
++SongPlayer::UsesChannel(int32 channel) const
++{
++	return (atomic_get((int32*)&fUsedChannels) & (1 << channel)) != 0;
++}
++
++
++bool
++SongPlayer::HasSong()
++{
++	BAutolock _(fLock);
++	return fSong != NULL;
++}
++
++
++void
++SongPlayer::SetOutput(BMidiConsumer* consumer, bool silence)
++{
++	BAutolock _(fLock);
++
++	if (consumer == fOutput)
++		return;
++
++	if (fOutput != NULL) {
++		// the old output stops sounding
++		if (silence)
++			_SilenceLocked();
++		fProducer->Disconnect(fOutput);
++		fOutput->Release();
++	}
++
++	fOutput = consumer;
++	if (fOutput == NULL)
++		return;
++
++	fOutput->Acquire();
++	fProducer->Connect(fOutput);
++
++	// the new one gets the channels as the song has set them up so far
++	if (fSong != NULL && (fPlaying || fPosition > 0)) {
++		_ResetChannelsLocked();
++		_ChaseLocked(fPlaying ? fNext : fSong->IndexAt(fPosition));
++	}
++}
++
++
++void
++SongPlayer::Play()
++{
++	BAutolock _(fLock);
++
++	if (fPlaying || fSong == NULL)
++		return;
++	if (fPosition >= fSong->Duration())
++		fPosition = 0;
++
++	fPlaying = true;
++	_StartLocked();
++	_Wake();
++}
++
++
++void
++SongPlayer::Pause()
++{
++	BAutolock _(fLock);
++
++	if (!fPlaying)
++		return;
++	fPosition = _PositionLocked();
++	fPlaying = false;
++	_SilenceLocked();
++	_Wake();
++}
++
++
++void
++SongPlayer::Stop()
++{
++	BAutolock _(fLock);
++
++	if (fPlaying)
++		_SilenceLocked();
++	fPlaying = false;
++	fPosition = 0;
++	fNext = 0;
++	_Wake();
++}
++
++
++void
++SongPlayer::Seek(bigtime_t position)
++{
++	BAutolock _(fLock);
++
++	if (fSong == NULL)
++		return;
++	if (position < 0)
++		position = 0;
++	if (position > fSong->Duration())
++		position = fSong->Duration();
++
++	fPosition = position;
++	if (fPlaying) {
++		_SilenceLocked();
++		_StartLocked();
++		_Wake();
++	}
++}
++
++
++bool
++SongPlayer::IsPlaying()
++{
++	BAutolock _(fLock);
++	return fPlaying;
++}
++
++
++bigtime_t
++SongPlayer::Position()
++{
++	BAutolock _(fLock);
++	return _PositionLocked();
++}
++
++
++bigtime_t
++SongPlayer::Duration()
++{
++	BAutolock _(fLock);
++	return fSong != NULL ? fSong->Duration() : 0;
++}
++
++
++void
++SongPlayer::SetTempo(float factor)
++{
++	BAutolock _(fLock);
++
++	if (factor < 0.1f)
++		factor = 0.1f;
++	if (fPlaying) {
++		fAnchorSongTime = _PositionLocked();
++		fAnchorRealTime = system_time();
++	}
++	fTempo = factor;
++	_Wake();
++}
++
++
++void
++SongPlayer::SetLoop(bool loop)
++{
++	BAutolock _(fLock);
++	fLoop = loop;
++}
++
++
++void
++SongPlayer::SetVolume(float volume)
++{
++	BAutolock _(fLock);
++
++	if (volume < 0)
++		volume = 0;
++	if (volume > 1)
++		volume = 1;
++	fVolume = volume;
++
++	if (fOutput != NULL && fSong != NULL) {
++		bigtime_t now = system_time();
++		for (int32 channel = 0; channel < 16; channel++) {
++			fProducer->SprayControlChange(channel, 7,
++				_ScaledVolume(fSongVolume[channel]), now);
++		}
++	}
++}
++
++
++// #pragma mark - private
++
++
++status_t
++SongPlayer::_ThreadEntry(void* data)
++{
++	((SongPlayer*)data)->_Thread();
++	return B_OK;
++}
++
++
++void
++SongPlayer::_Thread()
++{
++	while (true) {
++		bigtime_t wakeAt = B_INFINITE_TIMEOUT;
++		bool ended = false;
++
++		fLock.Lock();
++		if (fQuit) {
++			fLock.Unlock();
++			break;
++		}
++
++		if (fPlaying && fSong != NULL) {
++			if (fNext >= fSong->CountEvents()) {
++				// the song ends at its length, which can be after its last
++				// message (a rest at the end)
++				bigtime_t end = fAnchorRealTime + (bigtime_t)(
++					(fSong->Duration() - fAnchorSongTime) / fTempo);
++				if (end > system_time() + kEarly) {
++					wakeAt = end;
++				} else if (fLoop) {
++					fPosition = 0;
++					_StartLocked();
++					fLock.Unlock();
++					continue;
++				} else {
++					fPlaying = false;
++					fPosition = fSong->Duration();
++					_SilenceLocked();
++					ended = true;
++				}
++			} else {
++				const SongEvent& event = fSong->EventAt(fNext);
++				bigtime_t due = fAnchorRealTime + (bigtime_t)(
++					(event.time - fAnchorSongTime) / fTempo);
++				if (due <= system_time() + kEarly) {
++					_SendLocked(event, due);
++					fNext++;
++					fLock.Unlock();
++					continue;
++				}
++				wakeAt = due;
++			}
++		}
++		fLock.Unlock();
++
++		// not while holding the lock: the window may be waiting for it
++		if (ended)
++			fTarget.SendMessage(MSG_SONG_ENDED);
++
++		acquire_sem_etc(fWakeSemaphore, 1, B_ABSOLUTE_TIMEOUT, wakeAt);
++	}
++}
++
++
++bigtime_t
++SongPlayer::_PositionLocked() const
++{
++	if (fSong == NULL)
++		return 0;
++	if (!fPlaying)
++		return fPosition;
++
++	bigtime_t position = fAnchorSongTime
++		+ (bigtime_t)((system_time() - fAnchorRealTime) * fTempo);
++	if (position < 0)
++		return 0;
++	if (position > fSong->Duration())
++		return fSong->Duration();
++	return position;
++}
++
++
++// Starts playing from fPosition: the channels are set up as the song had
++// them there (instruments, controllers), then the thread takes over
++void
++SongPlayer::_StartLocked()
++{
++	fAnchorSongTime = fPosition;
++	fAnchorRealTime = system_time();
++	fNext = fSong->IndexAt(fPosition);
++
++	_ResetChannelsLocked();
++	_ChaseLocked(fNext);
++}
++
++
++void
++SongPlayer::_ReleaseHeld()
++{
++	for (int32 channel = 0; channel < 16; channel++)
++		atomic_set(&fHeld[channel], 0);
++}
++
++
++void
++SongPlayer::_SilenceLocked()
++{
++	_ReleaseHeld();
++	if (fOutput == NULL)
++		return;
++
++	bigtime_t now = system_time();
++	for (int32 channel = 0; channel < 16; channel++) {
++		fProducer->SprayControlChange(channel, 64, 0, now);
++			// sustain off
++		fProducer->SprayControlChange(channel, 120, 0, now);
++			// all sound off
++		fProducer->SprayControlChange(channel, 123, 0, now);
++			// all notes off
++	}
++}
++
++
++// General MIDI defaults, so that a song that starts in the middle, or on an
++// output another song played through, does not inherit what came before
++void
++SongPlayer::_ResetChannelsLocked()
++{
++	_ReleaseHeld();
++	bigtime_t now = system_time();
++	for (int32 channel = 0; channel < 16; channel++) {
++		fSongVolume[channel] = 100;
++		fProgram[channel] = fSong != NULL ? fSong->FirstProgram(channel) : -1;
++		if (fOutput == NULL)
++			continue;
++		fProducer->SprayControlChange(channel, 121, 0, now);
++			// reset all controllers
++		fProducer->SprayControlChange(channel, 0, 0, now);
++		fProducer->SprayControlChange(channel, 32, 0, now);
++			// bank 0
++		fProducer->SprayProgramChange(channel, 0, now);
++		fProducer->SprayControlChange(channel, 7, _ScaledVolume(100), now);
++		fProducer->SprayControlChange(channel, 10, 64, now);
++			// pan: center
++	}
++}
++
++
++// What the song has set up by event upTo -- programs, controllers, pitch
++// bends, system exclusives -- sent without the notes. Of the programs,
++// controllers, pitch bends and channel pressures only the last of each
++// counts; the controllers that select and set RPN/NRPN parameters only work
++// in sequence, so they are all sent.
++void
++SongPlayer::_ChaseLocked(int32 upTo)
++{
++	if (fSong == NULL || fOutput == NULL || upTo <= 0)
++		return;
++
++	static const int32 kKeys = 16 * 128 + 3 * 16;
++	bool seen[kKeys];
++	memset(seen, 0, sizeof(seen));
++	bool* keep = new(std::nothrow) bool[upTo];
++	if (keep == NULL)
++		return;
++
++	for (int32 i = upTo - 1; i >= 0; i--) {
++		const SongEvent& event = fSong->EventAt(i);
++		keep[i] = false;
++		if (event.status >= 0xF0) {
++			keep[i] = true;
++			continue;
++		}
++
++		int32 channel = event.status & 0x0F;
++		int32 key;
++		switch (event.status & 0xF0) {
++			case 0xB0:
++				if (event.data1 == 6 || event.data1 == 38
++					|| (event.data1 >= 96 && event.data1 <= 101)) {
++					keep[i] = true;
++					continue;
++				}
++				if (event.data1 >= 120)
++					continue;
++						// channel mode messages
++				key = channel * 128 + event.data1;
++				break;
++			case 0xC0:
++				key = 16 * 128 + channel;
++				break;
++			case 0xD0:
++				key = 16 * 128 + 16 + channel;
++				break;
++			case 0xE0:
++				key = 16 * 128 + 32 + channel;
++				break;
++			default:
++				continue;
++					// notes and key pressure
++		}
++		if (!seen[key]) {
++			seen[key] = true;
++			keep[i] = true;
++		}
++	}
++
++	bigtime_t now = system_time();
++	for (int32 i = 0; i < upTo; i++) {
++		if (keep[i])
++			_SendLocked(fSong->EventAt(i), now);
++	}
++	delete[] keep;
++}
++
++
++void
++SongPlayer::_SendLocked(const SongEvent& event, bigtime_t when)
++{
++	uint8 status = event.status;
++	if (status == 0xF0) {
++		fProducer->SpraySystemExclusive((void*)fSong->Data(event),
++			event.length, when);
++		return;
++	}
++	if (status == 0xF7) {
++		fProducer->SprayData((void*)fSong->Data(event), event.length, false,
++			when);
++		return;
++	}
++
++	int32 channel = status & 0x0F;
++	uint8 data[3] = { status, event.data1, event.data2 };
++	size_t length = 3;
++
++	switch (status & 0xF0) {
++		case 0x90:
++			if (event.data2 > 0) {
++				fVelocity[channel] = event.data2;
++				atomic_add(&fNoteCount[channel], 1);
++				atomic_add(&fHeld[channel], 1);
++				break;
++			}
++			// a note-on with velocity 0 is a note-off
++		case 0x80:
++			if (atomic_add(&fHeld[channel], -1) <= 0)
++				atomic_set(&fHeld[channel], 0);
++			break;
++		case 0xB0:
++			if (event.data1 == 7) {
++				// channel volume: the song's, scaled by ours
++				fSongVolume[channel] = event.data2;
++				data[2] = _ScaledVolume(event.data2);
++			}
++			break;
++		case 0xC0:
++			fProgram[channel] = event.data1;
++			length = 2;
++			break;
++		case 0xD0:
++			length = 2;
++			break;
++	}
++
++	fProducer->SprayData(data, length, true, when);
++}
++
++
++uint8
++SongPlayer::_ScaledVolume(uint8 value) const
++{
++	int32 scaled = (int32)(value * fVolume + 0.5f);
++	return (uint8)(scaled > 127 ? 127 : scaled);
++}
++
++
++void
++SongPlayer::_Wake()
++{
++	release_sem(fWakeSemaphore);
++}
+diff --git a/src/apps/midiplayer/SongPlayer.h b/src/apps/midiplayer/SongPlayer.h
+new file mode 100644
+index 0000000000..6fdd62a01c
+--- /dev/null
++++ b/src/apps/midiplayer/SongPlayer.h
+@@ -0,0 +1,113 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * SongPlayer: plays a Song through a Midi Kit 2 producer, so that any
++ * consumer can be the output -- the built-in synthesizer (SynthBridge), the
++ * Mac (the Prose MIDI device), a MIDI device, another application. One
++ * thread sends each message at its time; every command wakes it, so pause,
++ * stop, seek and the destructor take effect at once.
++ */
++#ifndef _SONG_PLAYER_H
++#define _SONG_PLAYER_H
++
++
++#include <Locker.h>
++#include <Messenger.h>
++#include <OS.h>
++
++
++class BMidiConsumer;
++class BMidiLocalProducer;
++class Song;
++struct SongEvent;
++
++
++enum {
++	MSG_SONG_ENDED = 'sEnd'
++};
++
++
++class SongPlayer {
++public:
++								SongPlayer(const BMessenger& target);
++								~SongPlayer();
++
++			// takes ownership; stops what was playing
++			void				SetSong(Song* song);
++			bool				HasSong();
++
++			// NULL: no output. The old output gets "all notes off" unless
++			// silence is false (the built-in synthesizer, when the
++			// application quits: it is about to go away)
++			void				SetOutput(BMidiConsumer* consumer,
++									bool silence = true);
++
++			void				Play();
++			void				Pause();
++			void				Stop();
++			void				Seek(bigtime_t position);
++
++			bool				IsPlaying();
++			bigtime_t			Position();
++			bigtime_t			Duration();
++
++			void				SetTempo(float factor);
++			void				SetLoop(bool loop);
++			void				SetVolume(float volume);
++
++			// for the channel view: read without locking
++			int32				Program(int32 channel) const;
++			int32				NoteCount(int32 channel) const;
++			int32				Velocity(int32 channel) const;
++			int32				HeldNotes(int32 channel) const;
++			bool				UsesChannel(int32 channel) const;
++
++private:
++	static	status_t			_ThreadEntry(void* data);
++			void				_Thread();
++
++			bigtime_t			_PositionLocked() const;
++			void				_StartLocked();
++			void				_SilenceLocked();
++			void				_ReleaseHeld();
++			void				_ResetChannelsLocked();
++			void				_ChaseLocked(int32 upTo);
++			void				_SendLocked(const SongEvent& event,
++									bigtime_t when);
++			uint8				_ScaledVolume(uint8 value) const;
++			void				_Wake();
++
++			BLocker				fLock;
++			BMessenger			fTarget;
++			BMidiLocalProducer*	fProducer;
++			BMidiConsumer*		fOutput;
++			Song*				fSong;
++
++			sem_id				fWakeSemaphore;
++			thread_id			fThread;
++			bool				fQuit;
++
++			bool				fPlaying;
++			bool				fLoop;
++			float				fTempo;
++			float				fVolume;
++			bigtime_t			fPosition;
++				// song time, while not playing
++			bigtime_t			fAnchorSongTime;
++			bigtime_t			fAnchorRealTime;
++				// while playing: the song was at fAnchorSongTime at system
++				// time fAnchorRealTime
++			int32				fNext;
++			uint8				fSongVolume[16];
++				// what the song set with controller 7, before our volume
++
++			int32				fProgram[16];
++			int32				fNoteCount[16];
++			int32				fVelocity[16];
++			int32				fHeld[16];
++			int32				fUsedChannels;
++};
++
++
++#endif	// _SONG_PLAYER_H
