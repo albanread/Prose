@@ -104,6 +104,9 @@ func makeMainMenu(_ controller: Controller) -> NSMenu {
     }
     view.addItem(presenter)
     view.addItem(.separator())
+    // the Mac side of HostFS: what the machine sees as its HostFS volume
+    add(view, "Host Files in Finder", #selector(Controller.revealHostFiles(_:)))
+    view.addItem(.separator())
     add(view, "Enter Full Screen", #selector(Controller.toggleFullScreen(_:)), "f")
 
     // Window

@@ -312,6 +312,18 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         log("automation: \(allow ? "allowed" : "off")")
     }
 
+    /// View ▸ Host Files in Finder: the folders shared into the machine, opened
+    /// on the Mac. What the guest mounts as HostFS is one of these, or all of
+    /// them as subfolders when there are several.
+    @objc func revealHostFiles(_ sender: Any?) {
+        let shares = hostShares()
+        guard !shares.isEmpty else {
+            chrome?.content.statusBar.show(message: "No folder is shared with this machine")
+            return
+        }
+        for share in shares { NSWorkspace.shared.open(share.url) }
+    }
+
     @objc func toggleFullScreen(_ sender: Any?) {
         presenter.window?.toggleFullScreen(sender)
     }
