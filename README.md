@@ -85,6 +85,10 @@ expectations of Haiku's skilled developers, and it is not offered to them.
 
 It means I can run the software I want, now.
 
+It is an iterative project and it has not been extensively tested. Crashes in
+applications and in the system get fixed as they are found. It started on
+15 September 2026, replacing another project.
+
 Underneath the different name and artwork, this is the same operating system
 their work produced, and everything that makes it good is theirs.
 
