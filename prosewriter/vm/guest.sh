@@ -11,6 +11,7 @@ Usage:
   guest.sh screenshot [out-file]    # runs Haiku's screenshot tool in the guest
 """
 import os
+import hashlib
 import socket
 import sys
 import time
@@ -54,7 +55,16 @@ def put_file(src, dst):
     s.sendall(f"put {dst} {len(data)}\n".encode() + data)
     reply = s.recv(100).decode().strip()
     s.close()
-    return reply
+    if reply != "OK":
+        return reply
+    # a full-size but corrupt file once shipped a truncated dictionary that
+    # silently flagged every late-alphabet word as misspelled — never again
+    local = hashlib.md5(data).hexdigest()
+    remote = call(f"run md5sum {dst}\n".encode()).decode(errors="replace")
+    remote = remote.split()[0].strip() if remote.split() else ""
+    if remote != local:
+        return f"ERR md5 mismatch {remote} != {local}"
+    return "OK verified"
 
 
 def main():
@@ -95,7 +105,7 @@ def main():
         local, dst = args[0], args[1]
         tmp = dst + ".new"
         r = put_file(local, tmp)
-        if r.strip() != "OK":
+        if not r.startswith("OK"):
             print(r, file=sys.stderr)
             return 1
         call(f"run /bin/mv -f {tmp} {dst}\n".encode())

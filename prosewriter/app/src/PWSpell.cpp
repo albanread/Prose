@@ -13,8 +13,22 @@ PWSpellChecker::Load(const char* path)
 		return 0;
 	off_t size = 0;
 	file.GetSize(&size);
+	if (size <= 0 || size > 64LL * 1024 * 1024)
+		return 0;
 	char* buffer = new char[size + 1];
-	ssize_t got = file.Read(buffer, size);
+	// read in a loop: a single Read() may return short, and a silently
+	// truncated dictionary turns every late-alphabet word into an error
+	ssize_t got = 0;
+	while (got < (ssize_t)size) {
+		ssize_t n = file.Read(buffer + got, size - got);
+		if (n < 0) {
+			got = -1;
+			break;
+		}
+		if (n == 0)
+			break;
+		got += n;
+	}
 	if (got < 0)
 		got = 0;
 	buffer[got] = '\0';
