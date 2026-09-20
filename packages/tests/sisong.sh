@@ -5,7 +5,8 @@
 # line longer than its old 1022-character limit, UTF-8 it does not
 # understand but must not damage, no newline at the end),
 # take a second file from a second launch into the same window (single
-# launch), and quit cleanly when asked. It is driven through messages:
+# launch), survive the two things that crashed it most simply (a very long
+# word, Find with the find box open), and quit cleanly when asked. It is driven through messages:
 # hey sends the window the key-down and menu messages a user would cause
 # (a verb of four characters is a message code: _KYD is B_KEY_DOWN, !MnF and
 # !MnW are Sisong's File > Save and File > Exit, src/messages.h).
@@ -23,6 +24,11 @@ if [ -z "$SISONG" ]; then
 	done
 	if [ -n "$link" ]; then say "menu entry: $link"; else say "MISSING: Deskbar menu entry"; fail=1; fi
 fi
+
+# a crash is to end in a report on the Desktop and a dead team, not in the
+# debugger's alert waiting for a click until boot-test.sh gives up
+mkdir -p /boot/home/config/settings/system/debug_server
+printf 'executable_actions {\n\tSisong report\n}\n' > /boot/home/config/settings/system/debug_server/settings
 
 dir=/boot/home/sisong-probe
 rm -rf $dir; mkdir -p $dir
@@ -69,6 +75,22 @@ if kill -0 $pid 2>/dev/null; then
 	sleep 1
 	if kill -0 $second 2>/dev/null; then say "second launch is still running: not single launch"; kill -9 $second 2>/dev/null; fail=1; fi
 	wait $second 2>/dev/null
+
+	# what used to crash it: a "word" longer than the lexer's 2048-byte stack
+	# buffer (opening the file was enough), and Search > Find asked for while
+	# the find box is open (its constructor deleted itself: !Mnk is the menu's
+	# message)
+	i=0; blob=""; while [ $i -lt 60 ]; do blob="${blob}0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567"; i=$((i + 1)); done
+	printf 'x = 0x%s;\n' "$blob" > $dir/blob.txt
+	"$APP" $dir/blob.txt > /dev/null 2>&1 &
+	third=$!
+	if wait_title blob.txt 15; then say "opened a file with a $(( $(wc -c < $dir/blob.txt) - 9 ))-character word"; else say "blob.txt did not open (title: $(title))"; fail=1; fi
+	wait $third 2>/dev/null
+	hey Sisong '!Mnk' of Window 0 > /dev/null 2>&1
+	sleep 1
+	hey Sisong '!Mnk' of Window 0 > /dev/null 2>&1
+	sleep 2
+	if kill -0 $pid 2>/dev/null; then say "find box asked for twice: still running"; else say "DIED when the find box was asked for twice"; fail=1; fi
 
 	# File > Exit: everything is saved, so nothing may ask
 	hey Sisong '!MnW' of Window 0 > /dev/null 2>&1
