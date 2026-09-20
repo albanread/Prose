@@ -621,7 +621,10 @@ PWPageView::HandleNavigationKey(const char* bytes, int32 mods)
 			if (HasSelection()) DeleteSelection();
 			if (fLayout->IsTableParagraph(
 					fLayout->Lines()[fLayout->LineOfOffset(fCaret)].para)) {
-				InsertText("\x1d", 1);	// next cell in the row
+				// Tab traverses cells (a separator per Tab grew tables
+				// by accident — owner-reported 2026-09-20): next cell,
+				// then the next row, and a fresh row after the last
+				MoveToNextCell();
 				return;
 			}
 			InsertText("\t", 1);
@@ -799,6 +802,43 @@ PWPageView::MouseDown(BPoint where)
 	ClickCycled(where, fClickCount);
 	SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
 	fMouseSelecting = true;
+}
+
+void
+PWPageView::MoveToNextCell()
+{
+	int32 para, inPara;
+	fDoc->Locate(fCaret, &para, &inPara);
+	const char* text = fDoc->ParagraphText(para);
+	int32 len = fDoc->ParagraphLength(para);
+
+	// next separator in this row: the cell after it
+	for (int32 i = inPara; i < len; i++) {
+		if (text[i] == PWLayout::kCellSep) {
+			SetCaret(fDoc->ParaStart(para) + i + 1, false);
+			return;
+		}
+	}
+	// last cell of the row: the next row's first cell
+	if (para + 1 < fDoc->CountParagraphs()
+		&& fLayout->IsTableParagraph(para + 1)) {
+		SetCaret(fDoc->ParaStart(para + 1), false);
+		return;
+	}
+	// last cell of the table: a new row with the same column count
+	int32 seps = 0;
+	for (int32 i = 0; i < len; i++)
+		if (text[i] == PWLayout::kCellSep)
+			seps++;
+	fDoc->Insert(fDoc->ParaStart(para) + len, "\n", NULL);
+	int32 newRow = fDoc->ParaStart(para + 1);
+	BString rowPad;
+	for (int32 i = 1; i < seps; i++)
+		rowPad += PWLayout::kCellSep;
+	if (rowPad.Length() > 0)
+		fDoc->Insert(newRow, rowPad.String(), NULL);
+	SetCaret(newRow, false);
+	Relayout();
 }
 
 void

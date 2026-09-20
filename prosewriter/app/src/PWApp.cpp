@@ -426,6 +426,7 @@ static const char* gFooter = NULL;
 static const char* gPaper = NULL;
 static const char* gSeed = NULL;
 static const char* gSeedImage = NULL;
+static const char* gOpenPath = NULL;
 static bool gSeedTable = false;
 static bool gLandscape = false;
 static bool gPrint = false;
@@ -450,6 +451,8 @@ ParseArgs(int argc, char** argv)
 			gLandscape = true;
 		else if (!strcmp(argv[i], "--print"))
 			gPrint = true;
+		else if (argv[i][0] != '-')
+			gOpenPath = argv[i];	// a document to open
 	}
 }
 
@@ -703,6 +706,8 @@ ApplyWindowArgs(PWWindow* window)
 		args.AddString("seedImage", gSeedImage);
 	if (gSeedTable)
 		args.AddBool("seedTable", true);
+	if (gOpenPath)
+		args.AddString("openPath", gOpenPath);
 	if (gPrint)
 		args.AddBool("print", true);
 	window->PostMessage(&args);
@@ -719,6 +724,15 @@ PWWindow::EnsurePanels()
 			new BFilePanel(B_SAVE_PANEL, new BMessenger(this), NULL,
 				B_FILE_NODE, false, new BMessage(EXPORT_RTF_DONE_MSG)));
 	return fPanels;
+}
+
+void
+PWWindow::SaveViaScript(const char* path)
+{
+	if (path != NULL)
+		DoSave(BString(path));
+	else if (fFilePath.Length())
+		DoSave(fFilePath);
 }
 
 void
@@ -1257,8 +1271,7 @@ HandleScriptingForWindow(PWWindow* window, BMessage* message,
 	BString prop = property;
 	bool isGet = message->what == B_GET_PROPERTY;
 	bool isSet = message->what == B_SET_PROPERTY;
-	if (!isGet && !isSet)
-		return false;
+	// execute (do) verbs fall through to their handlers below
 
 	if (prop == "Text") {
 		if (isGet) {
@@ -1338,6 +1351,19 @@ HandleScriptingForWindow(PWWindow* window, BMessage* message,
 	}
 	if (prop == "Version" && isGet) {
 		ReplyString(message, "1.0");
+		return true;
+	}
+	if (prop == "Save" && message->what == B_EXECUTE_PROPERTY) {
+		BString path;
+		if (message->FindString("data", &path) == B_OK && path.Length())
+			window->SaveViaScript(path.String());
+		else
+			window->SaveViaScript(NULL);
+		ReplyString(message, "");
+		return true;
+	}
+	if (prop == "Title" && isGet) {
+		ReplyString(message, window->Title());
 		return true;
 	}
 	if (prop == "Quit" && message->what == B_EXECUTE_PROPERTY) {
@@ -1818,6 +1844,15 @@ PWWindow::MessageReceived(BMessage* message)
 				fDoc.SplitPara(27);
 				fDoc.Insert(28, "A table, as paragraphs.", NULL);
 			}
+			BString openPath;
+			if (args->FindString("openPath", &openPath) == B_OK) {
+				entry_ref ref;
+				if (get_ref_for_path(openPath.String(), &ref) == B_OK) {
+					BMessage open('pWop');
+					open.AddRef("refs", &ref);
+					PostMessage(&open);
+				}
+			}
 			BString imagePath;
 			if (args->FindString("seedImage", &imagePath) == B_OK) {
 				BBitmap* bmp = BTranslationUtils::GetBitmap(imagePath);
@@ -1993,6 +2028,14 @@ static property_info sPWProperties[] = {
 		{ B_GET_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"version and release date", 0, { B_STRING_TYPE } },
+	{ "Save",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"save the document (data: optional path)", 0, { B_STRING_TYPE } },
+	{ "Title",
+		{ B_GET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"the window title", 0, { B_STRING_TYPE } },
 	{ "Quit",
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
@@ -2032,6 +2075,11 @@ public:
 	BHandler* ResolveSpecifier(BMessage* message, int32 index,
 		BMessage* specifier, int32 what, const char* property) override
 	{
+		fprintf(stderr, "pw-rs: what=%lx prop=%s form=%lx match=%d\n",
+			(long)message->what, property ? property : "(null)",
+			(long)what,
+			(int)kPWScriptingProperties.FindMatch(message, index,
+				specifier, what, property));
 		if (kPWScriptingProperties.FindMatch(message, index, specifier,
 				what, property) >= 0)
 			return this;
@@ -2088,7 +2136,7 @@ public:
 		fWindow = new PWWindow(frame, "Untitled");
 		fWindow->Show();
 		if (gHeader || gFooter || gPaper || gLandscape || gSeed
-			|| gSeedImage || gSeedTable)
+			|| gSeedImage || gSeedTable || gOpenPath)
 			ApplyWindowArgs(fWindow);
 		// Without a preferred handler the looper answers scripting itself.
 		SetPreferredHandler(this);
@@ -2096,6 +2144,12 @@ public:
 
 	void	MessageReceived(BMessage* message) override
 	{
+		if (message->what == B_REFS_RECEIVED && fWindow != NULL) {
+			// launched with a document, or files dropped on the app
+			fWindow->PostMessage(message);
+		}
+		fprintf(stderr, "pw-mr: what=%lx spec=%d\n",
+			(long)message->what, (int)message->HasSpecifiers());
 		if (message->HasSpecifiers() && fWindow != NULL) {
 			BMessage spec;
 			int32 what = 0;
@@ -2663,6 +2717,7 @@ SelfTest()
 		BPoint xy;
 		float h;
 		bool ok = true;
+		bool confined = true;
 		for (int32 off = 0; off <= doc.Length(); off++) {
 			if (!layout.OffsetToXY(off, &xy, &h)) {
 				ok = false;
@@ -2670,13 +2725,32 @@ SelfTest()
 			}
 			int32 back = layout.XYToOffset(xy);
 			if (back != off && back != off + 1 && back != off - 1) {
-				printf("dbg table rt: off=%d back=%d\n", (int)off,
-					(int)back);
 				ok = false;
 				break;
 			}
 		}
 		CHECK("caret round trip in table", ok);
+		// every caret offset of a row lands inside the row's cells
+		// (the caret may never sit on a cell's left rule)
+		const PWLayout::RowLayout* row0 = layout.RowAt(0);
+		if (row0) {
+			for (int32 off = 0; off <= doc.ParagraphLength(0); off++) {
+				if (!layout.OffsetToXY(off, &xy, &h))
+					continue;
+				bool inside = false;
+				for (const PWLayout::CellLayout& cell : row0->cells)
+					if (xy.x >= cell.x - 0.5
+						&& xy.x <= cell.x + cell.width + 0.5)
+						inside = true;
+				if (!inside) {
+					printf("dbg confine: off=%d x=%.1f\n", (int)off,
+						xy.x);
+					confined = false;
+					break;
+				}
+			}
+		}
+		CHECK("caret confined to cells", confined);
 		// Enter on the last cell leaves the table (plain paragraph)
 		doc.SplitPara(doc.Length());
 		CHECK("split adds a row/paragraph",

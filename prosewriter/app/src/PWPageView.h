@@ -88,6 +88,7 @@ private:
 	void	DrawSelection();
 	void	DrawCaret();
 	void	ClickCycled(BPoint where, int32 clicks);
+	void	MoveToNextCell();
 
 	PWDocument*	fDoc;
 	BScrollView*	fScrollView = NULL;

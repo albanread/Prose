@@ -81,6 +81,7 @@ private:
 public:
 	void	ApplyPageSetup(const PWPageSetup& setup);
 	void	AdoptDoc(PWDocument* fresh);
+	void	SaveViaScript(const char* path);
 public:
 	void	SetSpellChecker(PWSpellChecker* spell);
 	Panels*	EnsurePanels();

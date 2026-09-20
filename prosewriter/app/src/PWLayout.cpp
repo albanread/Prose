@@ -118,10 +118,19 @@ float
 PWLayout::CellLayout::CellWidthOfByte(int32 byte, const PWLayout* layout,
 	const char* text) const
 {
-	// width of text from the cell start to `byte` on its wrapped line
+	// width of text from the cell start to `byte` on its wrapped line;
+	// a byte at/past the content end (e.g. the caret resting on the
+	// separator) measures the full content, so the caret stays at the
+	// content edge inside the cell — never on the previous cell's rule
 	for (const CellLine& cl : lines) {
-		if (byte >= cl.startByte && byte <= cl.startByte + cl.length)
-			return layout->TextWidthOfSpan(text, cl.startByte, byte);
+		if (byte <= cl.startByte + cl.length)
+			return layout->TextWidthOfSpan(text, cl.startByte,
+				byte < cl.startByte ? cl.startByte : byte);
+	}
+	if (!lines.empty()) {
+		const CellLine& last = lines.back();
+		return layout->TextWidthOfSpan(text, last.startByte,
+			last.startByte + last.length);
 	}
 	return 0;
 }
@@ -876,8 +885,12 @@ PWLayout::XYToOffset(BPoint p) const
 	if (l.table) {
 		const RowLayout* row = RowAt(l.para);
 		if (row) {
-			for (const CellLayout& cell : row->cells) {
-				if (p.x < cell.x || p.x > cell.x + cell.width)
+			for (size_t ci = 0; ci < row->cells.size(); ci++) {
+				const CellLayout& cell = row->cells[ci];
+				bool last = ci + 1 == row->cells.size();
+				if (p.x < cell.x
+					|| p.x > cell.x + cell.width
+					|| (p.x == cell.x + cell.width && !last))
 					continue;
 				// vertical: pick the wrapped line
 				int32 lineIdx = 0;
