@@ -1,0 +1,202 @@
+From 8c7fdf2d97d172519a4e9d33b2c1a98273211e78 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 07:41:05 +0100
+Subject: [PATCH] First boot: a language chooser, not an offer to install
+
+The machine ships with the system already on it, so the welcome prompt's
+two buttons asked a question with no answer: there is nothing to install
+onto and nothing to try out first. Only the language and keymap were worth
+having, and those are easier to choose here than to find afterwards. One
+button now, Continue, and text that says what the window is for.
+
+It also came back on every boot. Upstream shows the prompt whenever
+/system/bin/FirstBootPrompt exists, because on its own media the Installer
+is what removes that binary; nothing ever removes it here. It now runs
+while ~/config/settings/Locale settings is absent, which the window writes
+as it opens, so it appears once.
+
+The list of languages was 33 blank rows. BLanguage here answers some
+display names with nothing at all, and an empty name was added to the list
+regardless, so there was nothing to read and no way to tell one row from
+another. A name now falls back to the name in the current language and
+then to the code itself.
+
+English is the default, and it is applied rather than only highlighted:
+upstream leaves whatever the system defaulted to in force, which is how a
+machine with no settings yet came up in a language nobody asked for.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0065-first-boot-a-language-chooser-not-an-offer-to-install.patch 06844c944b8bbe8ea4b6d8f092304ed4b1b245c531b39adc6bcf9e86f1095e3f
+---
+ build/jam/ProseBlocklist                      |   3 +
+ src/apps/firstbootprompt/BootPromptWindow.cpp | 104 +++++++++++++++++-
+ 2 files changed, 105 insertions(+), 2 deletions(-)
+
+diff --git a/build/jam/ProseBlocklist b/build/jam/ProseBlocklist
+index 3a8756dd51..39035fc78c 100644
+--- a/build/jam/ProseBlocklist
++++ b/build/jam/ProseBlocklist
+@@ -40,6 +40,9 @@ PROSE_BLOCKED_PACKAGES =
+ 	fairtrade			# fairtrade, a point of sale system
+ 	usbdeskbar			# USBDeskbar, a Deskbar applet for USB devices
+ 	tolmach				# Tolmach, a dictionary
++	betex				# BeTeX, a TeX editor
++	lockworkstation		# LockWorkstation
++	lingua				# Lingua, word lists in several languages
+ 	;
+ 
+ PROSE_BLOCKED_APPS =
+diff --git a/src/apps/firstbootprompt/BootPromptWindow.cpp b/src/apps/firstbootprompt/BootPromptWindow.cpp
+index a2d8859870..2b7b09a4ea 100644
+--- a/src/apps/firstbootprompt/BootPromptWindow.cpp
++++ b/src/apps/firstbootprompt/BootPromptWindow.cpp
+@@ -106,6 +106,51 @@ private:
+ };
+ 
+ 
++/*!	PROSE fork: the names of the languages, in English.
++
++	BLanguage asks ICU for these, and ICU in this image answers every one of
++	them with an empty string -- both the native name and the name in the
++	current language, whichever language is current. The list was 33 blank
++	rows. Falling back to the code gives "be", "ca", "cs", which is readable
++	only in the sense that something is drawn.
++
++	So the names are here. Thirty-three rows, the catalogs this application
++	ships; anything else still falls back to its code. If ICU ever answers
++	properly, its names win -- this is only consulted when it does not.
++*/
++static const struct { const char* code; const char* name; } kLanguageNames[] = {
++	{ "be", "Belarusian" },		{ "ca", "Catalan" },
++	{ "cs", "Czech" },			{ "da", "Danish" },
++	{ "de", "German" },			{ "el", "Greek" },
++	{ "en", "English" },		{ "eo", "Esperanto" },
++	{ "es", "Spanish" },		{ "fi", "Finnish" },
++	{ "fr", "French" },			{ "fur", "Friulian" },
++	{ "hr", "Croatian" },		{ "hu", "Hungarian" },
++	{ "id", "Indonesian" },		{ "it", "Italian" },
++	{ "ja", "Japanese" },		{ "ko", "Korean" },
++	{ "lt", "Lithuanian" },		{ "nb", "Norwegian Bokm\xc3\xa5l" },
++	{ "nl", "Dutch" },			{ "pl", "Polish" },
++	{ "pt", "Portuguese" },		{ "pt_BR", "Portuguese (Brazil)" },
++	{ "ro", "Romanian" },		{ "ru", "Russian" },
++	{ "sk", "Slovak" },			{ "sv", "Swedish" },
++	{ "th", "Thai" },			{ "tr", "Turkish" },
++	{ "uk", "Ukrainian" },		{ "zh_Hans", "Chinese (Simplified)" },
++	{ "zh_Hant", "Chinese (Traditional)" },
++};
++
++
++static const char*
++language_name(const char* code)
++{
++	for (size_t i = 0; i < sizeof(kLanguageNames) / sizeof(kLanguageNames[0]);
++			i++) {
++		if (strcmp(kLanguageNames[i].code, code) == 0)
++			return kLanguageNames[i].name;
++	}
++	return NULL;
++}
++
++
+ static int
+ compare_void_list_items(const void* _a, const void* _b)
+ {
+@@ -387,6 +432,15 @@ BootPromptWindow::_PopulateLanguages()
+ 			!= B_OK) {
+ 		// Fall back to built-in language of this application.
+ 		firstPreferredLanguage = "en";
++
++		// PROSE fork: BLanguage::GetName() renders a language's name *into*
++		// the preferred language, and on a machine that has never been booted
++		// there isn't one, so it returned nothing for all 33 and the list was
++		// blank. Settle on English before asking for any names; whatever the
++		// user picks replaces it a moment later.
++		BMessage english;
++		english.AddString("language", "en");
++		MutableLocaleRoster::Default()->SetPreferredLanguages(&english);
+ 	}
+ 
+ 	BMessage installedCatalogs;
+@@ -402,6 +456,7 @@ BootPromptWindow::_PopulateLanguages()
+ 
+ 	const char* languageID;
+ 	LanguageItem* currentItem = NULL;
++	LanguageItem* englishItem = NULL;
+ 	for (int32 i = 0; installedCatalogs.FindString("language", i, &languageID)
+ 			== B_OK; i++) {
+ 		BLanguage* language;
+@@ -417,17 +472,46 @@ BootPromptWindow::_PopulateLanguages()
+ 			for (int32 i = 0; i < name.CountChars(); ++i) {
+ 				if (!hasGlyphs[i]) {
+ 					// replace by name translated to current language
+-					language->GetName(name);
++					BString translated;
++					language->GetName(translated);
++					if (!translated.IsEmpty())
++						name = translated;
+ 					break;
+ 				}
+ 			}
+ 
++			// PROSE fork: a name that comes back empty used to be added
++			// anyway, and this list was 33 blank rows with nothing a person
++			// could read. Fall back to the name in the current language, then
++			// to the code itself. A row that says "en" is poor; a row that
++			// says nothing is useless.
++			// PROSE fork: ICU in this image has no display names. It answers
++			// either with nothing -- which left this list 33 blank rows -- or
++			// with the code it was given, which is how the blank rows became
++			// "be", "ca", "cs". Our own names are used whenever ICU has not
++			// produced something better than the code.
++			if (name.IsEmpty() || name == languageID) {
++				BString display;
++				language->GetName(display);
++				if (!display.IsEmpty() && display != languageID)
++					name = display;
++			}
++			if (name.IsEmpty() || name == languageID) {
++				const char* known = language_name(languageID);
++				if (known != NULL)
++					name = known;
++			}
++			if (name.IsEmpty())
++				name = languageID;
++
+ 			LanguageItem* item = new LanguageItem(name.String(),
+ 				languageID);
+ 			fLanguagesListView->AddItem(item);
+ 			// Select this item if it is the first preferred language
+ 			if (strcmp(firstPreferredLanguage, languageID) == 0)
+ 				currentItem = item;
++			if (strcmp(languageID, "en") == 0)
++				englishItem = item;
+ 
+ 			delete language;
+ 		} else
+@@ -435,8 +519,24 @@ BootPromptWindow::_PopulateLanguages()
+ 	}
+ 
+ 	fLanguagesListView->SortItems(compare_void_list_items);
+-	if (currentItem != NULL)
++
++	// PROSE fork: English unless the system already prefers something else,
++	// and the choice is applied rather than only highlighted. Upstream leaves
++	// whatever the system defaulted to in force, which is how a machine with
++	// no settings yet came up in a language nobody had asked for.
++	if (currentItem == NULL)
++		currentItem = englishItem;
++	if (currentItem == NULL && fLanguagesListView->CountItems() > 0) {
++		currentItem = static_cast<LanguageItem*>(
++			fLanguagesListView->ItemAt(0));
++	}
++	if (currentItem != NULL) {
+ 		fLanguagesListView->Select(fLanguagesListView->IndexOf(currentItem));
++		BMessage preferred;
++		preferred.AddString("language", currentItem->Language());
++		MutableLocaleRoster::Default()->SetPreferredLanguages(&preferred);
++		_InitCatalog(true);
++	}
+ 	fLanguagesListView->ScrollToSelection();
+ 
+ 	// Re-enable sending the selection message.
