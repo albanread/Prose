@@ -39,6 +39,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | beton | 1.2.0-1 | failed | musicbrainz failed: neon failed: libxml2 failed: python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) (log |
 | bevexed | 20141224-5 | failed | BUILD phase failed (exit 2) |
 | bgswitch | 0.1.0-1 | failed | INSTALL phase failed (exit 1) |
+| binutils | 2.46.1-1 | failed | INSTALL phase failed (exit 1) |
 | bong | 1.4~git-2 | built | bong-1.4~git-2-arm64.hpkg |
 | bookmarkconverter | 0.4.3-5 | built | bookmarkconverter-0.4.3-5-arm64.hpkg |
 | boost1.83 | 1.83.0-5 | failed | INSTALL phase failed (exit 126) |
@@ -97,7 +98,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | giflib | 5.2.2-1 | built | giflib-5.2.2-1-arm64.hpkg, giflib_devel-5.2.2-1-arm64.hpkg, giflib_tools-5.2.2-1-arm64.hpkg |
 | glm | 1.0.3-1 | built | glm-1.0.3-1-arm64.hpkg, glm_devel-1.0.3-1-arm64.hpkg, glm_doc-1.0.3-1-any.hpkg |
 | globe | 0.4-5 | built | globe-0.4-5-arm64.hpkg |
-| gmp | 6.3.0-1 | failed | cannot download gmp-6.3.0.tar.xz |
+| gmp | 6.3.0-1 | built | gmp-6.3.0-1-arm64.hpkg, gmp_devel-6.3.0-1-arm64.hpkg |
 | gtest | 1.17.0-1 | built | gtest-1.17.0-1-arm64.hpkg, gtest_devel-1.17.0-1-arm64.hpkg |
 | gzip | 1.14-1 | built | gzip-1.14-1-arm64.hpkg |
 | haikuplot | 1.0.1-1 | built | haikuplot-1.0.1-1-arm64.hpkg |
@@ -185,6 +186,8 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | minesweeper | 20150109-5 | built | minesweeper-20150109-5-arm64.hpkg |
 | mkdepend | 1.7-5 | failed | command failed (128): git add -A -f . |
 | moe | 1.1.2-7 | built | moe-1.1.2-7-arm64.hpkg |
+| mpc | 1.2.1-2 | built | mpc-1.2.1-2-arm64.hpkg, mpc_devel-1.2.1-2-arm64.hpkg |
+| mpfr | 4.2.0-3 | built | mpfr-4.2.0-3-arm64.hpkg, mpfr_devel-4.2.0-3-arm64.hpkg |
 | mpg123 | 1.32.9-1 | built | mpg123-1.32.9-1-arm64.hpkg, mpg123_devel-1.32.9-1-arm64.hpkg |
 | mrpeeps | 1.2-4 | built | mrpeeps-1.2-4-arm64.hpkg |
 | musicbrainz | 5.1.0-6 | failed | neon failed: libxml2 failed: python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) (log: /Volumes/HaikuSrc/ |
