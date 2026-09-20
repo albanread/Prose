@@ -102,6 +102,22 @@ if kill -0 $pid 2>/dev/null; then
 		if [ $status = 0 ]; then say "quit cleanly (status 0)"; else say "quit with status $status: $(tail -c 300 /tmp/sisong.out | tr '\n' ' ')"; fail=1; fi
 	fi
 	if [ -e /boot/home/config/settings/Sisong/settings ]; then say "settings saved"; else say "no settings file written"; fail=1; fi
+
+	# a new user's colours: the scheme Paper, as the owner asked (a light yellow
+	# ground; Midnight Blue instead when the desktop's document background is dark)
+	selected=""; first=""; second=""
+	while IFS= read -r line; do
+		case "$line" in
+		'%SelectedColorScheme = '*) selected=${line#*= } ;;
+		'$scheme0_name = '*) first=${line#*= } ;;
+		'$scheme1_name = '*) second=${line#*= } ;;
+		esac
+	done < /boot/home/config/settings/Sisong/settings
+	if [ "$first" = Paper ] && [ "$second" = "Midnight Blue" ] && { [ "$selected" = 0 ] || [ "$selected" = 1 ]; }; then
+		say "colour schemes: $first and $second lead, scheme $selected selected"
+	else
+		say "COLOUR SCHEMES: first '$first', second '$second', selected '$selected'"; fail=1
+	fi
 else
 	wait $pid 2>/dev/null; status=$?
 	say "EXITED at once (status $status): $(head -c 400 /tmp/sisong.out | tr '\n' ' ')"; fail=1
