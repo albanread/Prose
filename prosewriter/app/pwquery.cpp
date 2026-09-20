@@ -25,8 +25,11 @@ main(int argc, char** argv)
 		what = B_SET_PROPERTY;
 	else if (!strcasecmp(mode, "do"))
 		what = B_EXECUTE_PROPERTY;
+	else if (!strcasecmp(mode, "about"))
+		what = B_ABOUT_REQUESTED;
 	BMessage request(what);
-	request.AddSpecifier(prop);
+	if (what != B_ABOUT_REQUESTED)
+		request.AddSpecifier(prop);
 	if (data != NULL)
 		request.AddString("data", data);
 	// no window specifier: direct to the app

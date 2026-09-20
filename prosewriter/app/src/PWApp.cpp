@@ -716,11 +716,16 @@ ApplyWindowArgs(PWWindow* window)
 PWWindow::Panels*
 PWWindow::EnsurePanels()
 {
+	// The completion message is what the panel SENDS when the user
+	// confirms — it must be the *selection handler*, never the
+	// "show the panel" menu command. Save/Open shared codes with their
+	// show-commands, so confirming re-showed the panel and the save
+	// handler ('pWsv'/'pWop') never ran: the UI never wrote a file.
 	if (fPanels == NULL)
 		fPanels = new Panels(new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
-			NULL, B_FILE_NODE, false, new BMessage(OPEN_PANEL_MSG)),
+			NULL, B_FILE_NODE, false, new BMessage('pWop')),
 			new BFilePanel(B_SAVE_PANEL, new BMessenger(this), NULL,
-				B_FILE_NODE, false, new BMessage(SAVE_PANEL_MSG)),
+				B_FILE_NODE, false, new BMessage('pWsv')),
 			new BFilePanel(B_SAVE_PANEL, new BMessenger(this), NULL,
 				B_FILE_NODE, false, new BMessage(EXPORT_RTF_DONE_MSG)));
 	return fPanels;
@@ -1745,6 +1750,11 @@ PWWindow::MessageReceived(BMessage* message)
 			break;
 		case 'pWtq':
 			fTableWin = NULL;
+			break;
+		case B_ABOUT_REQUESTED:
+			// the menu delivers to the window; the AboutRequested() hook
+			// lives on the application — forward it (StyledEdit's pattern)
+			be_app->PostMessage(B_ABOUT_REQUESTED);
 			break;
 		case 'pWim': {
 			// one-shot image panel; images land scaled to the column
