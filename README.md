@@ -297,6 +297,26 @@ table there also records why each one exists.
 | 0059 | The Prose Portal is a virtio device — no network: a kernel driver, `/dev/misc/prose/portal/0`, and the daemon answering on it |
 | 0060 | A blocklist: what the Prose image leaves out, by package name and by file |
 | 0061 | The Prose Portal is its own package, so it can be updated without replacing the system |
+| 0062 | Tolmach on the blocklist |
+| 0064 | BeTeX, LockWorkstation and Lingua on the blocklist |
+| 0065 | The first-boot prompt is a language chooser, not an offer to install a machine that ships installed |
+| 0066 | The CJK font ships, and the first-boot chooser deletes it again for a language that cannot use it |
+| 0067 | The wallpaper appears on the first boot, not the second |
+| 0068 | Two conventional window frames of its own, `ProseDecorator` and `ProseRightDecorator` |
+| 0069 | `ProseDecorator` repaints the left strip when a window grows taller |
+| 0070 | Sisong, the programmer's editor, in the profile and the Deskbar's Development folder |
+| 0071 | The portal daemon sets the desktop's `PATH` and `HOME` for the commands it runs |
+| 0072 | ProseWriter, the word processor, in the profile and the Deskbar's Office folder |
+| 0073 | `prosetheme` and three themes in `data/prose/themes`: wallpaper, colours and window frame together |
+| 0074 | Sisong 2.16-2: Paper and Midnight Blue, its colour schemes |
+| 0075 | JetBrains Mono and Fira Code, two fonts to write code in |
+| 0076 | Sisong 2.16-3: a new C++ file, and compiling one file on its own |
+| 0077 | A compiler on the machine: clang and lld, Haiku's headers and link libraries, `make` and `mkdepend` |
+| 0078 | Six short programs in `/boot/system/data/prose-examples`, to read and build |
+
+There is no 0058 or 0063. The first was exported by mistake and withdrawn
+(`fa9851f`); the second is a number a session took and did not use. The series
+applies in order either way.
 
 ## Layout
 
