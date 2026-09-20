@@ -39,4 +39,11 @@ for f in "$RUNTIME/lib"/* "$GCCSYS/lib"/*; do
 	[ -e "$f" ] || continue
 	link_one "$f" "$SYS/lib/$(basename "$f")"
 done
+# zlib (PDF Flate): headers are committed under app/zlib/ (the headers
+# tree above is a read-only symlink, so they cannot live there); link the
+# build package's library under its plain -lz name.
+ZLIBPKG="$GEN/build_packages/zlib-1.2.13_bootstrap-1-arm64"
+if [ -e "$ZLIBPKG/develop/lib/libz.so.1.2.13" ]; then
+	ln -sf "$ZLIBPKG/develop/lib/libz.so.1.2.13" "$SYS/develop/lib/libz.so"
+fi
 echo "sysroot ready: $SR ($(ls "$SYS/develop/lib" | wc -l | tr -d ' ') devel libs, $(ls "$SYS/lib" | wc -l | tr -d ' ') runtime libs)"

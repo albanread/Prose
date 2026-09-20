@@ -13,6 +13,7 @@ app/host/
 app/ProseWriter
 app/proseagent
 app/hello
+app/src/*.o
 app/sysroot/
 # VM runtime artifacts
 vm/*.png

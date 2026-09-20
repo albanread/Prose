@@ -106,7 +106,8 @@ PWRuler::MouseDown(BPoint point)
 void
 PWRuler::MouseMoved(BPoint point, uint32 transit, const BMessage*)
 {
-	if (!fDragging || transit != B_INSIDE_VIEW)
+	if (!fDragging
+		|| (transit != B_INSIDE_VIEW && transit != B_OUTSIDE_VIEW))
 		return;
 	float zoom = fPageView->Zoom();
 	float dx = (point.x - fDragStart.x) / zoom;

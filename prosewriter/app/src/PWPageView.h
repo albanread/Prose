@@ -52,6 +52,11 @@ public:
 	void	EndPrintMode() { fPrinting = false; }
 	void	Relayout();			// document changed: relayout + repaint
 
+	// ---- PDF export: page N rendered offscreen at `scale` pixels per
+	// point, through the print-mode path (WYSIWYG with the screen; the
+	// caller must hold the window lock or be the window thread).
+	BBitmap*	RenderPageBitmap(int32 page, float scale);
+
 	// ---- zoom: layout stays in points; the view scales deterministically
 	float	Zoom() const { return fZoom; }
 	void	SetZoom(float zoom);
@@ -72,8 +77,7 @@ public:
 	bool	FormatPending() const { return fOverrideFormat; }
 
 protected:
-			PWPageView(BMessage* archive);
-			~PWPageView();
+	~PWPageView();
 
 private:
 	void	HandlePrintableChar(const char* bytes, int32 numBytes);

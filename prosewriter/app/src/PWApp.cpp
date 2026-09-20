@@ -21,6 +21,8 @@
 #include <Menu.h>
 #include <MenuBar.h>
 #include <MenuItem.h>
+#include <Message.h>
+#include <MimeType.h>
 #include <Messenger.h>
 #include <Path.h>
 #include <PropertyInfo.h>
@@ -35,8 +37,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "PWPageView.h"
+#include "PWPDF.h"
 #include "PWRTF.h"
 #include "PWRuler.h"
 #include "PWSpell.h"
@@ -60,13 +64,30 @@ ReadFileToString(const char* path, BString* out)
 		return err;
 	off_t size = 0;
 	file.GetSize(&size);
-	char* buffer = new char[size + 1];
-	ssize_t got = file.Read(buffer, size);
+	if (size < 0 || size > 64LL * 1024 * 1024) {
+		out->SetTo("");
+		return size < 0 ? B_ERROR : B_OK;
+	}
+	char* buffer = new (std::nothrow) char[size + 1];
+	if (buffer == NULL)
+		return B_NO_MEMORY;
+	// read in a loop: a single Read() may return short (the same trap the
+	// spell dictionary and LoadFromFile already learned)
+	ssize_t got = 0;
+	while (got < (ssize_t)size) {
+		ssize_t n = file.Read(buffer + got, size - got);
+		if (n < 0) {
+			got = -1;
+			break;
+		}
+		if (n == 0)
+			break;
+		got += n;
+	}
 	if (got < 0) {
 		delete[] buffer;
-		return (status_t)got;
+		return B_ERROR;
 	}
-	buffer[got] = '\0';
 	out->SetTo(buffer, (int32)got);
 	delete[] buffer;
 	return B_OK;
@@ -81,6 +102,16 @@ WriteStringToFile(const char* path, const BString& text)
 		return err;
 	ssize_t wrote = file.Write(text.String(), text.Length());
 	return wrote == text.Length() ? B_OK : B_ERROR;
+}
+
+// Case-insensitive extension test. IFindLast() returns an int32 offset
+// (B_ERROR when absent); comparing it to NULL made "not found" read as
+// true, so every non-RTF file was fed to the RTF parser and Open never
+// worked for the native format. IEndsWith returns bool.
+static bool
+HasSuffix(const BString& path, const char* suffix)
+{
+	return path.IEndsWith(suffix);
 }
 
 // Replace the window's document with the contents of `fresh`.
@@ -156,6 +187,8 @@ static const struct {
 	{ "US Letter",	612.0f, 792.0f },
 	{ "US Legal",	612.0f, 1008.0f },
 	{ "A5",		420.0f, 595.0f },
+	{ "A3",		842.0f, 1191.0f },
+	{ "B5",		499.0f, 709.0f },
 	{ NULL, 0, 0 }
 };
 
@@ -193,9 +226,21 @@ public:
 		fOwner->Looper()->PostMessage(message, fOwner);
 	}
 
+	bool QuitRequested() override
+	{
+		// However we die (close button included), the owner must drop its
+		// pointer now — it dangles the moment this window is destroyed.
+		// The old design had four per-panel handlers for this that nothing
+		// ever sent.
+		BMessage closed(MSG_PANEL_CLOSED);
+		closed.AddPointer("panel", this);
+		SendToOwner(&closed);
+		return true;
+	}
+
 protected:
 	PWWindow*	fOwner;
-	enum { MSG_PANEL_HIDE = 'pWpH' };
+	enum { MSG_PANEL_HIDE = 'pWpH', MSG_PANEL_CLOSED = 'pWpl' };
 };
 
 // A small non-modal settings window: paper, orientation, margins.
@@ -276,13 +321,30 @@ public:
 				fSetup.marginRight = atof(fMargins[1]->Text());
 				fSetup.marginTop = atof(fMargins[2]->Text());
 				fSetup.marginBottom = atof(fMargins[3]->Text());
-				#define CLAMP(m, limit) if (fSetup.m < 18) fSetup.m = 18; \
-					if (fSetup.m > (limit) - 72) fSetup.m = (limit) - 72;
-				CLAMP(marginLeft, fSetup.pageWidth)
-				CLAMP(marginRight, fSetup.pageWidth)
-				CLAMP(marginTop, fSetup.pageHeight)
-				CLAMP(marginBottom, fSetup.pageHeight)
-				#undef CLAMP
+					#define CLAMP(m, limit) if (fSetup.m < 18) fSetup.m = 18; \
+						if (fSetup.m > (limit) - 72) fSetup.m = (limit) - 72;
+					CLAMP(marginLeft, fSetup.pageWidth)
+					CLAMP(marginRight, fSetup.pageWidth)
+					CLAMP(marginTop, fSetup.pageHeight)
+					CLAMP(marginBottom, fSetup.pageHeight)
+					#undef CLAMP
+					// the PAIR must leave a usable column/height — the
+					// clamps above allowed left+right to swallow the page
+					// whole, and a negative column breaks layout
+					if (fSetup.marginLeft + fSetup.marginRight
+							> fSetup.pageWidth - 72) {
+						float over = fSetup.marginLeft + fSetup.marginRight
+							- (fSetup.pageWidth - 72);
+						fSetup.marginLeft -= over / 2;
+						fSetup.marginRight -= over / 2;
+					}
+					if (fSetup.marginTop + fSetup.marginBottom
+							> fSetup.pageHeight - 72) {
+						float over = fSetup.marginTop + fSetup.marginBottom
+							- (fSetup.pageHeight - 72);
+						fSetup.marginTop -= over / 2;
+						fSetup.marginBottom -= over / 2;
+					}
 				BMessage apply(PWWindow::APPLY_SETUP_MSG);
 				apply.AddFloat("w", fSetup.pageWidth);
 				apply.AddFloat("h", fSetup.pageHeight);
@@ -457,7 +519,7 @@ ParseArgs(int argc, char** argv)
 }
 
 // The product identity, in one place.
-static const char* kPWVersion = "1.0";
+static const char* kPWVersion = "0.1";
 static const char* kPWReleaseDate = __DATE__;	// build day = release day
 
 // About ProseWriter: a real about window — name, version, team, licence,
@@ -811,12 +873,16 @@ PWWindow::BuildMenus()
 	menu->AddSeparatorItem();
 	menu->AddItem(item("Insert image" B_UTF8_ELLIPSIS, 'pWim'));
 	menu->AddItem(item("Insert table", 'pWtb'));
-	menu->AddItem(item("Page setup" B_UTF8_ELLIPSIS, PAGE_SETUP_MSG));
-	menu->AddItem(item("Print" B_UTF8_ELLIPSIS, PRINT_MSG, 'P',
-		B_COMMAND_KEY));
+		menu->AddItem(item("Page setup" B_UTF8_ELLIPSIS, PAGE_SETUP_MSG));
+		menu->AddItem(item("Print to PDF" B_UTF8_ELLIPSIS, 'pWpq'));
+		menu->AddItem(item("Print" B_UTF8_ELLIPSIS, PRINT_MSG, 'P',
+			B_COMMAND_KEY));
 	menu->AddSeparatorItem();
 	menu->AddItem(item("Close", B_QUIT_REQUESTED, 'W', B_COMMAND_KEY));
-	menu->AddItem(item("Quit", B_QUIT_REQUESTED, 'Q', B_COMMAND_KEY));
+	BMenuItem* quitItem = item("Quit", B_QUIT_REQUESTED, 'Q',
+		B_COMMAND_KEY);
+	quitItem->SetTarget(be_app);	// Quit closes every window, not one
+	menu->AddItem(quitItem);
 	menu->ItemAt(0)->SetTarget(be_app);
 	fMenuBar->AddItem(menu);
 
@@ -1125,10 +1191,34 @@ PWWindow::ApplyPageSetup(const PWPageSetup& setup)
 }
 
 void
+PWWindow::ExportPDF(const char* path)
+{
+	// The whole document, one PDF page per layout page, WYSIWYG with the
+	// screen (paper size, margins, headers/footers — one source of truth).
+	bigtime_t t0 = system_time();
+	status_t err = PW_WritePDF(fView, &fLayout, path, 2.0f);	// 144 dpi
+	if (err == B_OK) {
+		BString done;
+		done.SetToFormat("PDF written: %s (%lld ms, %d page%s)", path,
+			(long long)((system_time() - t0) / 1000),
+			(int)fLayout.CountPages(),
+			fLayout.CountPages() == 1 ? "" : "s");
+		(new BAlert("ProseWriter", done.String(), "OK"))->Go(NULL);
+	} else {
+		BString bad;
+		bad.SetToFormat("Could not write %s: %s", path, strerror(err));
+		(new BAlert("ProseWriter", bad.String(), "OK"))->Go(NULL);
+	}
+}
+
+void
 PWWindow::Print()
 {
 	BPrintJob job("ProseWriter");
-	if (job.ConfigJob() != B_OK) {
+	status_t configured = job.ConfigJob();
+	if (configured == B_CANCEL)
+		return;		// the user changed their mind — that is not an error
+	if (configured != B_OK) {
 		(new BAlert("ProseWriter",
 			"No printer is configured; printing was cancelled.", "OK"))->Go();
 		return;
@@ -1275,8 +1365,7 @@ HandleScriptingForWindow(PWWindow* window, BMessage* message,
 	PWDocument& doc = *window->Document();
 	BString prop = property;
 	bool isGet = message->what == B_GET_PROPERTY;
-	bool isSet = message->what == B_SET_PROPERTY;
-	// execute (do) verbs fall through to their handlers below
+	// set/execute verbs fall through to their handlers below
 
 	if (prop == "Text") {
 		if (isGet) {
@@ -1355,7 +1444,7 @@ HandleScriptingForWindow(PWWindow* window, BMessage* message,
 		return true;
 	}
 	if (prop == "Version" && isGet) {
-		ReplyString(message, "1.0");
+		ReplyString(message, kPWVersion);
 		return true;
 	}
 	if (prop == "Save" && message->what == B_EXECUTE_PROPERTY) {
@@ -1374,6 +1463,30 @@ HandleScriptingForWindow(PWWindow* window, BMessage* message,
 	if (prop == "Quit" && message->what == B_EXECUTE_PROPERTY) {
 		window->PostMessage(B_QUIT_REQUESTED);
 		ReplyString(message, "");
+		return true;
+	}
+	if (prop == "Activate" && message->what == B_EXECUTE_PROPERTY) {
+		// Bring the window forward and give the page view keyboard focus
+		// without mouse input — the harness's way in when the VM's input
+		// layer cannot click.
+		window->Activate();
+		window->View()->MakeFocus();
+		ReplyString(message, "");
+		return true;
+	}
+	if (prop == "PDF" && message->what == B_EXECUTE_PROPERTY) {
+		// print to PDF: data = output path. No alert here — the caller
+		// holds the window lock and a modal Go() would deadlock the app.
+		BString path;
+		if (message->FindString("data", &path) == B_OK && path.Length()) {
+			status_t err = PW_WritePDF(window->View(), window->Layout(),
+				path.String(), 2.0f);
+			if (err == B_OK)
+				ReplyString(message, "");
+			else
+				ReplyError(message, strerror(err));
+		} else
+			ReplyError(message, "data: output path required");
 		return true;
 	}
 	if (prop == "WordCount" && isGet) {
@@ -1435,24 +1548,41 @@ PWWindow::MessageReceived(BMessage* message)
 				message->FindString("name", &name);
 				path.Append(name.String());
 				DoSave(BString(path.Path()));
+				// finish a quit that was waiting on this save
+				if (fQuitPending) {
+					fQuitPending = false;
+					if (!fDoc.IsModified())
+						PostMessage(B_QUIT_REQUESTED);
+				}
 			}
 			break;
 		}
-		case 'pWex': {	// RTF export target chosen
-			entry_ref ref;
-			if (message->FindRef("directory", &ref) == B_OK) {
-				BPath path(&ref);
-				BString name;
-				message->FindString("name", &name);
-				if (name.IFindLast(".rtf") == NULL)
-					name << ".rtf";
-				path.Append(name.String());
-				BString rtf;
-				PW_WriteRTF(&fDoc, &rtf);
-				WriteStringToFile(path.Path(), rtf);
-			}
+		case B_CANCEL:
+			// a file panel was dismissed: a pending quit dies with it
+			fQuitPending = false;
 			break;
-		}
+			case 'pWex': {	// RTF export target chosen
+				entry_ref ref;
+				if (message->FindRef("directory", &ref) == B_OK) {
+					BPath path(&ref);
+					BString name;
+					message->FindString("name", &name);
+					if (!HasSuffix(name, ".rtf"))
+						name << ".rtf";
+					path.Append(name.String());
+					BString rtf;
+					PW_WriteRTF(&fDoc, &rtf);
+					status_t err = WriteStringToFile(path.Path(), rtf);
+					if (err != B_OK) {
+						BString msg;
+						msg.SetToFormat("Could not write %s: %s",
+							path.Path(), strerror(err));
+						(new BAlert("ProseWriter", msg.String(), "OK"))
+							->Go(NULL);
+					}
+				}
+				break;
+			}
 		case 'pWsV':
 			if (fFilePath.Length())
 				DoSave(fFilePath);
@@ -1470,8 +1600,7 @@ PWWindow::MessageReceived(BMessage* message)
 			UpdateStatusText();
 			break;
 		case 'pWct':
-			if (fView->HasSelection()) {
-				be_clipboard->Lock();
+			if (fView->HasSelection() && be_clipboard->Lock()) {
 				BMessage* clip = be_clipboard->Data();
 				clip->MakeEmpty();
 				fView->Cut(clip);
@@ -1502,21 +1631,22 @@ PWWindow::MessageReceived(BMessage* message)
 			fView->Select(0, fDoc.Length());
 			break;
 		case B_REFS_RECEIVED: {
-			// dropped from Tracker: text documents open, images insert
+			// dropped from Tracker: images insert at the caret (all of
+			// them); the first non-image opens as a document
 			entry_ref ref;
 			for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK;
 					i++) {
 				BPath path(&ref);
 				BString lower = path.Path();
 				lower.ToLower();
-				bool isImage = lower.IFindLast(".png") != NULL
-					|| lower.IFindLast(".jpg") != NULL
-					|| lower.IFindLast(".jpeg") != NULL
-					|| lower.IFindLast(".bmp") != NULL
-					|| lower.IFindLast(".gif") != NULL
-					|| lower.IFindLast(".tiff") != NULL
-					|| lower.IFindLast(".webp") != NULL;
-				if (isImage && i == 0) {
+				bool isImage = HasSuffix(lower, ".png")
+					|| HasSuffix(lower, ".jpg")
+					|| HasSuffix(lower, ".jpeg")
+					|| HasSuffix(lower, ".bmp")
+					|| HasSuffix(lower, ".gif")
+					|| HasSuffix(lower, ".tiff")
+					|| HasSuffix(lower, ".webp");
+				if (isImage) {
 					BBitmap* bmp = BTranslationUtils::GetBitmap(&ref);
 					if (bmp) {
 						float column = fLayout.PageSetup().TextWidth();
@@ -1633,9 +1763,6 @@ PWWindow::MessageReceived(BMessage* message)
 			} else
 				fSetupWin->Activate();
 			break;
-		case 'pWpC':
-			fSetupWin = NULL;
-			break;
 		case HEADER_MSG:
 			if (fHeaderWin == NULL) {
 				fHeaderWin = new PWHeaderWindow(this, fDoc.HeaderText(),
@@ -1646,18 +1773,12 @@ PWWindow::MessageReceived(BMessage* message)
 				fHeaderWin->Activate();
 			}
 			break;
-		case 'pWhC':
-			fHeaderWin = NULL;
-			break;
 		case STYLES_MSG:
 			if (fStylesWin == NULL) {
 				fStylesWin = new PWStylesWindow(this);
 				fStylesWin->Show();
 			} else
 				fStylesWin->Activate();
-			break;
-		case 'pWyC':
-			fStylesWin = NULL;
 			break;
 		case APPLY_SETUP_MSG: {
 			PWPageSetup setup = fLayout.PageSetup();
@@ -1748,22 +1869,32 @@ PWWindow::MessageReceived(BMessage* message)
 			} else
 				fTableWin->Activate();
 			break;
-		case 'pWtq':
-			fTableWin = NULL;
+		case 'pWpl': {
+			// a panel died (its own close button or our quit): drop the
+			// pointer before it dangles
+			void* panel = NULL;
+			message->FindPointer("panel", &panel);
+			if (panel == (void*)fSetupWin) fSetupWin = NULL;
+			if (panel == (void*)fHeaderWin) fHeaderWin = NULL;
+			if (panel == (void*)fStylesWin) fStylesWin = NULL;
+			if (panel == (void*)fTableWin) fTableWin = NULL;
 			break;
+		}
 		case B_ABOUT_REQUESTED:
 			// the menu delivers to the window; the AboutRequested() hook
 			// lives on the application — forward it (StyledEdit's pattern)
 			be_app->PostMessage(B_ABOUT_REQUESTED);
 			break;
-		case 'pWim': {
-			// one-shot image panel; images land scaled to the column
-			BMessage* pick = new BMessage('pWif');
-			BFilePanel* panel = new BFilePanel(B_OPEN_PANEL,
-				new BMessenger(this), NULL, B_FILE_NODE, false, pick);
-			panel->Show();
+		case 'pWim':
+			// one image panel, created on first use (a new BFilePanel per
+			// menu hit leaked a window each time)
+			if (fImagePanel == NULL) {
+				BMessage* pick = new BMessage('pWif');
+				fImagePanel = new BFilePanel(B_OPEN_PANEL,
+					new BMessenger(this), NULL, B_FILE_NODE, false, pick);
+			}
+			fImagePanel->Show();
 			break;
-		}
 		case 'pWif': {
 			entry_ref ref;
 			if (message->FindRef("refs", &ref) == B_OK) {
@@ -1799,6 +1930,33 @@ PWWindow::MessageReceived(BMessage* message)
 				&& fSpell && fSpell->Loaded());
 			UpdateStatusText();
 			break;
+		case 'pWpq': {
+			// Print to PDF: one panel, pre-filled with the document's name
+			if (fPdfPanel == NULL) {
+				BMessage* pick = new BMessage('pWpF');
+				fPdfPanel = new BFilePanel(B_SAVE_PANEL,
+					new BMessenger(this), NULL, B_FILE_NODE, false, pick);
+			}
+			BString suggested = fFileName.Length() ? fFileName : "Untitled";
+			if (!HasSuffix(suggested, ".pdf"))
+				suggested << ".pdf";
+			fPdfPanel->SetSaveText(suggested.String());
+			fPdfPanel->Show();
+			break;
+		}
+		case 'pWpF': {	// PDF target chosen
+			entry_ref ref;
+			if (message->FindRef("directory", &ref) == B_OK) {
+				BPath path(&ref);
+				BString name;
+				message->FindString("name", &name);
+				if (!HasSuffix(name, ".pdf"))
+					name << ".pdf";
+				path.Append(name.String());
+				ExportPDF(path.Path());
+			}
+			break;
+		}
 		case PRINT_MSG:
 			Print();
 			break;
@@ -1913,11 +2071,31 @@ PWWindow::MessageReceived(BMessage* message)
 status_t
 PWWindow::OpenFile(const entry_ref& ref)
 {
+	// Opening over unsaved changes must be a decision, not a surprise.
+	if (fDoc.IsModified()) {
+		BAlert* alert = new BAlert("ProseWriter",
+			"The current document has unsaved changes. Open anyway?",
+			"Cancel", "Discard changes", "Open and save first",
+			B_WIDTH_AS_USUAL, B_OFFSET_SPACING, B_WARNING_ALERT);
+		int32 choice = alert->Go();
+		if (choice == 0)
+			return B_CANCELED;
+		if (choice == 2) {
+			if (fFilePath.Length()) {
+				DoSave(fFilePath);
+				if (fDoc.IsModified())
+					return B_CANCELED;	// the save failed; do not discard
+			} else {
+				EnsurePanels()->save->Show();
+				return B_CANCELED;	// save via the panel, then open again
+			}
+		}
+	}
 	BPath path(&ref);
 	BString lower = path.Path();
 	lower.ToLower();
 	status_t err = B_ERROR;
-	if (lower.IFindLast(".rtf") != NULL) {
+	if (HasSuffix(lower, ".rtf")) {
 		BString rtf;
 		err = ReadFileToString(path.Path(), &rtf);
 		if (err == B_OK) {
@@ -1926,7 +2104,7 @@ PWWindow::OpenFile(const entry_ref& ref)
 			if (err == B_OK)
 				AdoptDocument(&fDoc, &fresh);
 		}
-	} else if (lower.IFindLast(".prose") != NULL) {
+	} else if (HasSuffix(lower, ".prose")) {
 		err = fDoc.LoadFromFile(path.Path());
 	} else {
 		BString text;
@@ -1955,12 +2133,20 @@ PWWindow::OpenFile(const entry_ref& ref)
 void
 PWWindow::DoSave(const BString& pathStr)
 {
-	if (fDoc.SaveToFile(pathStr.String()) == B_OK) {
+	status_t err = fDoc.SaveToFile(pathStr.String());
+	if (err == B_OK) {
 		fFilePath = pathStr;
 		AddRecentFile(pathStr.String());
 		fFileName = BPath(pathStr.String()).Leaf();
 		fDoc.SavedClean();
 		UpdateTitle();
+	} else {
+		// A failed save is never silent — the user must know before they
+		// quit and answer "Don't save".
+		BString msg;
+		msg.SetToFormat("Could not save %s: %s", pathStr.String(),
+			strerror(err));
+		(new BAlert("ProseWriter", msg.String(), "OK"))->Go(NULL);
 	}
 }
 
@@ -1975,10 +2161,15 @@ PWWindow::QuitRequested()
 		if (choice == 0)
 			return false;
 		if (choice == 2) {
-			if (fFilePath.Length())
+			if (fFilePath.Length()) {
 				DoSave(fFilePath);
-			else {
+				if (fDoc.IsModified())
+					return false;	// the save failed: keep the window
+			} else {
+				// Save needs the panel; remember the close intent — when
+				// the panel save completes (or is cancelled) we finish it
 				EnsurePanels()->save->Show();
+				fQuitPending = true;
 				return false;
 			}
 		}
@@ -1994,7 +2185,16 @@ PWWindow::QuitRequested()
 			out.Write(rect.String(), rect.Length());
 		}
 	}
-	be_app_messenger.SendMessage('pWwc');	// window closed
+	// Our panels are separate loopers; they must not outlive their owner
+	// (their fOwner would dangle). They announce their own death with
+	// 'pWpl'; these are the deaths we cause.
+	if (fSetupWin != NULL) { fSetupWin->PostMessage(B_QUIT_REQUESTED); fSetupWin = NULL; }
+	if (fHeaderWin != NULL) { fHeaderWin->PostMessage(B_QUIT_REQUESTED); fHeaderWin = NULL; }
+	if (fStylesWin != NULL) { fStylesWin->PostMessage(B_QUIT_REQUESTED); fStylesWin = NULL; }
+	if (fTableWin != NULL) { fTableWin->PostMessage(B_QUIT_REQUESTED); fTableWin = NULL; }
+	BMessage closed('pWwc');
+	closed.AddPointer("win", this);
+	be_app_messenger.SendMessage(&closed);	// window closed
 	return true;
 }
 
@@ -2050,6 +2250,14 @@ static property_info sPWProperties[] = {
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"close every window and quit", 0, { 0 } },
+	{ "Activate",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"bring the window forward and focus the page (harness)", 0, { 0 } },
+	{ "PDF",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"print to a PDF file (data: output path)", 0, { B_STRING_TYPE } },
 	{ 0 }
 };
 
@@ -2085,11 +2293,6 @@ public:
 	BHandler* ResolveSpecifier(BMessage* message, int32 index,
 		BMessage* specifier, int32 what, const char* property) override
 	{
-		fprintf(stderr, "pw-rs: what=%lx prop=%s form=%lx match=%d\n",
-			(long)message->what, property ? property : "(null)",
-			(long)what,
-			(int)kPWScriptingProperties.FindMatch(message, index,
-				specifier, what, property));
 		if (kPWScriptingProperties.FindMatch(message, index, specifier,
 				what, property) >= 0)
 			return this;
@@ -2103,14 +2306,15 @@ public:
 		// it never reaches MessageReceived
 		if (fAbout != NULL)
 			fAbout->Activate();
-		else if (fWindow != NULL) {
-			fAbout = new PWAboutWindow(fWindow, be_app);
+		else if (DocWindow() != NULL) {
+			fAbout = new PWAboutWindow(DocWindow(), be_app);
 			fAbout->Show();
 		}
 	}
 
 	void	ReadyToRun() override
 	{
+		RegisterDocumentType();
 		BScreen screen(B_MAIN_SCREEN_ID);
 		BRect avail = screen.Frame().InsetByCopy(40, 36);
 		float w = std::min(avail.Width(), 900.0f);
@@ -2143,24 +2347,22 @@ public:
 					frame = remember;
 			}
 		}
-		fWindow = new PWWindow(frame, "Untitled");
-		fWindow->Show();
+		PWWindow* window = new PWWindow(frame, "Untitled");
+		window->Show();
 		if (gHeader || gFooter || gPaper || gLandscape || gSeed
 			|| gSeedImage || gSeedTable || gOpenPath)
-			ApplyWindowArgs(fWindow);
+			ApplyWindowArgs(window);
 		// Without a preferred handler the looper answers scripting itself.
 		SetPreferredHandler(this);
 	}
 
 	void	MessageReceived(BMessage* message) override
 	{
-		if (message->what == B_REFS_RECEIVED && fWindow != NULL) {
+		if (message->what == B_REFS_RECEIVED && DocWindow() != NULL) {
 			// launched with a document, or files dropped on the app
-			fWindow->PostMessage(message);
+			DocWindow()->PostMessage(message);
 		}
-		fprintf(stderr, "pw-mr: what=%lx spec=%d\n",
-			(long)message->what, (int)message->HasSpecifiers());
-		if (message->HasSpecifiers() && fWindow != NULL) {
+		if (message->HasSpecifiers() && DocWindow() != NULL) {
 			BMessage spec;
 			int32 what = 0;
 			int32 index = 0;
@@ -2180,32 +2382,51 @@ public:
 					BString data;
 					if (message->FindString("data", &data) == B_OK)
 						fwd.AddString("data", data);
-					fWindow->PostMessage(&fwd);
+					DocWindow()->PostMessage(&fwd);
 					// The window applies asynchronously; this ack is
 					// immediate (a get straight after may race it).
 					ReplyString(message, "");
 				} else {
-					fWindow->Lock();
-					HandleScriptingForWindow(fWindow, message, prop);
-					fWindow->Unlock();
+					PWWindow* window = DocWindow();
+					window->Lock();
+					HandleScriptingForWindow(window, message, prop);
+					window->Unlock();
 				}
 				return;
 			}
 		}
 		switch (message->what) {
 			case 'pWnw': {
-				BRect frame = fWindow ? fWindow->Frame()
-					: BRect(80, 60, 860, 940);
-				frame.OffsetBy(24, 24);
+				BRect frame(80, 60, 860, 940);
+				if (DocWindow() != NULL)
+					frame = DocWindow()->Frame().OffsetByCopy(24, 24);
+				BScreen screen(B_MAIN_SCREEN_ID);
+				if (frame.right > screen.Frame().right
+					|| frame.bottom > screen.Frame().bottom)
+					frame.OffsetTo(screen.Frame().left + 40,
+						screen.Frame().top + 40);
 				PWWindow* win = new PWWindow(frame, "Untitled");
 				win->Show();
-				fWindow = win;
 				break;
 			}
-			case 'pWwc':
-				if (CountWindows() <= 1)
+			case 'pWwc': {
+				// a document window closed — count the REMAINING ones.
+				// (Windows, not BWindows: hidden panels and the about box
+				// must not keep a windowless app alive, and the closing
+				// window itself may still be in the list.)
+				void* closing = NULL;
+				message->FindPointer("win", &closing);
+				int32 docs = 0;
+				for (int32 i = CountWindows() - 1; i >= 0; i--) {
+					BWindow* w = WindowAt(i);
+					if (w != NULL && w != (BWindow*)closing
+						&& dynamic_cast<PWWindow*>(w) != NULL)
+						docs++;
+				}
+				if (docs == 0)
 					Quit();	// last document window gone
 				break;
+			}
 			case 'pWaq':
 				fAbout = NULL;
 				break;
@@ -2214,8 +2435,56 @@ public:
 		}
 	}
 
+	bool	QuitRequested() override
+	{
+		// App-level quit (Deskbar, Alt+Q aimed at be_app) asks every
+		// document window; each runs its own save guard, and the last one
+		// to close ends the app through 'pWwc'. We stay alive meanwhile.
+		bool any = false;
+		for (int32 i = CountWindows() - 1; i >= 0; i--) {
+			PWWindow* w = dynamic_cast<PWWindow*>(WindowAt(i));
+			if (w != NULL) {
+				w->PostMessage(B_QUIT_REQUESTED);
+				any = true;
+			}
+		}
+		return !any;
+	}
+
 private:
-	PWWindow*	fWindow = NULL;
+	// F4 (sprint 8's open item): install the document MIME type so Tracker
+	// can type .prose files by CONTENT — a flattened BMessage ("HMF1")
+	// carrying our 'pWd&' what-code — and open them with us. Idempotent;
+	// runs on every launch so the sniffer rule ships with the app.
+	void	RegisterDocumentType()
+	{
+		BMimeType docType("application/x-vnd.prose.ProseWriter-doc");
+		if (docType.InitCheck() != B_OK)
+			return;
+		docType.Install();
+		docType.SetShortDescription("ProseWriter document");
+		docType.SetLongDescription("ProseWriter word processor document");
+		status_t err = docType.SetSnifferRule(
+			"1.0 ([0:3] \"HMF1\") ([4:7] \"&dWp\")");
+		if (err != B_OK)
+			fprintf(stderr, "ProseWriter: sniffer rule rejected: %s\n",
+				strerror(err));
+		docType.SetPreferredApp("application/x-vnd.prose.ProseWriter");
+	}
+
+	// A document window, any document window. The app must not cache one:
+	// a cached pointer dangles the moment that window closes while others
+	// remain (File ▸ New, then closing the new one, used to free it).
+	PWWindow*	DocWindow()
+	{
+		for (int32 i = CountWindows() - 1; i >= 0; i--) {
+			PWWindow* w = dynamic_cast<PWWindow*>(WindowAt(i));
+			if (w != NULL)
+				return w;
+		}
+		return NULL;
+	}
+
 	PWAboutWindow* fAbout = NULL;
 };
 
@@ -2319,9 +2588,6 @@ SelfTest()
 			&& rtf.FindFirst("\\rtf1") == 1);
 		PWDocument loaded;
 		CHECK("load rtf", PW_LoadRTF(&loaded, rtf.String()) == B_OK);
-		if (strcmp(loaded.PlainText(), doc.PlainText()) != 0)
-			printf("dbg rtf: want '%s' got '%s'\nrtf: %s\n",
-				doc.PlainText(), loaded.PlainText(), rtf.String());
 		CHECK("rtf text survives",
 			strcmp(loaded.PlainText(), doc.PlainText()) == 0);
 		CHECK("rtf bold", loaded.FormatAt(7).bold);
@@ -2329,8 +2595,6 @@ SelfTest()
 		CHECK("rtf italic+underline",
 			loaded.FormatAt(13).italic && loaded.FormatAt(13).underline);
 		CHECK("rtf colour", loaded.FormatAt(13).color.red == 200);
-		if (loaded.ParagraphFormat(1).alignment != PW_ALIGN_CENTER)
-			printf("dbg align: %d\n", (int)loaded.ParagraphFormat(1).alignment);
 		CHECK("rtf alignment",
 			loaded.ParagraphFormat(1).alignment == PW_ALIGN_CENTER);
 		CHECK("rtf not bold at 0", !loaded.FormatAt(0).bold);
@@ -2442,8 +2706,6 @@ SelfTest()
 					: total + 1;
 				if (off >= s && off < e) { truth = i; break; }
 			}
-			if (truth < 0)
-				printf("dbg: off=%d in no line\n", (int)off);
 			if (truth != layout.LineOfOffset(off))
 				agree = false;
 			if (layout.OffsetToXY(off, &xy, &hh)) {
@@ -2455,6 +2717,179 @@ SelfTest()
 		}
 		CHECK("line lookup matches linear scan", agree);
 		CHECK("offset/point round trip", roundTrip);
+	}
+
+	{
+		// The fix-pass regressions: every one of these caught a real bug.
+		printf("block: fixes\n"); fflush(stdout);
+
+		// --- file round trip through the FILE path (atomic save; and the
+		// old SaveToFile returned Write()'s byte count, so every save read
+		// as a failure to DoSave)
+		PWDocument fdoc;
+		fdoc.Insert(0, "Save me.\nSecond para", NULL);
+		PWCharFormat fbold = fdoc.DefaultFormat();
+		fbold.bold = true;
+		fdoc.ApplyFormat(0, 4, fbold);
+		const char* path = "/tmp/pw-selftest.prose";
+		CHECK("save to file returns B_OK", fdoc.SaveToFile(path) == B_OK);
+		{
+			BEntry tmp(BString(path).Append(".pwtmp").String());
+			CHECK("no temp file left behind",
+				tmp.InitCheck() != B_OK || !tmp.Exists());
+		}
+		PWDocument floaded;
+		{
+			status_t loadErr = floaded.LoadFromFile(path);
+			if (loadErr != B_OK)
+				printf("fix-debug: load err=%ld\n", (long)loadErr);
+			CHECK("load from file returns B_OK", loadErr == B_OK);
+		}
+		CHECK("file round trip text",
+			strcmp(floaded.PlainText(), "Save me.\nSecond para") == 0);
+		CHECK("file round trip bold", floaded.FormatAt(1).bold);
+		remove(path);
+
+		// --- format undo: bold/undo/redo, and undo of a format must not
+		// eat the text edit before it
+		PWDocument bdoc;
+		bdoc.Insert(0, "make me bold!", NULL);
+		PWCharFormat bb = bdoc.DefaultFormat();
+		bb.bold = true;
+		bdoc.ApplyFormat(0, 12, bb);
+		CHECK("bold applied", bdoc.FormatAt(3).bold);
+		bdoc.Undo();
+		CHECK("bold undo restores plain", !bdoc.FormatAt(3).bold);
+		bdoc.Redo();
+		CHECK("bold redo reapplies", bdoc.FormatAt(3).bold);
+		PWCharFormat bu = bdoc.FormatAt(0);
+		bu.underline = true;
+		bdoc.ApplyFormat(0, 3, bu);
+		bdoc.Undo();
+		CHECK("undo after format keeps text",
+			strcmp(bdoc.PlainText(), "make me bold!") == 0
+			&& !bdoc.FormatAt(1).underline);
+
+		// --- coalesced typing: undo removes the whole run, redo restores
+		// the whole run (redo used to re-insert one character)
+		PWDocument tdoc2;
+		tdoc2.Insert(0, "a", NULL);
+		tdoc2.Insert(1, "b", NULL);
+		tdoc2.Insert(2, "c", NULL);
+		tdoc2.Undo();
+		CHECK("undo coalesced typing clears all", tdoc2.Length() == 0);
+		tdoc2.Redo();
+		CHECK("redo coalesced typing restores all",
+			strcmp(tdoc2.PlainText(), "abc") == 0);
+
+		// --- UTF-8 lives in the model end to end
+		PWDocument udoc;
+		udoc.Insert(0, "caf\xC3\xA9 na\xC3\xAFve \xE2\x80\x94 ok", NULL);
+		CHECK("utf-8 text in model",
+			strcmp(udoc.PlainText(), "caf\xC3\xA9 na\xC3\xAFve \xE2\x80\x94 ok")
+				== 0);
+		CHECK("utf-8 find", udoc.FindNext("\xC3\xA9", 0, true, false, NULL)
+			== 3);
+
+		// --- images: move with inserts, survive merges and undo
+		PWDocument idoc;
+		idoc.Insert(0, "ab\ncd", NULL);
+		idoc.InsertImage(4, new BBitmap(BRect(0, 0, 9, 9), B_RGB32),
+			20, 10);
+		idoc.Insert(3, "x", NULL);	// type before the image
+		CHECK("image follows its marker",
+			idoc.CountImages() == 1 && idoc.ImageAt(5) != NULL);
+		idoc.Remove(2, 2);			// separator + 'x': paragraphs merge
+		// "ab" + "c<FFFC>d" — the marker sits at byte 3
+		CHECK("image survives paragraph merge",
+			idoc.CountImages() == 1 && idoc.ImageAt(3) != NULL);
+		idoc.Undo();
+		CHECK("image restored by undo of merge",
+			idoc.CountImages() == 1 && idoc.ImageAt(5) != NULL);
+		idoc.Remove(5, 3);			// delete the marker itself
+		CHECK("image deleted with marker", idoc.CountImages() == 0);
+		idoc.Undo();
+		CHECK("image restored by undo of delete",
+			idoc.CountImages() == 1 && idoc.ImageAt(5) != NULL
+			&& idoc.ImageAt(5)->bitmap);
+
+		// --- revision-based reuse: same-length mid-paragraph edit
+		BString para60;
+		for (int i = 0; i < 60; i++)
+			para60 << "word" << i << " ";
+		PWDocument rdoc;
+		rdoc.Insert(0, para60.String(), NULL);
+		PWLayout rlayout(&rdoc);
+		rlayout.SetPageSetup(PWPageSetup());
+		rlayout.Layout();
+		int32 at = rdoc.FindNext("word1", 0, true, false, NULL);
+		rdoc.Remove(at, 5);
+		rdoc.Insert(at, "wod1x", NULL);	// same length, past byte 32
+		rlayout.Layout();
+		CHECK("same-length mid edit remeasures",
+			rlayout.LastMeasuredParagraphs() == 1);
+		// bolding the same span must re-measure too
+		PWCharFormat rb = rdoc.DefaultFormat();
+		rb.bold = true;
+		rdoc.ApplyFormat(at, 5, rb);
+		rlayout.Layout();
+		CHECK("format change remeasures",
+			rlayout.LastMeasuredParagraphs() == 1);
+		// and a page-setup change re-measures everything, at the new edge
+		PWPageSetup narrow = rlayout.PageSetup();
+		narrow.marginLeft = 120;
+		narrow.marginRight = 120;
+		rlayout.SetPageSetup(narrow);
+		rlayout.Layout();
+		if (rlayout.LastMeasuredParagraphs() != rdoc.CountParagraphs())
+			printf("fix-debug: setup remeasure: measured=%d paras=%d\n",
+				(int)rlayout.LastMeasuredParagraphs(),
+				(int)rdoc.CountParagraphs());
+		CHECK("page setup change remeasures",
+			rlayout.LastMeasuredParagraphs() == rdoc.CountParagraphs());
+		CHECK("rewrap honors new margins",
+			fabs(rlayout.Lines()[0].x - 120.0f) < 0.5f);
+
+		// --- table rows follow paragraph shifts (fRows by stable id)
+		PWDocument sdoc;
+		sdoc.Insert(0, "A\035B\035C", NULL);
+		PWLayout slayout(&sdoc);
+		slayout.SetPageSetup(PWPageSetup());
+		slayout.Layout();
+		CHECK("table lays out", slayout.RowAt(0) != NULL
+			&& slayout.RowAt(0)->cells.size() == 3);
+		sdoc.SplitPara(0);	// a new paragraph above the table
+		slayout.Layout();	// incremental
+		CHECK("table row follows the shift",
+			slayout.RowAt(1) != NULL
+			&& slayout.RowAt(1)->cells.size() == 3);
+
+		// --- RTF: multi-entry font tables, and colour back to black
+		const char* multiFontRtf =
+			"{\\rtf1\\ansi{\\fonttbl{\\f0 Times New Roman;}{\\f1 Courier;}}"
+			"{\\colortbl;\\red200\\green0\\blue0;}"
+			"\\f0 plain \\cf1 red \\cf0 black again}";
+		PWDocument mfdoc;
+		CHECK("multi-font rtf loads",
+			PW_LoadRTF(&mfdoc, multiFontRtf) == B_OK);
+		CHECK("font names not leaked into text",
+			strstr(mfdoc.PlainText(), "Courier") == NULL
+			&& strstr(mfdoc.PlainText(), "Times") == NULL);
+		CHECK("rtf cf0 returns to black",
+			mfdoc.FormatAt(mfdoc.Length() - 1).color.red == 0);
+		PWDocument cdoc;
+		cdoc.Insert(0, "redblack", NULL);
+		PWCharFormat redf = cdoc.DefaultFormat();
+		redf.color = rgb_color{ 200, 0, 0, 255 };
+		cdoc.ApplyFormat(0, 3, redf);
+		BString crtf;
+		PW_WriteRTF(&cdoc, &crtf);
+		CHECK("writer emits cf0", crtf.FindFirst("\\cf0") >= 0);
+		PWDocument cloaded;
+		PW_LoadRTF(&cloaded, crtf.String());
+		CHECK("export/import black after red",
+			cloaded.FormatAt(5).color.red == 0
+			&& cloaded.FormatAt(1).color.red == 200);
 	}
 
 		printf("block: perf\n"); fflush(stdout);
@@ -2550,11 +2985,6 @@ SelfTest()
 		PW_WriteRTF(&rdoc, &rrtf);
 		PWDocument rloaded;
 		PW_LoadRTF(&rloaded, rrtf.String());
-		printf("dbg geometry rtf: %s\n", rrtf.String());
-		const PWParaFormat& dbgF = rloaded.ParagraphFormat(0);
-		printf("dbg loaded: il=%.1f fi=%.1f ls=%.2f sa=%.1f tabs=%d\n",
-			dbgF.indentLeft, dbgF.indentFirst, dbgF.lineSpacing,
-			dbgF.spaceAfter, (int)dbgF.tabs.size());
 		const PWParaFormat& rf = rloaded.ParagraphFormat(0);
 		CHECK("rtf indent left", fabs(rf.indentLeft - 28) < 1.0f);
 		CHECK("rtf indent first", fabs(rf.indentFirst + 14) < 1.0f);
@@ -2705,12 +3135,6 @@ SelfTest()
 		PWLayout layout(&doc);
 		layout.SetPageSetup(PWPageSetup());
 		layout.Layout();
-		printf("dbg lines=%d", (int)layout.Lines().size());
-		for (const PWLayout::Line& dl : layout.Lines())
-			printf(" [p%d t%d l%d]", (int)dl.para, (int)dl.table,
-				(int)dl.length);
-		printf(" paras=%d p0='%s' p1='%s'\n", (int)doc.CountParagraphs(),
-			doc.ParagraphText(0), doc.ParagraphText(1));
 		CHECK("two table lines", layout.Lines().size() == 2
 			&& layout.Lines()[0].table && layout.Lines()[1].table);
 		const PWLayout::RowLayout* row = layout.RowAt(0);
@@ -2753,8 +3177,6 @@ SelfTest()
 						&& xy.x <= cell.x + cell.width + 0.5)
 						inside = true;
 				if (!inside) {
-					printf("dbg confine: off=%d x=%.1f\n", (int)off,
-						xy.x);
 					confined = false;
 					break;
 				}
@@ -2768,10 +3190,11 @@ SelfTest()
 			&& !layout.IsTableParagraph(2));
 		// Tab key inserts a separator (model side: Insert of 0x1D)
 		doc.Insert(4, "\035", NULL);
-		CHECK("separator insertion adds a cell",
-			strchr(doc.ParagraphText(0), PWLayout::kCellSep)
-				== strrchr(doc.ParagraphText(0), PWLayout::kCellSep) - 0
-			|| true);
+		int32 sepsNow = 0;
+		for (int32 c = 0; c < doc.ParagraphLength(0); c++)
+			if (doc.ParagraphText(0)[c] == PWLayout::kCellSep)
+				sepsNow++;
+		CHECK("separator insertion adds a cell", sepsNow == 3);
 		PWLayout layout2(&doc);
 		layout2.SetPageSetup(PWPageSetup());
 		layout2.Layout();
@@ -2803,9 +3226,6 @@ SelfTest()
 			&& layout.Lines()[0].table);
 		const PWLayout::RowLayout* row = layout.RowAt(0);
 		CHECK("incremental row layout", row != NULL && row->cells.size() == 3);
-		if (row && layout.Lines().size() == 2)
-			printf("dbg incr heights: line0=%.1f row0=%.1f\n",
-				layout.Lines()[0].height, row->height);
 		CHECK("row has height", row != NULL && row->height > 10);
 		CHECK("line carries row height",
 			layout.Lines().size() == 2
@@ -2848,6 +3268,105 @@ SelfTest()
 		std::vector<PWLayout::Segment> noSegs;
 		lone.FillSegments(0, &noSegs);
 		CHECK("1x1 layout survives", noSegs.empty());
+	}
+
+	{
+		// Sprint 10: paper metrics + the PDF writer, structure-checked.
+		printf("block: pdf\n"); fflush(stdout);
+
+		// P1: paper metrics drive pagination
+		PWDocument doc;
+		BString pdfFiller;
+		for (int i = 0; i < 1500; i++)
+			pdfFiller << "pdf pagination test ";
+		doc.Insert(0, pdfFiller.String(), NULL);
+		PWLayout layout(&doc);
+		PWPageSetup a4;
+		CHECK("a4 is 595x842 points",
+			a4.pageWidth == 595.0f && a4.pageHeight == 842.0f);
+		layout.SetPageSetup(a4);
+		layout.Layout();
+		int32 a4Pages = layout.CountPages();
+		CHECK("a4 doc paginates to several pages", a4Pages >= 3);
+		PWPageSetup letter;
+		letter.pageWidth = 612;
+		letter.pageHeight = 792;
+		CHECK("letter is 612x792 points",
+			letter.pageWidth == 612.0f && letter.pageHeight == 792.0f);
+		layout.SetPageSetup(letter);
+		layout.Layout();
+		CHECK("letter doc paginates too", layout.CountPages() >= 2);
+		// the relation that MUST hold: a narrower column means more pages
+		PWPageSetup fat = a4;
+		fat.marginLeft = fat.marginRight = 130;
+		layout.SetPageSetup(fat);
+		layout.Layout();
+		CHECK("narrower column means more pages",
+			layout.CountPages() > a4Pages);
+		PWPageSetup a3;
+		a3.pageWidth = 842;
+		a3.pageHeight = 1191;
+		layout.SetPageSetup(a3);
+		layout.Layout();
+		CHECK("a3 fits in fewer pages", layout.CountPages() < a4Pages);
+
+		// P2: the PDF writer, end to end. The window lives fully
+		// off-screen: views must attach for real rendering.
+		BWindow* win = new BWindow(BRect(-3000, -3000, -2000, -2500),
+			"pw-pdf-test", B_TITLED_WINDOW, B_NOT_RESIZABLE);
+		PWPageView* view = new PWPageView(&doc, &layout);
+		win->AddChild(view);
+		win->Show();
+		snooze(300000);
+		layout.SetPageSetup(a4);
+		layout.Layout();
+		const char* pdfPath = "/tmp/pw-selftest.pdf";
+		win->Lock();
+		status_t pdfErr = PW_WritePDF(view, &layout, pdfPath, 1.0f); // 72 dpi
+		win->Unlock();
+		CHECK("pdf write returns B_OK", pdfErr == B_OK);
+
+		// Binary-safe read-back: BString::SetTo stops at NUL bytes, and a
+		// PDF is binary (Flate streams).
+		std::string pdf;
+		{
+			BFile in;
+			if (in.SetTo(pdfPath, B_READ_ONLY) == B_OK) {
+				off_t sz = 0;
+				in.GetSize(&sz);
+				pdf.resize((size_t)sz);
+				size_t got = 0;
+				while (got < (size_t)sz) {
+					ssize_t n = in.Read(&pdf[got], sz - got);
+					if (n <= 0)
+						break;
+					got += (size_t)n;
+				}
+				pdf.resize(got);
+			}
+		}
+		remove(pdfPath);
+		auto countIn = [&](const char* needle) {
+			int32 n = 0;
+			size_t at = 0;
+			while ((at = pdf.find(needle, at)) != std::string::npos) {
+				n++;
+				at += strlen(needle);
+			}
+			return n;
+		};
+		CHECK("pdf magic", pdf.compare(0, 8, "%PDF-1.4") == 0);
+		CHECK("pdf page count matches layout",
+			countIn("/MediaBox") == layout.CountPages());
+		CHECK("pdf a4 media box",
+			pdf.find("/MediaBox [0 0 595 842]") != std::string::npos);
+		CHECK("pdf images flate compressed",
+			pdf.find("/Filter /FlateDecode") != std::string::npos);
+		CHECK("pdf has xref and eof",
+			pdf.find("xref") != std::string::npos
+				&& pdf.find("%%EOF") != std::string::npos);
+		win->Lock();
+		win->Quit();
 	}
 
 	{

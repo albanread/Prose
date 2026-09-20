@@ -32,6 +32,7 @@ AppendEscaped(BString* out, const char* text, int32 length)
 			case '\\': *out << "\\\\"; break;
 			case '{':  *out << "\\{"; break;
 			case '}':  *out << "\\}"; break;
+			case 0x1D: *out << "\\tab "; break;	// table cell separator
 			default:
 				if (c < 128)
 					*out << (char)c;
@@ -90,11 +91,8 @@ PW_WriteRTF(const PWDocument* doc, BString* out)
 			colors[i].red, colors[i].green, colors[i].blue);
 	*out << "}\n";
 
-	PWCharFormat prev;
-	memset(&prev, 0, sizeof(prev));
-	strlcpy(prev.family, defFamily.c_str(), sizeof(font_family));
-	prev.size = 12;
-	prev.color = rgb_color{0, 0, 0, 255};
+	PWCharFormat prev = doc->DefaultFormat();
+	prev.bold = prev.italic = prev.underline = false;
 
 	for (int32 p = 0; p < doc->CountParagraphs(); p++) {
 		const char* text = doc->ParagraphText(p);
@@ -143,15 +141,26 @@ PW_WriteRTF(const PWDocument* doc, BString* out)
 				*out << (r.format.underline ? "\\ul " : "\\ulnone ");
 			if (prev.size != r.format.size)
 				AppendFmt(out, "\\fs%d ", (int)(r.format.size * 2 + 0.5f));
+			// Colour must be DIFFED, including the return to black: the
+			// old code only emitted \cf for non-black runs, never \cf0, so
+			// text set back to black after a coloured run stayed coloured
 			rgb_color c = r.format.color;
-			if (c.red | c.green | c.blue) {
-				for (size_t i = 0; i < colors.size(); i++) {
-					if (colors[i].red == c.red && colors[i].green == c.green
-						&& colors[i].blue == c.blue) {
-						AppendFmt(out, "\\cf%d ", (int32)i + 1);
-						break;
+			if (c.red != prev.color.red || c.green != prev.color.green
+				|| c.blue != prev.color.blue) {
+				bool emitted = false;
+				if (c.red | c.green | c.blue) {
+					for (size_t i = 0; i < colors.size(); i++) {
+						if (colors[i].red == c.red
+							&& colors[i].green == c.green
+							&& colors[i].blue == c.blue) {
+							AppendFmt(out, "\\cf%d ", (int32)i + 1);
+							emitted = true;
+							break;
+						}
 					}
 				}
+				if (!emitted)
+					*out << "\\cf0 ";	// back to the table's auto/black
 			}
 			prev = r.format;
 			strlcpy(prev.family, fam.c_str(), sizeof(font_family));
@@ -218,8 +227,13 @@ public:
 			} else if (c == '}') {
 				fPos++; fDepth--;
 				PopState();
-				// leaving a table group ends the table
-				if (fDepth <= fTableDepth) {
+				// leaving the table's OWN group ends the table: the depth
+				// when \fonttbl was seen was inside that group, so the
+				// table ends when depth drops BELOW it. The old "<=" ended
+				// at every inner '}' — the first font entry — so fonts
+				// after the first were lost and their names leaked into
+				// the document text.
+				if (fDepth < fTableDepth) {
 					fInFontTable = fInColorTable = false;
 					fTableDepth = 32000;
 				}
@@ -462,8 +476,9 @@ private:
 			fPendingColor.blue = (uint8)param;
 		else if (word == "fcharset" || word == "fmodern" || word == "fswiss"
 			|| word == "froman" || word == "fnil" || word == "fdecor"
-			|| word == "fscript" || word == "ftech")
-			;	// face metadata, not part of the name
+			|| word == "fscript" || word == "ftech") {
+			// face metadata, not part of the name
+		}
 	}
 
 	std::string Trimmed(const std::string& s)

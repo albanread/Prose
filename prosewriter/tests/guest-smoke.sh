@@ -1,0 +1,97 @@
+#!/bin/bash
+# ProseWriter guest smoke — the harness-level test matrix, run from the
+# repo root with the VM already up (prosewriter/vm/run.sh + wait-boot):
+#
+#   prosewriter/tests/guest-smoke.sh
+#
+# Covers: selftest, launch+activate, set/get Text, save (title + clean),
+# relaunch-with-file, clean quit, no stale teams. Prints TAP-style lines
+# and leaves a screenshot of the end state under vm/run/.
+set -u
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+GUEST="$ROOT/prosewriter/vm/guest.sh"
+QMP="$ROOT/prosewriter/vm/qmp.py"
+APP=/boot/home/apps/ProseWriter
+SIG=application/x-vnd.prose.ProseWriter
+OUT="$ROOT/prosewriter/vm/run"
+mkdir -p "$OUT"
+pass=0; fail=0; n=0
+ok()  { echo "ok $n - $1"; pass=$((pass+1)); }
+bad() { echo "not ok $n - $1"; fail=$((fail+1)); }
+
+killapp()
+{
+	"$GUEST" run 'ps' 2>/dev/null | grep -a "apps/ProseWriter" | awk '{print $2}' \
+		| while read tid; do "$GUEST" run "kill $tid" >/dev/null 2>&1; done
+	sleep 1
+}
+
+# 1 - in-process selftest
+n=1
+r=$("$GUEST" run "$APP --selftest" 2>&1 | grep -a "SELFTEST")
+echo "$r" | grep -aq "PASS" && ok "selftest ($r)" || bad "selftest ($r)"
+
+# 2 - launch + activate (background-launched windows are never activated
+#     on this guest; Activate is the harness's way in)
+killapp
+n=2
+"$GUEST" launch $APP >/dev/null && sleep 3
+"$GUEST" run "hey $SIG do Activate" >/dev/null 2>&1
+r=$("$GUEST" run "hey $SIG get Title" 2>/dev/null | grep -a result)
+echo "$r" | grep -aq Untitled && ok "launch + activate" || bad "launch ($r)"
+
+# 3 - set/get Text (pwquery: mode is argv[4], data is argv[5])
+n=3
+"$GUEST" run "/boot/home/apps/pwquery $SIG Text X set 'smoke test one'" \
+	>/dev/null 2>&1
+sleep 1
+r=$("$GUEST" run "hey $SIG get Text" 2>/dev/null | grep -a result)
+echo "$r" | grep -aq "smoke test one" && ok "set/get Text" \
+	|| bad "set/get Text ($r)"
+
+# 4 - save to a path: file written, title takes the name, Modified clears
+n=4
+"$GUEST" run "/boot/home/apps/pwquery $SIG Save X do /tmp/smoke.prose" \
+	>/dev/null 2>&1
+sleep 1
+t=$("$GUEST" run "hey $SIG get Title" 2>/dev/null | grep -a result)
+m=$("$GUEST" run "hey $SIG get Modified" 2>/dev/null | grep -a result)
+echo "$t" | grep -aq "smoke.prose" && echo "$m" | grep -aq ": 0" \
+	&& ok "save + title + clean" || bad "save ($t $m)"
+
+# 5 - relaunch with the file as argument: content loads
+killapp
+n=5
+"$GUEST" launch $APP /tmp/smoke.prose >/dev/null && sleep 3
+r=$("$GUEST" run "hey $SIG get Text" 2>/dev/null | grep -a result)
+echo "$r" | grep -aq "smoke test one" && ok "reopen saved file" \
+	|| bad "reopen ($r)"
+
+# 6 - PDF export via scripting (Sprint 10): magic + at least one page
+n=6
+"$GUEST" run "/boot/home/apps/pwquery $SIG PDF X do /tmp/smoke.pdf" \
+	>/dev/null 2>&1
+sleep 1
+magic=$("$GUEST" run 'head -c 8 /tmp/smoke.pdf; echo' 2>/dev/null \
+	| head -1 | tr -d '\0\r')
+pages=$("$GUEST" run 'grep -ac MediaBox /tmp/smoke.pdf' 2>/dev/null \
+	| head -1 | tr -d '\0\r\n')
+[ "$magic" = "%PDF-1.4" ] && [ "$pages" -ge 1 ] \
+	&& ok "pdf export ($pages page(s))" || bad "pdf export ($magic/$pages)"
+
+# 7 - clean quit (unmodified document) exits the app
+n=7
+"$GUEST" run "hey $SIG do Quit" >/dev/null 2>&1
+sleep 2
+c=$("$GUEST" run 'ps' 2>/dev/null | grep -ac "apps/ProseWriter")
+[ "$c" = "0" ] && ok "clean quit exits" || bad "quit (teams left: $c)"
+
+"$QMP" shot "$OUT/smoke-desk.png" >/dev/null
+echo "final screenshot: $OUT/smoke-desk.png"
+
+if [ $fail = 0 ]; then
+	echo "=== GUEST SMOKE PASS $pass/$pass ==="
+	exit 0
+fi
+echo "=== GUEST SMOKE FAIL ($fail failed, $pass passed) ==="
+exit 1

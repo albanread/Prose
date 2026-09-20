@@ -15,12 +15,13 @@ XGXX   := $(HAIKU)/generated/cross-tools-arm64/bin/aarch64-unknown-haiku-g++
 # kit directories go on the include path so that Be-style flat
 # #include <Application.h> resolves.
 KITDIRS := $(shell find $(SYS)/develop/headers -type d -maxdepth 2)
-INCS   := --sysroot $(SYSROOT) $(KITDIRS:%=-I%)
+INCS   := --sysroot $(SYSROOT) $(KITDIRS:%=-I%) -I$(CURDIR)/zlib
 LIBS   := -L$(SYS)/develop/lib
 
-CXXFLAGS ?= -O2 -g -Wall -Wno-multichar -std=c++17
+CXXFLAGS ?= -O2 -g -Wall -Wextra -Wpointer-arith -Wno-unused-parameter \
+	-Wno-missing-field-initializers -Wno-multichar -std=c++17
 LDFLAGS  ?=
-LDLIBS   := -lbe -lroot -ltracker -ltranslation -lnetwork -lstdc++ -lgcc_s
+LDLIBS   := -lbe -lroot -ltracker -ltranslation -lnetwork -lstdc++ -lgcc_s -lz
 
 BINS := ProseWriter proseagent
 
@@ -29,8 +30,16 @@ all: $(BINS)
 %.o: %.cpp
 	$(XGXX) $(CXXFLAGS) $(INCS) -c -o $@ $<
 
-ProseWriter: $(wildcard src/*.cpp) $(wildcard src/*.h)
-	$(XGXX) $(CXXFLAGS) $(INCS) $(LIBS) -o $@ $(filter %.cpp,$^) $(LDFLAGS) $(LDLIBS)
+# per-object compilation: an edit rebuilds its file, not all 8k lines.
+# Headers are dependencies of every object (they are few and small).
+PWSRC := $(wildcard src/*.cpp)
+PWOBJ := $(PWSRC:src/%.cpp=src/%.o)
+
+ProseWriter: $(PWOBJ)
+	$(XGXX) $(CXXFLAGS) $(INCS) $(LIBS) -o $@ $(PWOBJ) $(LDFLAGS) $(LDLIBS)
+
+src/%.o: src/%.cpp $(wildcard src/*.h)
+	$(XGXX) $(CXXFLAGS) $(INCS) -c -o $@ $<
 
 proseagent: proseagent.cpp
 	$(XGXX) $(CXXFLAGS) $(INCS) $(LIBS) -o $@ $< $(LDFLAGS) $(LDLIBS)
@@ -45,6 +54,6 @@ pwquery: pwquery.cpp
 	$(XGXX) $(CXXFLAGS) $(INCS) $(LIBS) -o $@ $< $(LDFLAGS) $(LDLIBS) -lbsd
 
 clean:
-	rm -f $(BINS) hello probe pwquery *.o
+	rm -f $(BINS) hello probe pwquery src/*.o *.o
 
 .PHONY: all clean

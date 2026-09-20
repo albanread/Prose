@@ -82,6 +82,7 @@ public:
 	void	ApplyPageSetup(const PWPageSetup& setup);
 	void	AdoptDoc(PWDocument* fresh);
 	void	SaveViaScript(const char* path);
+	void	ExportPDF(const char* path);
 public:
 	void	SetSpellChecker(PWSpellChecker* spell);
 	Panels*	EnsurePanels();
@@ -130,6 +131,12 @@ private:
 	PWHeaderWindow*	fHeaderWin = NULL;
 	PWStylesWindow*	fStylesWin = NULL;
 	PWInsertTableWindow* fTableWin = NULL;
+	// a quit that is waiting for the save panel to finish
+	bool		fQuitPending = false;
+	// the one Insert-image panel (created on first use)
+	BFilePanel*	fImagePanel = NULL;
+	// the one Print-to-PDF panel (created on first use)
+	BFilePanel*	fPdfPanel = NULL;
 };
 
 #endif	// PW_WINDOW_H

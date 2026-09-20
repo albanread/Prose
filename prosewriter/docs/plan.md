@@ -280,6 +280,114 @@ the page renders the saved content. The file panels were correct all
 along; what failed was testing against dead instances.
 
 
+### Sprint 10 — print to PDF (paper metrics as the single truth)
+
+**Goal:** a real PDF out of ProseWriter, paginated EXACTLY like the screen.
+
+**Design — how layout reaches the printed page:**
+
+1. `PWPageSetup` (paper + orientation + margins, points at 72 dpi) is the
+   only source of truth. It already drives the on-screen layout; now the
+   PDF consumes it too: each PDF page's MediaBox is exactly
+   `pageWidth × pageHeight`, so an A4 document yields a true A4 PDF and a
+   Letter document a true Letter PDF (595×842 / 612×792 points).
+2. Pagination is `PWLayout`'s page spans — the same line→page assignment
+   the screen shows. The writer never re-wraps or re-paginates: it asks
+   the layout for the page count and renders page N through the view's
+   existing print-mode path (`fPrinting` + `fPrintPage`: no desk, no
+   shadow, no selection/caret, origin at 0,0).
+3. Rendering: per page, the view records a `BPicture` at
+   `scale = dpi/72` (default 144 dpi), replayed onto a white offscreen
+   `BBitmap`. This reuses the whole on-screen renderer — fonts, styled
+   runs, tables, inline images, headers/footers with `{page}`/`{pages}` —
+   so WYSIWYG holds by construction and pagination cannot diverge.
+4. Bitmaps are packed to RGB rows, Flate-compressed with the system
+   `libz.so.1` (zlib 1.2.13; headers copied under `app/zlib/`, link set
+   up by `mksysroot.sh`), embedded as Image XObjects; each content
+   stream is one `cm` + `Do` painting the page edge to edge.
+5. **Known cost, accepted for v1:** raster pages — text is not selectable
+   in the PDF. Selectable text needs font embedding + text operators and
+   waits for a real need; ~60–150 KB/page at 144 dpi is fine. There is
+   no PDF printer driver in this image (only PS/PCL/Preview), so ours is
+   the only PDF path; `Print` (BPrintJob) stays for real printers.
+
+**Deliverables:** File ▸ Print to PDF… (save panel, StyledEdit pattern);
+scripting property `PDF` (execute, `data:` path) so tests and `hey` can
+drive it; paper table gains A3 and B5; the paper metrics chain
+(dialog → `PWPageSetup` → layout → PDF MediaBox) verified end to end.
+
+**Test matrix and exit criteria — all met (2026-09-20):**
+
+| ID | Test | Result |
+|---|---|---|
+| P1 | selftest: paper metrics (A4/Letter/A3 exact points; narrower column ⇒ more pages; A3 ⇒ fewer) | PASS |
+| P2 | selftest: PDF writer structure — off-screen window renders a 9-page doc; `%PDF` magic, `/MediaBox` count == layout CountPages, A4 box `[0 0 595 842]`, Flate, xref+`%%EOF` | PASS |
+| P3 | guest: 18,000-word doc → `PDF do /tmp/out.pdf` in 0.8 s, 414 KB, fetched to host: 28 pages, all `[0 0 595 842]`, `/Count 28` agrees | PASS |
+| P4 | guest smoke step 6: PDF magic + page count on every run | PASS (7/7) |
+| P5 | host QuickLook thumbnail of page 1: typeset A4 page, correct margins, clean wraps | PASS (vm/run/s10-out.pdf) |
+
+**Status: complete.** `--selftest` **156/156**. Two bugs found on the way,
+both fixed with this sprint: `ReadFileToString` did a single `Read()` (short
+reads truncate — the dictionary bug's last surviving sibling), and the
+selftest originally read the PDF back through `BString::SetTo`, which stops
+at NUL bytes — a PDF is binary; the check now reads into `std::string`.
+Also: `EndPicture()` returns the stack `BPicture` you passed to
+`BeginPicture()` — deleting that return value deletes a stack object.
+
+
+
+### Sprint 9 — the fix pass (2026-09-20, driven by `docs/review-2026-09-20.md` + agent re-review)
+
+Scope: every Part-1 bug from the review plus the additional bugs the second
+review found, each with a regression test. **`--selftest` 144/144 PASS**
+(was 97/97; the `|| true` non-test is gone, the benchmark-hiding debug
+printfs are gone).
+
+| | |
+|---|---|
+| Open works | `IFindLast()!=NULL` (int32 vs pointer, 9 sites) → `IEndsWith` helper; Open/launch-with-file/RTF/text all verified in the guest |
+| Typing works | multi-byte UTF-8 routed as text; `B_DELETE` (0x7F) excluded from printable (it typed a garbage glyph); coalescing is per-UTF-8-character |
+| Save is safe | write-tmp → Sync → rename (never `B_ERASE_FILE` on the document); the return value is a real status (Write()'s byte count made every successful save read as a failure — title/Modified/recent all dead); failures alert; failed quit-save keeps the window |
+| Undo is real | `FORMAT` steps (bold/colour/family/styles undo+redo); coalesced typing redoes the whole run (was: first character only); removed images ride the undo step and come back |
+| Layout cache asks the doc | fingerprints deleted; paragraphs carry a stable `id` + `revision` (bumped by every mutation incl. `ApplyFormat`), page setup bumps an epoch; margin changes, mid-paragraph bolding and same-length edits past byte 32 all re-measure now |
+| Tables follow edits | row cache keyed by paragraph id, pruned of dead ids — a table no longer vanishes when a paragraph is inserted above it |
+| Images own themselves | `shared_ptr<BBitmap>`: no leak on Open/AdoptDoc, no loss on cross-paragraph delete (the merge now moves them), inserts shift them with their markers |
+| Windows die properly | panels announce their death (`'pWpl'`) — no dangling `fSetupWin`-class pointers; the app caches no window (the old `fWindow` dangled after the second window closed); quit counts only `PWWindow`s (hidden panels no longer keep a windowless app alive); Quit targets `be_app` and asks every window |
+| RTF honesty | multi-entry font tables parse (fonts after the first no longer leak their names into the text); `\cf0` is emitted on return-to-black; cell separators export as `\tab` |
+| Geometry | justified slack against the paragraph's column (indented justified text no longer overflows); End key stops on UTF-8 boundaries; print-mode underlines on their glyphs; scrollbar range zoom-aware; caret blink invalidation covers the caret; drag selection continues outside the view |
+| Guard rails | Open over unsaved changes asks; page-setup margins can't swallow the page; print cancel is not an error alert; Cut checks the clipboard lock |
+
+New harness property: **`Activate`** (execute) brings the window forward and
+focuses the page view — on this headless guest a background-launched window
+is never activated, so keyboard events reach nothing until it is called.
+`hey ProseWriter do Activate` is now step one of every scripted GUI test.
+
+**Verified in the guest, end to end:** selftest 144/144; typing via QMP
+keyboard (on empty and loaded documents); forward-delete; Save (file on
+disk, title = name, Modified cleared); reopen of a saved file (content,
+title, caret); quit with changes → the save alert appears; quit clean →
+the app exits.
+
+**Session finding (input):** this guest's keyboard events reach the
+input server (Ctrl+Alt+Del works) but a background-launched window is
+never activated, and mouse clicks via the tablet do not activate windows
+either — `Activate()` (scripting) is the reliable way in. The window also
+loses activation moments after launch (something takes it); `do Activate`
+before typing, every time.
+
+### Sprint 9, part 2 — the owed list, closed as far as the harness allows
+
+| | |
+|---|---|
+| F4: MIME registration | `RegisterDocumentType()` (PWApp ReadyToRun) installs `application/x-vnd.prose.ProseWriter-doc` with sniffer `1.0 ([0:3] "HMF1") ([4:7] "&dWp")` — the flattened-message magic plus our `'pWd&'` what-code — and preferred app = us. Verified on a fresh boot: `mimeset -f` types a saved file to OUR type (beats the built-in `haiku-bmessage` 0.40 rule) with the pref-app riding along. Syntax lesson: sniffer patterns MUST be parenthesized (`setmime -checkSniffRule` validates) |
+| Alert buttons by keyboard | What is actually reachable: **Enter presses the default button (Cancel) — verified twice** (alert dismissed, window survived, Modified intact). **Escape does nothing** on Haiku's BAlert, and **BAlert buttons take no Tab focus** — so "Don't save" and "Save" cannot be driven headlessly. An earlier report claimed Tab+Enter worked; that was a bad verification (a leading question to the image reader on a screenshot with no alert) — retracted, re-tested with `ps`/hey probes as the ground truth |
+| tests/ filled | `tests/guest-smoke.sh` (host side, drives the harness): selftest, launch+activate, set/get Text, save + title + clean, relaunch-with-file, clean quit. **GUEST SMOKE PASS 6/6** |
+
+**Still human-owed (a real mouse):** the alert's "Don't save" and "Save"
+buttons, Tracker double-click of a `.prose` file (the type + preferred app
+now resolve; only the click itself is missing), drag-and-drop onto the
+window, mouse text selection.
+
 ### Sprint 8 — files (defined retroactively; the work ran without one)
 
 Scope: a document's whole life — new, open, save, save-as, export,

@@ -18,6 +18,7 @@ class BBitmap;
 #include <cstring>
 #include <string>
 #include <map>
+#include <memory>
 #include <vector>
 
 // Character format. The family is kept; bold/italic are face flags resolved
@@ -114,13 +115,22 @@ public:
 	void		ApplyFormat(int32 offset, int32 length, const PWCharFormat& fmt);
 	void		SetParaFormat(int32 para, const PWParaFormat& fmt);
 	void		SplitPara(int32 offset);		// used by Enter key
-	void		MergeWithNext(int32 para);	// used by Backspace at para start
 
 	// ---- offset <-> paragraph geometry
 	// Returns {paragraphIndex, offsetInParagraph} for a global offset.
 	void		Locate(int32 offset, int32* para, int32* inPara) const;
 	int32		ParaStart(int32 para) const;	// global offset of paragraph start
 	bool		IsSeparatorOffset(int32 offset) const;
+
+	// ---- change tracking for the layout's incremental relayout.
+	// Every paragraph has a stable id (never reused) and a revision that
+	// every mutation of that paragraph bumps. The layout may reuse a
+	// paragraph's measured lines iff id and revision both match — asking
+	// the document what changed, not guessing from the text (the old
+	// fingerprints missed page setup, run formatting, and same-length
+	// edits past byte 32).
+	int32		ParaId(int32 para) const;
+	uint32		ParaRevision(int32 para) const;
 
 	// ---- undo (Alt+Z / Alt+Y)
 	bool		CanUndo() const { return !fUndo.empty(); }
@@ -150,10 +160,13 @@ public:
 	// text marks the spot; the bitmap lives in a per-paragraph table
 	// keyed by the character's byte offset.
 	struct PWImage {
-		BBitmap*	bitmap = NULL;	// owned by the document
+		std::shared_ptr<BBitmap>	bitmap;	// shared: value semantics, no leaks
 		float		widthPt = 0;
 		float		heightPt = 0;
 	};
+	// The paragraph's image table (byte offset -> image), for the layout's
+	// hot loops — no Locate() per byte.
+	const std::map<int32, PWImage>& ParagraphImages(int32 para) const;
 	static const char* kObjectChar;		// "\357\277\274", 3 bytes
 	status_t	InsertImage(int32 offset, BBitmap* bitmap, float widthPt,
 				float heightPt);
@@ -199,6 +212,8 @@ private:
 		std::string		text;
 		PWParaFormat	format;
 		std::map<int32, PWImage> images;	// byte offset -> image
+		int32		id = 0;			// stable identity, never reused
+		uint32		revision = 0;	// bumped by every mutation of this para
 	};
 
 	struct UndoStep {
@@ -207,6 +222,9 @@ private:
 		int32		length = 0;
 		BString		text;				// removed text (REMOVE) or undo target
 		std::vector<PWRun> runs;		// formatting to restore
+		// Images removed with the text, keyed by GLOBAL byte offset so undo
+		// can re-register them wherever the re-inserted paragraphs land.
+		std::map<int32, PWImage> images;
 		PWParaFormat paraFormat;
 		bool		coalesce = false;	// may merge with the following same-kind step
 	};
@@ -214,8 +232,11 @@ private:
 	void		NormalizeRuns(Para& p);
 	void		PushUndo(const UndoStep& step);
 	PWCharFormat	FormatForInsert(const Para& p, int32 at) const;
+	// The runs covering [offset, offset+length), starts relative to offset.
+	std::vector<PWRun> CaptureRuns(int32 offset, int32 length) const;
 
 	std::vector<Para>	fParas;
+	int32		fNextParaId = 1;
 	PWCharFormat		fDefault;
 	std::vector<UndoStep>	fUndo, fRedo;
 	std::vector<PWStyle>	fStyles;

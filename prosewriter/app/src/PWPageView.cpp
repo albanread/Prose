@@ -1,7 +1,9 @@
 #include "PWPageView.h"
 
+#include <Bitmap.h>
 #include <Clipboard.h>
 #include <Message.h>
+#include <Picture.h>
 #include <ScrollView.h>
 #include <Window.h>
 
@@ -34,7 +36,7 @@ PWPageView::AttachedToWindow()
 	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	fScrollView = dynamic_cast<BScrollView*>(Parent());
 	fCurrentFormat = fDoc->DefaultFormat();
-	ResizeTo(PagePixelWidth(), PagePixelHeight() + 24);
+	ResizeTo(PagePixelWidth(), PagePixelHeight());
 }
 
 void
@@ -44,13 +46,58 @@ PWPageView::MakeFocus(bool focus)
 	Invalidate();
 }
 
+BBitmap*
+PWPageView::RenderPageBitmap(int32 page, float scale)
+{
+	const PWPageSetup& setup = fLayout->PageSetup();
+	BBitmap* bmp = new BBitmap(BRect(0, 0, setup.pageWidth * scale - 1,
+		setup.pageHeight * scale - 1), B_RGB32, true);
+	if (bmp == NULL || !bmp->IsValid()) {
+		delete bmp;
+		return NULL;
+	}
+	BView* canvas = new BView(bmp->Bounds(), "pdfpage", B_FOLLOW_NONE,
+		B_WILL_DRAW);
+	bmp->AddChild(canvas);
+
+	// Record the page through our own print-mode renderer — the same
+	// code path BPrintJob uses — then replay it onto the white bitmap.
+	// Pagination and drawing are the screen's, by construction.
+	bool wasPrinting = fPrinting;
+	int32 wasPage = fPrintPage;
+	float wasZoom = fZoom;
+	fPrinting = true;
+	fPrintPage = page;
+	fZoom = scale;
+	BPicture recording;
+	BeginPicture(&recording);
+	DrawPages(Bounds());
+	EndPicture();	// returns &recording — a stack object, never deleted
+	fPrinting = wasPrinting;
+	fPrintPage = wasPage;
+	fZoom = wasZoom;
+
+	bmp->Lock();
+	canvas->SetHighColor(255, 255, 255, 255);
+	canvas->FillRect(canvas->Bounds());
+	canvas->DrawPicture(&recording, BPoint(0, 0));
+	canvas->Sync();
+	bmp->Unlock();
+	return bmp;
+}
+
 void
 PWPageView::FrameResized(float, float)
 {
-	// keep the scroll view's data extent in step
-	if (fScrollView)
-		fScrollView->ScrollBar(B_VERTICAL)->SetRange(0,
-			fLayout->TotalHeight() + 48 - Bounds().Height());
+	// keep the scroll view's data extent in step — in VIEW pixels; the
+	// extent is zoom-scaled, the old doc-points arithmetic starved the
+	// range at zoom > 100 %
+	if (fScrollView) {
+		BScrollBar* v = fScrollView->ScrollBar(B_VERTICAL);
+		if (v)
+			v->SetRange(0, std::max(0.0f,
+				PagePixelHeight() - Bounds().Height()));
+	}
 }
 
 float
@@ -62,7 +109,9 @@ PWPageView::PagePixelWidth() const
 float
 PWPageView::PagePixelHeight() const
 {
-	return fLayout->TotalHeight() * fZoom + 24;
+	// the page stack plus both desk margins (24 top, 24 bottom + a little
+	// for the page shadow) — the old +24 clipped the last page's edge
+	return fLayout->TotalHeight() * fZoom + 48;
 }
 
 void
@@ -255,7 +304,7 @@ PWPageView::DrawPages(BRect updateRect)
 								s.baseline - s.imageH));
 						BRect dest(base.x, base.y, base.x + s.imageW * fZoom,
 							base.y + s.imageH * fZoom);
-						DrawBitmap(img->bitmap, dest);
+						DrawBitmap(img->bitmap.get(), dest);
 					}
 					continue;
 				}
@@ -272,11 +321,13 @@ PWPageView::DrawPages(BRect updateRect)
 						: DocToView(BPoint(s.x, s.baseline));
 					DrawString(text + s.startPara, s.length, base);
 					if (s.run->format.underline) {
-						float ux = DocToView(BPoint(s.x, s.baseline)).x;
-						float uy = 24 + s.baseline * fZoom + 2 * fZoom;
-						StrokeLine(BPoint(ux, uy),
-							BPoint(ux + font.StringWidth(text + s.startPara,
-								s.length), uy));
+						// same coordinate branch as the text above — the
+						// old DocToView offsets moved print underlines off
+						// their glyphs by the screen margin
+						float w = font.StringWidth(text + s.startPara,
+							s.length);
+						StrokeLine(BPoint(base.x, base.y + 2 * fZoom),
+							BPoint(base.x + w, base.y + 2 * fZoom));
 					}
 				}
 			}
@@ -293,6 +344,7 @@ PWPageView::DrawHeaderFooter(int32 page, BRect pageRect)
 		return;
 	const PWPageSetup& setup = fLayout->PageSetup();
 	SetFont(be_plain_font);
+	SetFontSize(10.0f * fZoom);	// scale with the page, like the body text
 	SetHighColor(tint_color(fPrinting ? kWhite
 		: ui_color(B_DOCUMENT_BACKGROUND_COLOR), B_DARKEN_1_TINT));
 	if (header[0]) {
@@ -351,14 +403,20 @@ PWPageView::DrawSquiggles(const PWLayout::Line& line,
 				if (at <= s.startPara)
 					return x;
 				int32 segEnd = s.startPara + s.length;
-				if (at >= segEnd) {
+				if (s.isImage) {
+					x += s.imageW;
+				} else if (at >= segEnd) {
 					BFont f(be_plain_font);
-					f.SetFamilyAndFace(s.run->format.family, 0);
+					f.SetFamilyAndFace(s.run->format.family,
+						(uint16)((s.run->format.bold ? B_BOLD_FACE : 0)
+							| (s.run->format.italic ? B_ITALIC_FACE : 0)));
 					f.SetSize(s.run->format.size);
 					x += f.StringWidth(text + s.startPara, s.length);
 				} else {
 					BFont f(be_plain_font);
-					f.SetFamilyAndFace(s.run->format.family, 0);
+					f.SetFamilyAndFace(s.run->format.family,
+						(uint16)((s.run->format.bold ? B_BOLD_FACE : 0)
+							| (s.run->format.italic ? B_ITALIC_FACE : 0)));
 					f.SetSize(s.run->format.size);
 					x += f.StringWidth(text + s.startPara,
 						at - s.startPara);
@@ -451,7 +509,11 @@ PWPageView::Pulse()
 		float h;
 		if (fLayout->OffsetToXY(fCaret, &p, &h)) {
 			BPoint v = DocToView(p);
-			BRect r(v.x - 1, v.y - h * fZoom, v.x + 1, v.y + 2);
+			// cover the full drawn caret (DocToView scales): top is at
+			// -0.75h, bottom at +0.25h — the old rect stopped 2 px past
+			// the baseline and left ghost pixels on every blink
+			BRect r(v.x - 1, v.y - h * 0.75f * fZoom, v.x + 1,
+				v.y + h * 0.25f * fZoom + 2);
 			Invalidate(r);
 		}
 	}
@@ -482,8 +544,16 @@ void
 PWPageView::KeyDown(const char* bytes, int32 numBytes)
 {
 	uint32 mods = modifiers();
-	if (numBytes == 1 && (bytes[0] & 0x80) == 0 && bytes[0] >= 32
-		&& !(mods & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))) {
+	// Printable text: any multi-byte UTF-8 character (é, £, — …) and the
+	// single bytes 32..126. 0x7F is B_DELETE, not text — letting it
+	// through here typed a garbage glyph instead of deleting forward.
+	// Single bytes honour Alt/Ctrl menu shortcuts; real characters don't.
+	if (numBytes > 1) {
+		HandlePrintableChar(bytes, numBytes);
+		return;
+	}
+	if (numBytes == 1 && bytes[0] >= 32 && bytes[0] < 0x7F
+		&& !(mods & (B_COMMAND_KEY | B_CONTROL_KEY))) {
 		HandlePrintableChar(bytes, numBytes);
 		return;
 	}
@@ -570,7 +640,12 @@ PWPageView::HandleNavigationKey(const char* bytes, int32 mods)
 			newCaret = wordWise ? 0 : fLayout->LineStart(fLayout->LineOfOffset(fCaret));
 			break;
 		case B_END:
-			newCaret = wordWise ? docLen : fLayout->LineEnd(fLayout->LineOfOffset(fCaret)) - 1;
+			// LineEnd is the next line's start — a UTF-8 boundary (or a
+			// paragraph separator, where the caret legally rests). The old
+			// "- 1" stepped back one BYTE and could park the caret inside
+			// a multi-byte character; typing there corrupted the stream.
+			newCaret = wordWise ? docLen
+				: fLayout->LineEnd(fLayout->LineOfOffset(fCaret));
 			if (newCaret < 0) newCaret = 0;
 			break;
 		case B_PAGE_UP: {
@@ -632,6 +707,10 @@ PWPageView::HandleNavigationKey(const char* bytes, int32 mods)
 		case B_ESCAPE:
 			fSelAnchor = -1;
 			Invalidate();
+			// The window decides whether this also closes the find bar —
+			// it only knows whether the bar is shown.
+			if (Window())
+				Window()->PostMessage(B_ESCAPE);
 			return;
 		default:
 			BView::KeyDown(bytes, mods);
@@ -649,7 +728,6 @@ PWPageView::SetCaret(int32 offset, bool extend)
 	int32 docLen = fDoc->Length();
 	if (offset < 0) offset = 0;
 	if (offset > docLen) offset = docLen;
-	bool hadSelection = HasSelection();
 	if (!fOverrideFormat)
 		fCurrentFormat = fDoc->FormatAt(offset);
 	fCaret = offset;
@@ -662,16 +740,16 @@ PWPageView::SetCaret(int32 offset, bool extend)
 	fLastCaretBlink = system_time();
 	Invalidate();
 	ScrollCaretVisible();
-	if (hadSelection || HasSelection())
-		Window()->PostMessage('pWup');
-	else
-		Window()->PostMessage('pWup');
+	Window()->PostMessage('pWup');
 }
 
 void
 PWPageView::Select(int32 from, int32 to)
 {
 	if (from > to) { int32 t = from; from = to; to = t; }
+	int32 docLen = fDoc->Length();
+	if (from < 0) from = 0;
+	if (to > docLen) to = docLen;
 	fSelAnchor = from;
 	fCaret = to;
 	Invalidate();
@@ -882,7 +960,10 @@ PWPageView::ClickCycled(BPoint where, int32 clicks)
 void
 PWPageView::MouseMoved(BPoint point, uint32 transit, const BMessage*)
 {
-	if (!fMouseSelecting || transit != B_INSIDE_VIEW)
+	// B_OUTSIDE_VIEW too: the drag mask is set, and selection that stops
+	// at the view edge (or auto-scrolls) is the expected behaviour
+	if (!fMouseSelecting
+		|| (transit != B_INSIDE_VIEW && transit != B_OUTSIDE_VIEW))
 		return;
 	int32 at = fLayout->XYToOffset(ViewToDoc(point));
 	if (at != fCaret)

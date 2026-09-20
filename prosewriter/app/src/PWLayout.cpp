@@ -14,7 +14,15 @@ PWLayout::PWLayout(const PWDocument* doc)
 void
 PWLayout::SetPageSetup(const PWPageSetup& setup)
 {
+	bool changed = setup.pageWidth != fSetup.pageWidth
+		|| setup.pageHeight != fSetup.pageHeight
+		|| setup.marginLeft != fSetup.marginLeft
+		|| setup.marginRight != fSetup.marginRight
+		|| setup.marginTop != fSetup.marginTop
+		|| setup.marginBottom != fSetup.marginBottom;
 	fSetup = setup;
+	if (changed)
+		fSetupEpoch++;	// lines were measured in a different box: re-measure
 }
 
 BFont
@@ -64,13 +72,16 @@ void
 PWLayout::ImageSizeAt(int32 para, int32 byteOffset, float* w, float* h) const
 {
 	*w = *h = 0;
-	if (fDoc == NULL || para >= fDoc->CountParagraphs())
+	if (fDoc == NULL || para < 0 || para >= fDoc->CountParagraphs())
 		return;
-	PWDocument::PWImage* img = const_cast<PWDocument*>(fDoc)->ImageAt(
-		fDoc->ParaStart(para) + byteOffset);
-	if (img) {
-		*w = img->widthPt;
-		*h = img->heightPt;
+	// Direct table lookup — the old route went through a global-offset
+	// Locate() per byte, which made layout quadratic in paragraphs.
+	const std::map<int32, PWDocument::PWImage>& imgs =
+		fDoc->ParagraphImages(para);
+	auto it = imgs.find(byteOffset);
+	if (it != imgs.end()) {
+		*w = it->second.widthPt;
+		*h = it->second.heightPt;
 	}
 }
 
@@ -85,7 +96,12 @@ PWLayout::ByteWidth(int32 para, const std::vector<PWRun>& runs,
 		for (const PWTab& tab : tabs)
 			if (tab.x > pos)
 				return tab.x - pos;
-		return 36.0f;
+		// default stops: the next multiple of 36, not 36 from wherever
+		// the pen happens to be (successive tabs must land on a grid)
+		float target = (floorf(pos / 36.0f) + 1.0f) * 36.0f;
+		if (target <= pos)
+			target = pos + 36.0f;
+		return target - pos;
 	}
 	if (runOf == NULL)
 		return 0;
@@ -110,7 +126,9 @@ PWLayout::IsTableParagraph(int32 para) const
 const PWLayout::RowLayout*
 PWLayout::RowAt(int32 para) const
 {
-	auto it = fRows.find(para);
+	if (fDoc == NULL)
+		return NULL;
+	auto it = fRows.find(fDoc->ParaId(para));
 	return it == fRows.end() ? NULL : &it->second;
 }
 
@@ -255,7 +273,7 @@ PWLayout::LayoutTableRow(int32 para)
 		row.cells.push_back(cell);
 	}
 	row.height += 8;	// cell padding
-	fRows[para] = row;
+	fRows[fDoc->ParaId(para)] = row;
 
 	Line line;
 	line.para = para;
@@ -482,45 +500,34 @@ PWLayout::Layout()
 {
 	if (fDoc == NULL) {
 		fLines.clear();
+		fRows.clear();
+		fPrevSummaries.clear();
 		fPrevValid = false;
 		AssignLinesToPages();
 		return;
 	}
-	if (!fIncremental || !fPrevValid) {
+	if (!fIncremental || !fPrevValid || fPrevEpoch != fSetupEpoch) {
 		LayoutFull();
 		return;
 	}
 
-	// Incremental: reuse every paragraph whose text and format are
-	// unchanged (matched by fingerprint, index shifts tolerated), and
-	// re-measure the rest. Y positions and page breaks are recomputed
-	// afterwards in bulk — they are a walk, not a measurement.
+	// Incremental: a paragraph keeps its measured lines iff its stable id
+	// and revision (and the page-setup epoch) match what they were measured
+	// under — the document's own change tracking. Y positions and page
+	// breaks are recomputed afterwards in bulk: a walk, not a measurement.
 	std::vector<Line> oldLines;
 	oldLines.swap(fLines);
-	std::vector<bool> used(fPrevSummaries.size(), false);
 	fMeasuredParas = 0;
 
 	for (int32 para = 0; para < fDoc->CountParagraphs(); para++) {
-		const char* text = fDoc->ParagraphText(para);
-		int32 len = fDoc->ParagraphLength(para);
-		int32 match = -1;
-		for (size_t s = 0; s < fPrevSummaries.size(); s++) {
-			if (used[s])
-				continue;
-			if (FingerprintMatch(fPrevSummaries[s], para) && match < 0) {
-				// verify length too (fingerprint stores it)
-				if (fPrevSummaries[s].textLen == len) {
-					match = (int32)s;
-					break;
-				}
-			}
-		}
-		(void)text;
-		if (match >= 0) {
-			const ParaSummary& s = fPrevSummaries[match];
-			used[match] = true;
-			for (int32 i = 0; i < s.lineCount; i++) {
-				Line line = oldLines[s.firstLine + i];
+		int32 id = fDoc->ParaId(para);
+		auto it = fPrevSummaries.find(id);
+		if (it != fPrevSummaries.end()
+			&& it->second.revision == fDoc->ParaRevision(para)
+			&& it->second.firstLine + it->second.lineCount
+				<= (int32)oldLines.size()) {
+			for (int32 i = 0; i < it->second.lineCount; i++) {
+				Line line = oldLines[it->second.firstLine + i];
 				line.para = para;
 				fLines.push_back(line);
 			}
@@ -538,61 +545,51 @@ void
 PWLayout::LayoutFull()
 {
 	fLines.clear();
+	fRows.clear();
 	fMeasuredParas = 0;
-	for (int32 p = 0; p < fDoc->CountParagraphs(); p++)
+	for (int32 p = 0; p < fDoc->CountParagraphs(); p++) {
+		fMeasuredParas++;
 		LayoutParagraph(p);
+	}
 	CacheAbsoluteStarts();
 	AssignLinesToPages();
 	BuildSummaries();
 	fPrevValid = true;
 }
 
-bool
-PWLayout::FingerprintMatch(const ParaSummary& s, int32 para) const
-{
-	if (s.textLen != fDoc->ParagraphLength(para))
-		return false;
-	if (!(s.fmt == fDoc->ParagraphFormat(para)))
-		return false;
-	const char* text = fDoc->ParagraphText(para);
-	int32 n = s.textLen < 32 ? s.textLen : 32;
-	if (n > 0 && memcmp(s.head, text, n) != 0)
-		return false;
-	if (s.textLen > 32) {
-		int32 tailN = s.textLen - 32 < 32 ? s.textLen - 32 : 32;
-		if (memcmp(s.tail, text + s.textLen - tailN, tailN) != 0)
-			return false;
-	}
-	return true;
-}
-
 void
 PWLayout::BuildSummaries()
 {
 	fPrevSummaries.clear();
+	fLiveParaIds.clear();
 	int32 i = 0;
 	while (i < (int32)fLines.size()) {
 		ParaSummary s;
-		s.para = fLines[i].para;
+		int32 para = fLines[i].para;
+		s.paraId = fDoc->ParaId(para);
+		s.revision = fDoc->ParaRevision(para);
 		s.firstLine = i;
-		float height = 0;
-		while (i < (int32)fLines.size() && fLines[i].para == s.para) {
-			height += fLines[i].height;
+		while (i < (int32)fLines.size() && fLines[i].para == para)
 			i++;
-		}
 		s.lineCount = i - s.firstLine;
-		s.height = height;
-		const char* text = fDoc->ParagraphText(s.para);
-		s.textLen = fDoc->ParagraphLength(s.para);
-		int32 n = s.textLen < 32 ? s.textLen : 32;
-		if (n > 0)
-			memcpy(s.head, text, n);
-		if (s.textLen > 32) {
-			int32 tailN = s.textLen - 32 < 32 ? s.textLen - 32 : 32;
-			memcpy(s.tail, text + s.textLen - tailN, tailN);
-		}
-		s.fmt = fDoc->ParagraphFormat(s.para);
-		fPrevSummaries.push_back(s);
+		fPrevSummaries[s.paraId] = s;
+		fLiveParaIds.insert(s.paraId);
+	}
+	fPrevEpoch = fSetupEpoch;
+	PruneRowCache();
+}
+
+void
+PWLayout::PruneRowCache()
+{
+	// Row geometry for paragraphs that no longer exist (their ids never
+	// come back) must not linger: the map would grow forever and — worse —
+	// a stale entry could be served for an index that shifted onto a table.
+	for (auto it = fRows.begin(); it != fRows.end();) {
+		if (fLiveParaIds.find(it->first) == fLiveParaIds.end())
+			it = fRows.erase(it);
+		else
+			++it;
 	}
 }
 
@@ -921,9 +918,7 @@ PWLayout::XYToOffset(BPoint p) const
 	// Walk the line accumulating width until we pass p.x.
 	float x = l.x;
 	int32 b = l.startPara;
-	int32 lastBoundary = b;
 	while (b < l.startPara + l.length) {
-		lastBoundary = b;
 		const PWRun* r = &runs[0];
 		for (const PWRun& rr : runs)
 			if (b >= rr.start && b < rr.start + rr.length) { r = &rr; break; }
@@ -932,7 +927,9 @@ PWLayout::XYToOffset(BPoint p) const
 		int32 next = UTF8Next(text, b, paraLen);
 		if (next > l.startPara + l.length)
 			next = l.startPara + l.length;
-		float w = f.StringWidth(text + b, next - b);
+		float iw = 0, ih = 0;
+		ImageSizeAt(l.para, b, &iw, &ih);
+		float w = iw > 0 ? iw : f.StringWidth(text + b, next - b);
 		if (x + w / 2 > p.x)
 			break;
 		x += w;
@@ -960,7 +957,13 @@ PWLayout::SlackPerGap(int32 lineIndex) const
 			gaps++;
 	if (gaps == 0)
 		return 0;
-	float slack = fSetup.TextWidth() - l.width;
+	// The slack is against THIS paragraph's column — indents and the list
+	// hang shrink it; the full text width made indented justified text
+	// run past the right edge.
+	const PWParaFormat& fmt = fDoc->ParagraphFormat(l.para);
+	float column = fSetup.TextWidth() - fmt.indentLeft - fmt.indentRight
+		- (fmt.listKind != PW_LIST_NONE ? 18.0f : 0.0f);
+	float slack = column - l.width;
 	return slack > 0 ? slack / gaps : 0;
 }
 
@@ -977,7 +980,6 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 		const RowLayout* row = RowAt(l.para);
 		if (row) {
 			for (const CellLayout& cell : row->cells) {
-				const PWRun* r = runs.empty() ? NULL : &runs[0];
 				float cellTop = l.y;
 				for (const CellLine& cl : cell.lines) {
 					int32 b = cl.startByte;
@@ -1086,11 +1088,25 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 			}
 			continue;
 		}
-		// justified: split at spaces so each gap can stretch
+		// justified: split at spaces so each gap can stretch; images are
+		// their own segments (they never stretch, and their marker's bytes
+		// are not text to measure)
 		while (b < segEnd) {
+			float iw = 0, ih = 0;
+			ImageSizeAt(l.para, b, &iw, &ih);
+			if (iw > 0) {
+				pushSeg(r, b, b + 3, x);	// the marker is 3 bytes
+				b += 3;
+				continue;
+			}
 			int32 word = b;
-			while (word < segEnd && text[word] != ' ')
+			while (word < segEnd && text[word] != ' ') {
+				float w2 = 0, h2 = 0;
+				ImageSizeAt(l.para, word, &w2, &h2);
+				if (w2 > 0)
+					break;	// an image ends the word run
 				word++;
+			}
 			if (word > b)
 				pushSeg(r, b, word, x);
 			if (word < segEnd) {

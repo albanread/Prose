@@ -11,6 +11,8 @@
 #include <Point.h>
 #include <Rect.h>
 
+#include <map>
+#include <set>
 #include <vector>
 
 #include "PWDocument.h"
@@ -128,7 +130,8 @@ public:
 	void	LayoutFull();
 
 	// The document may be null-sized; Layout() must still produce one page.
-	void	SetDocument(const PWDocument* doc) { fDoc = doc; }
+	void	SetDocument(const PWDocument* doc)
+			{ fDoc = doc; fPrevValid = false; }
 
 private:
 	void	LayoutParagraph(int32 para);
@@ -154,19 +157,19 @@ private:
 
 	static const float kPageGap;	// grey gap between pages, points
 
+	// Incremental reuse bookkeeping: keyed by the paragraph's stable id,
+	// holding the revision and line span it was last measured under.
+	// A paragraph is reused iff id, revision AND the layout's page-setup
+	// epoch all match — the document tells us what changed.
 	struct ParaSummary {
-		int32	para = 0;
+		int32	paraId = 0;
+		uint32	revision = 0;
 		int32	firstLine = 0;
 		int32	lineCount = 0;
-		float	height = 0;
-		int32	textLen = -1;
-		char	head[32] = { 0 };
-		char	tail[32] = { 0 };
-		PWParaFormat fmt;
 	};
-	bool	FingerprintMatch(const ParaSummary& s, int32 para) const;
 	void	BuildSummaries();
 	void	LayoutTableRow(int32 para);
+	void	PruneRowCache();
 	float	TextWidthOfSpan(const char* text, int32 from, int32 to) const;
 	float	MeasureWithRuns(const char* text, int32 from, int32 to) const;
 	float	ByteWidthOfSpan(const char* text, int32 from, int32 to,
@@ -174,10 +177,14 @@ private:
 	PWCharFormat FormatForSpan(const std::vector<PWRun>& runs,
 			int32 at) const;
 	mutable const std::vector<PWRun>* fMeasureRuns = NULL;
-	std::vector<ParaSummary> fPrevSummaries;
+	std::map<int32, ParaSummary> fPrevSummaries;	// para id -> summary
+	// Table row geometry, keyed by paragraph id (indices shift; ids do not)
 	std::map<int32, RowLayout> fRows;
+	std::set<int32> fLiveParaIds;
 	bool	fPrevValid = false;
 	bool	fIncremental = true;
+	uint32	fSetupEpoch = 0;	// bumped by every page-setup change
+	uint32	fPrevEpoch = 0;	// the epoch the current lines were measured in
 	int32	fMeasuredParas = 0;
 public:
 	static float Gap() { return kPageGap; }

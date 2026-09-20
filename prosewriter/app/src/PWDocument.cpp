@@ -1,6 +1,7 @@
 #include "PWDocument.h"
 
 #include <Bitmap.h>
+#include <Entry.h>
 #include <File.h>
 #include <String.h>
 
@@ -14,7 +15,11 @@ PWCharFormat::Archive(BMessage* into) const
 {
 	into->AddString("family", family);
 	into->AddFloat("size", size);
-	into->AddInt32("color", *(const int32*)&color);
+	// same byte layout the old pointer-pun wrote (little-endian arm64):
+	// red | green<<8 | blue<<16 | alpha<<24
+	int32 c = (int32)color.red | ((int32)color.green << 8)
+		| ((int32)color.blue << 16) | ((int32)color.alpha << 24);
+	into->AddInt32("color", c);
 	into->AddBool("bold", bold);
 	into->AddBool("italic", italic);
 	into->AddBool("underline", underline);
@@ -31,7 +36,8 @@ PWCharFormat::Unarchive(const BMessage* from)
 	from->FindFloat("size", &size);
 	int32 c = 0;
 	if (from->FindInt32("color", &c) == B_OK)
-		color = *(const rgb_color*)&c;
+		color = rgb_color{ (uint8)(c & 0xFF), (uint8)((c >> 8) & 0xFF),
+			(uint8)((c >> 16) & 0xFF), (uint8)((c >> 24) & 0xFF) };
 	from->FindBool("bold", &bold);
 	from->FindBool("italic", &italic);
 	from->FindBool("underline", &underline);
@@ -101,9 +107,35 @@ PWDocument::PWDocument()
 {
 	fDefault = MakeDefaultFormat();
 	Para p;
+	p.id = fNextParaId++;
 	p.text = "";
 	p.runs.push_back(PWRun{ 0, 0, fDefault });
 	fParas.push_back(p);
+}
+
+int32
+PWDocument::ParaId(int32 para) const
+{
+	if (para < 0 || para >= (int32)fParas.size())
+		return 0;
+	return fParas[para].id;
+}
+
+uint32
+PWDocument::ParaRevision(int32 para) const
+{
+	if (para < 0 || para >= (int32)fParas.size())
+		return 0;
+	return fParas[para].revision;
+}
+
+const std::map<int32, PWDocument::PWImage>&
+PWDocument::ParagraphImages(int32 para) const
+{
+	static const std::map<int32, PWImage> kEmpty;
+	if (para < 0 || para >= (int32)fParas.size())
+		return kEmpty;
+	return fParas[para].images;
 }
 
 void
@@ -263,6 +295,20 @@ PWDocument::PushUndo(const UndoStep& step)
 	fRedo.clear();
 }
 
+// One UTF-8 character (so typing "é" coalesces like typing "e" does)?
+static bool
+IsSingleUTF8Char(const char* s)
+{
+	if (!s || !s[0])
+		return false;
+	unsigned char c = (unsigned char)s[0];
+	int32 step = 1;
+	if ((c & 0xE0) == 0xC0) step = 2;
+	else if ((c & 0xF0) == 0xE0) step = 3;
+	else if ((c & 0xF8) == 0xF0) step = 4;
+	return (int32)strlen(s) == step;
+}
+
 void
 PWDocument::Insert(int32 offset, const char* text, const PWCharFormat* fmt)
 {
@@ -326,6 +372,19 @@ PWDocument::Insert(int32 offset, const char* text, const PWCharFormat* fmt)
 	p.text.insert(inPara, text);
 	p.runs.swap(runs);
 	NormalizeRuns(p);
+	// Images at/after the insertion point move with the text — their keys
+	// are byte offsets. (InsertImage registers AFTER inserting the marker,
+	// so it does not shift itself.)
+	if (!p.images.empty()) {
+		std::map<int32, PWImage> shifted;
+		for (auto& kv : p.images) {
+			int32 key = kv.first >= inPara ? kv.first + (int32)strlen(text)
+				: kv.first;
+			shifted[key] = kv.second;
+		}
+		p.images.swap(shifted);
+	}
+	p.revision++;
 
 	UndoStep s;
 	s.kind = UndoStep::INSERT;
@@ -333,12 +392,13 @@ PWDocument::Insert(int32 offset, const char* text, const PWCharFormat* fmt)
 	s.length = (int32)strlen(text);
 	s.text = text;
 	s.coalesce = fCoalesce;
-	// coalesce with a previous single-char insert directly before us
+	// coalesce with a previous single-character insert directly before us
 	if (fCoalesce && !fUndo.empty() && fUndo.back().kind == UndoStep::INSERT
 		&& fUndo.back().coalesce
 		&& fUndo.back().offset + fUndo.back().length == offset
-		&& strlen(text) == 1) {
+		&& IsSingleUTF8Char(text)) {
 		fUndo.back().length += (int32)strlen(text);
+		fUndo.back().text.Append(text, (int32)strlen(text));
 		fModified = true;
 		fPlainTextValid = false;
 		return;
@@ -346,23 +406,16 @@ PWDocument::Insert(int32 offset, const char* text, const PWCharFormat* fmt)
 	PushUndo(s);
 }
 
-void
-PWDocument::Remove(int32 offset, int32 length)
+std::vector<PWRun>
+PWDocument::CaptureRuns(int32 offset, int32 length) const
 {
-	if (length <= 0 || offset < 0 || offset >= Length())
-		return;
-	if (offset + length > Length())
-		length = Length() - offset;
-
-	// Capture what is being removed, as text + runs, for undo.
-	BString removed;
-	GetText(offset, length, &removed);
-	std::vector<PWRun> savedRuns;
+	// The runs covering [offset, offset+length), starts relative to offset.
+	std::vector<PWRun> saved;
 	int32 at = offset;
 	int32 paraIdx, inPara;
 	Locate(offset, &paraIdx, &inPara);
-	while (at < offset + length) {
-		Para& p = fParas[paraIdx];
+	while (at < offset + length && paraIdx < (int32)fParas.size()) {
+		const Para& p = fParas[paraIdx];
 		int32 paraLen = (int32)p.text.size();
 		int32 take = offset + length - at;
 		bool crosses = (inPara + take > paraLen);
@@ -374,9 +427,46 @@ PWDocument::Remove(int32 offset, int32 length)
 				int32 to = inPara + take < r.start + r.length
 					? inPara + take : r.start + r.length;
 				if (to > from)
-					savedRuns.push_back(PWRun{ at - offset + (from - inPara),
+					saved.push_back(PWRun{ at - offset + (from - inPara),
 						to - from, r.format });
 			}
+		}
+		if (crosses && paraIdx + 1 < (int32)fParas.size()) {
+			at += take + 1;
+			paraIdx++;
+			inPara = 0;
+		} else {
+			at += take;
+			inPara += take;
+		}
+	}
+	return saved;
+}
+
+void
+PWDocument::Remove(int32 offset, int32 length)
+{
+	if (length <= 0 || offset < 0 || offset >= Length())
+		return;
+	if (offset + length > Length())
+		length = Length() - offset;
+
+	// Capture what is being removed — text, runs and images — for undo.
+	BString removed;
+	GetText(offset, length, &removed);
+	std::vector<PWRun> savedRuns = CaptureRuns(offset, length);
+	std::map<int32, PWImage> savedImages;
+	int32 at = offset;
+	int32 paraIdx, inPara;
+	Locate(offset, &paraIdx, &inPara);
+	while (at < offset + length) {
+		Para& p = fParas[paraIdx];
+		int32 paraLen = (int32)p.text.size();
+		int32 take = offset + length - at;
+		bool crosses = (inPara + take > paraLen);
+		if (crosses)
+			take = paraLen - inPara;
+		if (take > 0) {
 			// remove bytes [inPara, inPara+take) with run surgery:
 			// rebuild the run list around the hole
 			std::vector<PWRun> runs;
@@ -395,7 +485,10 @@ PWDocument::Remove(int32 offset, int32 length)
 							rEnd - inPara - take, r.format });
 				}
 			}
-			// drop images inside the removed range; shift those after
+			// images inside the removed range go to the undo step (keyed
+			// by global offset — undo re-registers them after the text);
+			// those after it shift left
+			int32 paraBase = ParaStart(paraIdx);
 			std::map<int32, PWImage> kept;
 			for (auto& kv : p.images) {
 				if (kv.first < inPara)
@@ -403,31 +496,41 @@ PWDocument::Remove(int32 offset, int32 length)
 				else if (kv.first >= inPara + take)
 					kept[kv.first - take] = kv.second;
 				else
-					delete kv.second.bitmap;
+					savedImages[paraBase + kv.first] = kv.second;
 			}
 			p.images.swap(kept);
 			p.text.erase(inPara, take);
 			p.runs.swap(runs);
 			NormalizeRuns(p);
+			p.revision++;
 		}
 		if (crosses && paraIdx + 1 < (int32)fParas.size()) {
-			// also swallow the separator: merge the next paragraph in
+			// also swallow the separator: merge the next paragraph in —
+			// its text, runs AND images
 			Para& next = fParas[paraIdx + 1];
 			int32 boundary = (int32)p.text.size();
 			for (PWRun& r : next.runs)
 				r.start += boundary;
+			for (auto& kv : next.images)
+				p.images[kv.first + boundary] = kv.second;
+			next.images.clear();
 			p.text += next.text;
 			p.runs.insert(p.runs.end(), next.runs.begin(), next.runs.end());
 			fParas.erase(fParas.begin() + paraIdx + 1);
 			inPara = boundary;
 			at += take + 1;
+			p.revision++;
 		} else {
 			at += take;
 			inPara += take;
 		}
 	}
-	if (fParas.empty())
-		fParas.push_back(Para{ { PWRun{ 0, 0, fDefault } }, "", PWParaFormat() });
+	if (fParas.empty()) {
+		Para fresh;
+		fresh.id = fNextParaId++;
+		fresh.runs.push_back(PWRun{ 0, 0, fDefault });
+		fParas.push_back(fresh);
+	}
 
 	UndoStep s;
 	s.kind = UndoStep::REMOVE;
@@ -435,6 +538,7 @@ PWDocument::Remove(int32 offset, int32 length)
 	s.length = length;
 	s.text = removed;
 	s.runs = savedRuns;
+	s.images.swap(savedImages);
 	PushUndo(s);
 }
 
@@ -443,6 +547,8 @@ PWDocument::ApplyFormat(int32 offset, int32 length, const PWCharFormat& fmt)
 {
 	if (length <= 0)
 		return;
+	// The runs as they are now, so a FORMAT undo can restore them.
+	std::vector<PWRun> savedRuns = CaptureRuns(offset, length);
 	// Walk the range splitting runs at range bounds and restyling.
 	int32 at = offset;
 	while (at < offset + length) {
@@ -478,13 +584,16 @@ PWDocument::ApplyFormat(int32 offset, int32 length, const PWCharFormat& fmt)
 			}
 			p.runs.swap(runs);
 			NormalizeRuns(p);
+			p.revision++;
 			at += take;
 		}
 	}
-	// A coarse undo: capture is skipped in sprint 1's fast path; format undo
-	// arrives with the styles panel in sprint 2.
-	fModified = true;
-	fPlainTextValid = false;
+	UndoStep s;
+	s.kind = UndoStep::FORMAT;
+	s.offset = offset;
+	s.length = length;
+	s.runs = savedRuns;
+	PushUndo(s);
 }
 
 void
@@ -497,6 +606,7 @@ PWDocument::SetParaFormat(int32 para, const PWParaFormat& fmt)
 	s.offset = para;
 	s.paraFormat = fParas[para].format;
 	fParas[para].format = fmt;
+	fParas[para].revision++;
 	PushUndo(s);
 }
 
@@ -507,6 +617,7 @@ PWDocument::SplitPara(int32 offset)
 	Locate(offset, &paraIdx, &inPara);
 	Para& p = fParas[paraIdx];
 	Para next;
+	next.id = fNextParaId++;
 	next.format = p.format;
 	next.text = p.text.substr(inPara);
 	next.runs.clear();
@@ -538,6 +649,7 @@ PWDocument::SplitPara(int32 offset)
 			r.length = inPara - r.start;
 	NormalizeRuns(p);
 	NormalizeRuns(next);
+	p.revision++;
 	fParas.insert(fParas.begin() + paraIdx + 1, next);
 
 	UndoStep s;
@@ -546,31 +658,6 @@ PWDocument::SplitPara(int32 offset)
 	s.length = 1;
 	s.text = "\n";
 	s.coalesce = false;
-	PushUndo(s);
-}
-
-void
-PWDocument::MergeWithNext(int32 para)
-{
-	if (para < 0 || para + 1 >= (int32)fParas.size())
-		return;
-	Para& p = fParas[para];
-	Para& next = fParas[para + 1];
-	int32 boundary = (int32)p.text.size();
-	for (auto& kv : next.images)
-		p.images[kv.first + boundary] = kv.second;
-	next.images.clear();
-	for (PWRun& r : next.runs)
-		r.start += boundary;
-	p.text += next.text;
-	p.runs.insert(p.runs.end(), next.runs.begin(), next.runs.end());
-	fParas.erase(fParas.begin() + para + 1);
-	NormalizeRuns(p);
-
-	UndoStep s;
-	s.kind = UndoStep::REMOVE;
-	s.offset = boundary;
-	s.length = 1;
 	PushUndo(s);
 }
 
@@ -604,11 +691,31 @@ PWDocument::Undo()
 				if (r.length > 0)
 					ApplyFormat(s.offset + r.start, r.length, r.format);
 			}
+			// And the images the removal deleted, wherever their global
+			// offsets now land.
+			for (auto& kv : s.images) {
+				int32 para, inPara;
+				Locate(kv.first, &para, &inPara);
+				fParas[para].images[inPara] = kv.second;
+				fParas[para].revision++;
+			}
+			break;
+		}
+		case UndoStep::FORMAT:
+		{
+			// What is there now becomes the redo; the saved runs go back.
+			fRedo.back().runs = CaptureRuns(s.offset, s.length);
+			for (const PWRun& r : s.runs) {
+				if (r.length > 0)
+					ApplyFormat(s.offset + r.start, r.length, r.format);
+			}
 			break;
 		}
 		case UndoStep::PARAFORMAT:
-			if (s.offset < (int32)fParas.size())
+			if (s.offset < (int32)fParas.size()) {
 				fParas[s.offset].format = s.paraFormat;
+				fParas[s.offset].revision++;
+			}
 			break;
 		default:
 			break;
@@ -639,10 +746,21 @@ PWDocument::Redo()
 		case UndoStep::REMOVE:
 			Remove(s.offset, s.length);
 			break;
+		case UndoStep::FORMAT:
+		{
+			std::vector<PWRun> cur = CaptureRuns(s.offset, s.length);
+			for (const PWRun& r : s.runs) {
+				if (r.length > 0)
+					ApplyFormat(s.offset + r.start, r.length, r.format);
+			}
+			s.runs = cur;	// so undoing this redo restores what was there
+			break;
+		}
 		case UndoStep::PARAFORMAT:
 			if (s.offset < (int32)fParas.size()) {
 				PWParaFormat cur = fParas[s.offset].format;
 				fParas[s.offset].format = s.paraFormat;
+				fParas[s.offset].revision++;
 				s.paraFormat = cur;
 			}
 			break;
@@ -717,6 +835,7 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 	BMessage paraMsg;
 	for (int32 i = 0; msg->FindMessage("para", i, &paraMsg) == B_OK; i++) {
 		Para p;
+		p.id = fNextParaId++;
 		const char* text = NULL;
 		if (paraMsg.FindString("text", &text) == B_OK)
 			p.text = text;
@@ -727,8 +846,10 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 			runMsg.FindInt32("start", &r.start);
 			runMsg.FindInt32("length", &r.length);
 			r.format.Unarchive(&runMsg);
+			// An empty family means "inherit the default" — fill the family
+			// only; bold/size/colour are the run's own and must survive.
 			if (r.format.family[0] == '\0')
-				r.format = def;
+				strlcpy(r.format.family, def.family, sizeof(font_family));
 			p.runs.push_back(r);
 		}
 		if (p.runs.empty())
@@ -753,7 +874,7 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 				if (bmp && bmp->IsValid()
 					&& bmp->ImportBits(bits, (int32)size,
 						(int32)(bw * 4), 0, B_RGB32) == B_OK)
-					img.bitmap = bmp;
+					img.bitmap.reset(bmp);
 				else
 					delete bmp;
 			}
@@ -761,8 +882,12 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 		}
 		fParas.push_back(p);
 	}
-	if (fParas.empty())
-		fParas.push_back(Para{ { PWRun{ 0, 0, def } }, "", PWParaFormat() });
+	if (fParas.empty()) {
+		Para fresh;
+		fresh.id = fNextParaId++;
+		fresh.runs.push_back(PWRun{ 0, 0, def });
+		fParas.push_back(fresh);
+	}
 	msg->FindString("header", &fHeader);
 	msg->FindString("footer", &fFooter);
 	BMessage styleMsg;
@@ -790,15 +915,16 @@ PWDocument::InsertImage(int32 offset, BBitmap* bitmap, float widthPt,
 		return B_BAD_VALUE;
 	int32 para, inPara;
 	Locate(offset, &para, &inPara);
-	// register first, then insert the marker so the map key stays valid
+	// Insert the marker FIRST, then register the image at its offset —
+	// Insert() shifts image keys at/after itself, so registering first
+	// would move the image off its own marker.
+	Insert(offset, kObjectChar, NULL);
 	PWImage image;
-	image.bitmap = bitmap;
+	image.bitmap.reset(bitmap);
 	image.widthPt = widthPt;
 	image.heightPt = heightPt;
 	fParas[para].images[inPara] = image;
-	Insert(offset, kObjectChar, NULL);
-	fModified = true;
-	fPlainTextValid = false;
+	fParas[para].revision++;
 	return B_OK;
 }
 
@@ -940,16 +1066,52 @@ PWDocument::SaveToFile(const char* path) const
 	status_t err = SaveToMessage(&msg);
 	if (err != B_OK)
 		return err;
-	BFile file;
-	err = file.SetTo(path, B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
-	if (err != B_OK)
-		return err;
 	ssize_t size = msg.FlattenedSize();
-	char* buffer = new char[size];
-	if (msg.Flatten(buffer, size) == B_OK)
-		err = file.Write(buffer, size);
-	else
-		err = B_ERROR;
+	char* buffer = new (std::nothrow) char[size];
+	if (buffer == NULL)
+		return B_NO_MEMORY;
+	err = msg.Flatten(buffer, size);
+	if (err != B_OK) {
+		delete[] buffer;
+		return err;
+	}
+
+	// Atomic save: write beside the target, flush, rename over it. The
+	// user's document is never B_ERASE_FILEd, and a full disk or crash
+	// mid-save leaves the previous file intact. (And the return value is
+	// a real status: the old code returned Write()'s byte count, so every
+	// successful save read as a failure to its callers.)
+	BString tmpPath(path);
+	tmpPath << ".pwtmp";
+	{
+		BFile file;
+		err = file.SetTo(tmpPath.String(),
+			B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+		if (err == B_OK) {
+			ssize_t written = 0;
+			while (written < size) {
+				ssize_t n = file.Write(buffer + written, size - written);
+				if (n <= 0) {
+					err = n < 0 ? (status_t)n : B_ERROR;
+					break;
+				}
+				written += n;
+			}
+			if (err == B_OK)
+				err = file.Sync();
+		}
+	}
+	if (err == B_OK) {
+		BEntry entry;
+		err = entry.SetTo(tmpPath.String());
+		if (err == B_OK)
+			err = entry.Rename(path, true);
+	}
+	if (err != B_OK) {
+		BEntry corpse;
+		if (corpse.SetTo(tmpPath.String()) == B_OK)
+			corpse.Remove();
+	}
 	delete[] buffer;
 	return err;
 }
@@ -961,11 +1123,26 @@ PWDocument::LoadFromFile(const char* path)
 	status_t err = file.SetTo(path, B_READ_ONLY);
 	if (err != B_OK)
 		return err;
-	// A flattened BMessage starts with its magic; read whole and unflatten
+	// A flattened BMessage starts with its magic; read whole and unflatten.
 	off_t size = 0;
 	file.GetSize(&size);
-	char* buffer = new char[size];
-	ssize_t got = file.Read(buffer, size);
+	if (size <= 0 || size > 256LL * 1024 * 1024)
+		return B_BAD_VALUE;
+	char* buffer = new (std::nothrow) char[size];
+	if (buffer == NULL)
+		return B_NO_MEMORY;
+	// read in a loop: a single Read() may return short
+	ssize_t got = 0;
+	while (got < (ssize_t)size) {
+		ssize_t n = file.Read(buffer + got, size - got);
+		if (n < 0) {
+			got = -1;
+			break;
+		}
+		if (n == 0)
+			break;
+		got += n;
+	}
 	if (got < 4) {
 		delete[] buffer;
 		return B_ERROR;
@@ -1044,7 +1221,5 @@ PWDocument::ReplaceAll(const char* find, const char* replace,
 
 PWDocument::~PWDocument()
 {
-	for (Para& p : fParas)
-		for (auto& kv : p.images)
-			delete kv.second.bitmap;
+	// Paragraphs own their bitmaps through shared_ptr; nothing to do.
 }
