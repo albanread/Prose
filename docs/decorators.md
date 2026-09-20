@@ -160,9 +160,13 @@ Default, and the Appearance menu had one entry.
 
 ## 3. What Prose adds: two conventional frames
 
-Patch `0068`, `src/add-ons/decorators/ProseDecorator` and
+Patches `0068` and `0069`: `src/add-ons/decorators/ProseDecorator` and
 `ProseRightDecorator`, packaged into `haiku.hpkg` by
-`build/jam/packages/Haiku`.
+`build/jam/packages/Haiku`. (0069 is the first bug found: a window that
+grew taller kept the wallpaper in the rows its left strip grew into,
+because `_ResizeBy` never marked them dirty and the desktop repaints only
+what a resize exposes of the client area. TabDecorator marks that strip;
+now this one does.)
 
 | | Prose | Prose Right |
 |---|---|---|
@@ -211,13 +215,21 @@ The design, and why each part is the way it is:
 
 ### Verified
 
-In a guest, with the add-ons copied to `~/config/non-packaged/add-ons/decorators`
-and switched live with `setdecor`: both draw for titled, document and modal
-windows in focused and unfocused states; a scripted click on the close button
-of the right variant closes the window (so the footprint, hit-testing and
-the behaviour agree); switching between the two and back does not disturb
-the windows. Not yet exercised: the floating look, a stacked bar on screen,
-and a resize drag.
+On a saved test image, headless, with the sequence scripted in the guest and
+captures taken on the host (`docs/automation.md`): both variants draw titled
+(Terminal), document (StyledEdit) and modal (alert) windows, focused and
+unfocused; the floating look (Terminal's Find window) gets the smaller bar
+in the plain font; a scripted click on the close button closes the window,
+so footprint, hit-testing and behaviour agree; switching decorators live and
+back leaves every window intact. Resizing, the case patch 0069 fixes: a
+window moved, grown thirty times by 15 px and once by 600×800 through
+`hey StyledEdit set Frame of Window "Untitled 1" to "BRect(…)"` keeps every
+strip painted, where before the fix the rows the left strip grew into kept
+the wallpaper. (StyledEdit's `Window 0` is its hidden Open panel; the
+document must be addressed by title.) Not yet exercised: a stacked bar on
+screen and the resize highlight during a drag — both need a drag with a
+modifier held, which the automation cannot do yet — and minimize and zoom
+clicks.
 
 ### Using them
 
