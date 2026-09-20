@@ -7,6 +7,9 @@
 #include <RadioButton.h>
 #include <PrintJob.h>
 #include <PopUpMenu.h>
+#include <GroupLayout.h>
+#include <GroupLayoutBuilder.h>
+#include <LayoutBuilder.h>
 #include <ListView.h>
 #include <MenuField.h>
 #include <FindDirectory.h>
@@ -169,59 +172,90 @@ PaperIndex(const PWPageSetup& s)
 	return 0;
 }
 
+// ---- dialogs, the StyledEdit way (ReplaceWindow pattern) ----
+// Panels hide instead of quitting, send their payload to the owner
+// handler on the owner's looper, use the layout API, make their primary
+// button default, and close on W.
+class PWPanelWindow : public BWindow {
+public:
+	PWPanelWindow(BRect frame, const char* title, PWWindow* owner)
+		:
+		BWindow(frame, title, B_FLOATING_WINDOW,
+			B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS
+			| B_AUTO_UPDATE_SIZE_LIMITS, B_CURRENT_WORKSPACE),
+		fOwner(owner)
+	{
+		AddShortcut('W', B_COMMAND_KEY, new BMessage(MSG_PANEL_HIDE));
+	}
+
+	void SendToOwner(BMessage* message)
+	{
+		fOwner->Looper()->PostMessage(message, fOwner);
+	}
+
+protected:
+	PWWindow*	fOwner;
+	enum { MSG_PANEL_HIDE = 'pWpH' };
+};
+
 // A small non-modal settings window: paper, orientation, margins.
-class PWPageSetupWindow : public BWindow {
+// Page setup, StyledEdit pattern: fields in, one message, hide.
+class PWPageSetupWindow : public PWPanelWindow {
 public:
 	PWPageSetupWindow(PWWindow* owner, PWPageSetup setup)
 		:
-		BWindow(BRect(0, 0, 300, 230), "Page setup",
-			B_TITLED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
-			B_ASYNCHRONOUS_CONTROLS),
-		fOwner(owner), fSetup(setup)
+		PWPanelWindow(BRect(0, 0, 300, 240), "Page setup", owner),
+		fSetup(setup)
 	{
 		fPaper = new BPopUpMenu("paper");
 		for (int i = 0; kPapers[i].name; i++) {
 			BMessage* msg = new BMessage('pprP');
 			msg->AddInt32("index", i);
-			BMenuItem* it = new BMenuItem(kPapers[i].name, msg);
-			fPaper->AddItem(it);
+			fPaper->AddItem(new BMenuItem(kPapers[i].name, msg));
 		}
 		fPaper->ItemAt(PaperIndex(fSetup))->SetMarked(true);
-		BMenuField* paperField = new BMenuField(BRect(10, 8, 200, 26),
-			"paperField", "Paper:", fPaper);
-		AddChild(paperField);
+		fPaperField = new BMenuField("paperField", "Paper:", fPaper);
 
-		fPortrait = new BRadioButton(BRect(10, 34, 200, 50), "portrait",
-			"Portrait", new BMessage('pprO'));
-		fLandscape = new BRadioButton(BRect(10, 52, 200, 68), "landscape",
-			"Landscape", new BMessage('pprO'));
-		AddChild(fPortrait);
-		AddChild(fLandscape);
+		fPortrait = new BRadioButton("portrait", "Portrait",
+			new BMessage('pprO'));
+		fLandscape = new BRadioButton("landscape", "Landscape",
+			new BMessage('pprO'));
 		bool landscape = fSetup.pageWidth > fSetup.pageHeight;
 		(landscape ? fLandscape : fPortrait)->SetValue(B_CONTROL_ON);
 
 		const char* labels[4] = { "Left:", "Right:", "Top:", "Bottom:" };
 		float* values[4] = { &fSetup.marginLeft, &fSetup.marginRight,
 			&fSetup.marginTop, &fSetup.marginBottom };
+		char initial[4][16];
 		for (int i = 0; i < 4; i++) {
-			char name[16], text[16];
-			snprintf(name, sizeof(name), "m%d", i);
-			snprintf(text, sizeof(text), "%d", (int)*values[i]);
-			fMargins[i] = new BTextControl(BRect(80, 74 + i * 24, 200, 92 + i * 24),
-				name, labels[i], text, NULL);
-			fMargins[i]->SetDivider(50);
-			AddChild(fMargins[i]);
+			snprintf(initial[i], sizeof(initial[i]), "%d",
+				(int)*values[i]);
+			fMargins[i] = new BTextControl(BString("m") << i,
+				labels[i], initial[i], NULL);
+			fMargins[i]->SetDivider(52);
 		}
+		BButton* apply = new BButton("apply", "Apply",
+			new BMessage(PWWindow::APPLY_SETUP_MSG));
+		BButton* cancel = new BButton("cancel", "Close",
+			new BMessage(MSG_PANEL_HIDE));
+		apply->MakeDefault(true);
 
-		AddChild(new BButton(BRect(105, 178, 175, 198), "ok", "Apply",
-			new BMessage(PWWindow::APPLY_SETUP_MSG)));
-		AddChild(new BButton(BRect(185, 178, 255, 198), "cancel", "Close",
-			new BMessage(B_QUIT_REQUESTED)));
-
-		AddToSubset(owner);
-		float left = owner->Frame().left + 40, top = owner->Frame().top + 80;
-		MoveTo(left, top);
-		SetType(B_FLOATING_WINDOW);
+		SetLayout(new BGroupLayout(B_VERTICAL));
+		AddChild(BGroupLayoutBuilder(B_VERTICAL, 4)
+			.Add(fPaperField)
+			.Add(fPortrait)
+			.Add(fLandscape)
+			.Add(fMargins[0])
+			.Add(fMargins[1])
+			.Add(fMargins[2])
+			.Add(fMargins[3])
+			.AddGroup(B_HORIZONTAL, 10)
+				.Add(apply)
+				.AddGlue()
+				.Add(cancel)
+			.End()
+			.SetInsets(10, 10, 10, 10)
+		);
 	}
 
 	void	MessageReceived(BMessage* message) override
@@ -234,8 +268,8 @@ public:
 						index = i;
 				bool landscape = fLandscape->Value() == B_CONTROL_ON;
 				float w = kPapers[index].width, h = kPapers[index].height;
-				if (landscape && w < h) { float t = w; w = h; h = t; }
-				if (!landscape && w > h) { float t = w; w = h; h = t; }
+				if (landscape && w < h) { float x = w; w = h; h = x; }
+				if (!landscape && w > h) { float x = w; w = h; h = x; }
 				fSetup.pageWidth = w;
 				fSetup.pageHeight = h;
 				fSetup.marginLeft = atof(fMargins[0]->Text());
@@ -256,87 +290,89 @@ public:
 				apply.AddFloat("mr", fSetup.marginRight);
 				apply.AddFloat("mt", fSetup.marginTop);
 				apply.AddFloat("mb", fSetup.marginBottom);
-				fOwner->PostMessage(&apply);
+				SendToOwner(&apply);
 				break;
 			}
+			case MSG_PANEL_HIDE:
+				if (!IsHidden())
+					Hide();
+				break;
 			default:
 				BWindow::MessageReceived(message);
 		}
 	}
 
-	bool	QuitRequested() override
-	{
-		fOwner->PostMessage('pWpC');	// let the owner forget us
-		return true;
-	}
-
 private:
-	PWWindow*		fOwner;
 	PWPageSetup		fSetup;
 	BPopUpMenu*		fPaper;
+	BMenuField*		fPaperField;
 	BRadioButton*	fPortrait;
 	BRadioButton*	fLandscape;
 	BTextControl*	fMargins[4];
 };
 
+
 // Header/footer editor with live field hints.
-class PWHeaderWindow : public BWindow {
+// Header and footer, copied from StyledEdit's ReplaceWindow: strings in,
+// one message to the owner, then hide.
+class PWHeaderWindow : public PWPanelWindow {
 public:
 	PWHeaderWindow(PWWindow* owner, const char* header, const char* footer)
 		:
-		BWindow(BRect(0, 0, 380, 160), "Header and footer",
-			B_TITLED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
-			B_ASYNCHRONOUS_CONTROLS),
-		fOwner(owner)
+		PWPanelWindow(BRect(0, 0, 320, 140), "Header and footer", owner)
 	{
-		fHeader = new BTextControl(BRect(10, 10, 360, 28), "header",
-			"Header:", header, NULL);
+		fHeader = new BTextControl("header", "Header:", header, NULL);
 		fHeader->SetDivider(56);
-		AddChild(fHeader);
-		fFooter = new BTextControl(BRect(10, 38, 360, 56), "footer",
-			"Footer:", footer, NULL);
+		fFooter = new BTextControl("footer", "Footer:", footer, NULL);
 		fFooter->SetDivider(56);
-		AddChild(fFooter);
-		BStringView* hint = new BStringView(BRect(10, 62, 360, 78), "hint",
+		BStringView* hint = new BStringView("hint",
 			"{page} and {pages} are replaced per page.");
-		AddChild(hint);
-		AddChild(new BButton(BRect(185, 92, 255, 112), "ok", "Apply",
-			new BMessage(PWWindow::APPLY_HEADER_MSG)));
-		AddChild(new BButton(BRect(265, 92, 345, 112), "cancel", "Close",
-			new BMessage(B_QUIT_REQUESTED)));
-		AddToSubset(owner);
-		MoveTo(owner->Frame().left + 60, owner->Frame().top + 120);
-		SetType(B_FLOATING_WINDOW);
+		BButton* apply = new BButton("apply", "Apply",
+			new BMessage(PWWindow::APPLY_HEADER_MSG));
+		BButton* cancel = new BButton("cancel", "Cancel",
+			new BMessage(MSG_PANEL_HIDE));
+		apply->MakeDefault(true);
+
+		SetLayout(new BGroupLayout(B_VERTICAL));
+		AddChild(BGroupLayoutBuilder(B_VERTICAL, 4)
+			.Add(fHeader)
+			.Add(fFooter)
+			.Add(hint)
+			.AddGroup(B_HORIZONTAL, 10)
+				.Add(apply)
+				.AddGlue()
+				.Add(cancel)
+			.End()
+			.SetInsets(10, 10, 10, 10)
+		);
+		fHeader->MakeFocus();
 	}
 
 	void	MessageReceived(BMessage* message) override
 	{
 		switch (message->what) {
 			case PWWindow::APPLY_HEADER_MSG: {
-				// the owner's looper applies: touching its document or
-				// view from here crashed the app (2026-09-20)
 				BMessage apply(PWWindow::APPLY_HEADER_MSG);
 				apply.AddString("header", fHeader->Text());
 				apply.AddString("footer", fFooter->Text());
-				fOwner->PostMessage(&apply);
+				SendToOwner(&apply);
+				PostMessage(MSG_PANEL_HIDE);
 				break;
 			}
+			case MSG_PANEL_HIDE:
+				if (!IsHidden())
+					Hide();
+				break;
 			default:
 				BWindow::MessageReceived(message);
 		}
 	}
 
-	bool	QuitRequested() override
-	{
-		fOwner->PostMessage('pWhC');
-		return true;
-	}
-
 private:
-	PWWindow*	fOwner;
 	BTextControl*	fHeader;
 	BTextControl*	fFooter;
 };
+
 
 static void LoadSpellDictionary(PWWindow* window);
 static BPath FrameSettingsPath();
@@ -485,33 +521,37 @@ private:
 };
 
 // Insert table: rows, columns, and a header row — asked, not assumed.
-class PWInsertTableWindow : public BWindow {
+// Insert table, StyledEdit pattern: dimensions in, one message, hide.
+class PWInsertTableWindow : public PWPanelWindow {
 public:
-	PWInsertTableWindow(PWWindow* owner)
+	explicit PWInsertTableWindow(PWWindow* owner)
 		:
-		BWindow(BRect(0, 0, 240, 150), "Insert table",
-			B_TITLED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
-			B_ASYNCHRONOUS_CONTROLS),
-		fOwner(owner)
+		PWPanelWindow(BRect(0, 0, 260, 140), "Insert table", owner)
 	{
-		fRows = new BTextControl(BRect(10, 10, 110, 28), "rows", "Rows:",
-			"3", NULL);
-		fRows->SetDivider(38);
-		AddChild(fRows);
-		fCols = new BTextControl(BRect(120, 10, 225, 28), "cols", "Cols:",
-			"3", NULL);
-		fCols->SetDivider(34);
-		AddChild(fCols);
-		fHeader = new BCheckBox(BRect(10, 38, 220, 54), "header",
-			"Header row (bold)", new BMessage('pWtc'));
+		fRows = new BTextControl("rows", "Rows:", "3", NULL);
+		fRows->SetDivider(40);
+		fCols = new BTextControl("cols", "Columns:", "3", NULL);
+		fCols->SetDivider(52);
+		fHeader = new BCheckBox("header", "Header row (bold)", NULL);
 		fHeader->SetValue(B_CONTROL_ON);
-		AddChild(fHeader);
-		AddChild(new BButton(BRect(50, 66, 130, 88), "ok", "Insert",
-			new BMessage('pWtI')));
-		AddChild(new BButton(BRect(140, 66, 220, 88), "cancel", "Cancel",
-			new BMessage(B_QUIT_REQUESTED)));
-		AddToSubset(owner);
-		MoveTo(owner->Frame().left + 90, owner->Frame().top + 110);
+		BButton* insert = new BButton("insert", "Insert",
+			new BMessage('pWtI'));
+		BButton* cancel = new BButton("cancel", "Cancel",
+			new BMessage(MSG_PANEL_HIDE));
+		insert->MakeDefault(true);
+
+		SetLayout(new BGroupLayout(B_VERTICAL));
+		AddChild(BGroupLayoutBuilder(B_VERTICAL, 4)
+			.Add(fRows)
+			.Add(fCols)
+			.Add(fHeader)
+			.AddGroup(B_HORIZONTAL, 10)
+				.Add(insert)
+				.AddGlue()
+				.Add(cancel)
+			.End()
+			.SetInsets(10, 10, 10, 10)
+		);
 		fRows->MakeFocus();
 	}
 
@@ -530,54 +570,61 @@ public:
 				insert.AddInt32("cols", cols);
 				insert.AddBool("header",
 					fHeader->Value() == B_CONTROL_ON);
-				fOwner->PostMessage(&insert);
-				PostMessage(B_QUIT_REQUESTED);
+				SendToOwner(&insert);
+				PostMessage(MSG_PANEL_HIDE);
 				break;
 			}
+			case MSG_PANEL_HIDE:
+				if (!IsHidden())
+					Hide();
+				break;
 			default:
 				BWindow::MessageReceived(message);
 		}
 	}
 
-	bool	QuitRequested() override
-	{
-		fOwner->PostMessage('pWtq');
-		return true;
-	}
-
 private:
-	PWWindow*	fOwner;
 	BTextControl*	fRows;
 	BTextControl*	fCols;
 	BCheckBox*	fHeader;
 };
 
-// Styles panel: define once, apply everywhere — the Gobe lesson.
-class PWStylesWindow : public BWindow {
-public:
-	PWStylesWindow(PWWindow* owner)
-		:
-		BWindow(BRect(0, 0, 300, 240), "Styles",
-			B_TITLED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
-			B_ASYNCHRONOUS_CONTROLS),
-		fOwner(owner)
-	{
-		fList = new BListView(BRect(8, 8, 180, 200), "styles");
-		AddChild(new BScrollView("scroll", fList, B_FOLLOW_ALL, true, true));
-		fName = new BTextControl(BRect(8, 206, 180, 224), "name", "Name:",
-			"", NULL);
-		fName->SetDivider(36);
-		AddChild(fName);
 
-		AddChild(new BButton(BRect(190, 8, 290, 28), "new",
-			"New from selection", new BMessage(PWWindow::STYLE_NEW_MSG)));
-		AddChild(new BButton(BRect(190, 38, 290, 58), "apply", "Apply",
-			new BMessage(PWWindow::STYLE_APPLY_MSG)));
-		AddChild(new BButton(BRect(190, 68, 290, 88), "del", "Delete",
-			new BMessage(PWWindow::STYLE_DEL_MSG)));
+// Styles panel: define once, apply everywhere — the Gobe lesson.
+// Styles panel, StyledEdit pattern.
+class PWStylesWindow : public PWPanelWindow {
+public:
+	explicit PWStylesWindow(PWWindow* owner)
+		:
+		PWPanelWindow(BRect(0, 0, 300, 220), "Styles", owner)
+	{
+		fList = new BListView("styles");
+		fName = new BTextControl("name", "Name:", "", NULL);
+		fName->SetDivider(40);
+		BButton* newBtn = new BButton("new", "New from selection",
+			new BMessage(PWWindow::STYLE_NEW_MSG));
+		BButton* applyBtn = new BButton("apply", "Apply",
+			new BMessage(PWWindow::STYLE_APPLY_MSG));
+		BButton* delBtn = new BButton("del", "Delete",
+			new BMessage(PWWindow::STYLE_DEL_MSG));
+		applyBtn->MakeDefault(true);
+
+		SetLayout(new BGroupLayout(B_HORIZONTAL));
+		AddChild(BGroupLayoutBuilder(B_VERTICAL, 4)
+			.Add(new BScrollView("scroll", fList, B_FOLLOW_ALL, true, true))
+			.AddGroup(B_HORIZONTAL, 4)
+				.Add(fName)
+			.End()
+			.End()
+		);
+		AddChild(BGroupLayoutBuilder(B_VERTICAL, 4)
+			.Add(newBtn)
+			.Add(applyBtn)
+			.Add(delBtn)
+			.AddGlue()
+			.SetInsets(0, 0, 0, 0)
+		);
 		RefreshList();
-		AddToSubset(owner);
-		MoveTo(owner->Frame().left + 80, owner->Frame().top + 100);
 	}
 
 	void	RefreshList()
@@ -600,7 +647,7 @@ public:
 					break;
 				BMessage styleMsg(PWWindow::STYLE_NEW_MSG);
 				styleMsg.AddString("name", name);
-				fOwner->PostMessage(&styleMsg);
+				SendToOwner(&styleMsg);
 				break;
 			}
 			case PWWindow::STYLE_APPLY_MSG: {
@@ -608,7 +655,7 @@ public:
 				if (sel >= 0) {
 					BMessage apply(PWWindow::STYLE_APPLY_MSG);
 					apply.AddInt32("index", sel);
-					fOwner->PostMessage(&apply);
+					SendToOwner(&apply);
 				}
 				break;
 			}
@@ -617,26 +664,24 @@ public:
 				if (sel >= 0) {
 					BMessage del(PWWindow::STYLE_DEL_MSG);
 					del.AddInt32("index", sel);
-					fOwner->PostMessage(&del);
+					SendToOwner(&del);
 				}
 				break;
 			}
+			case MSG_PANEL_HIDE:
+				if (!IsHidden())
+					Hide();
+				break;
 			default:
 				BWindow::MessageReceived(message);
 		}
 	}
 
-	bool	QuitRequested() override
-	{
-		fOwner->PostMessage('pWyC');
-		return true;
-	}
-
 private:
-	PWWindow*	fOwner;
 	BListView*	fList;
 	BTextControl*	fName;
 };
+
 
 // The window thread owns the document, layout and view; the harness
 // arguments are delivered as a message so nothing is mutated cross-thread.
@@ -1565,8 +1610,10 @@ PWWindow::MessageReceived(BMessage* message)
 				fHeaderWin = new PWHeaderWindow(this, fDoc.HeaderText(),
 					fDoc.FooterText());
 				fHeaderWin->Show();
-			} else
+			} else {
+				fHeaderWin->Show();
 				fHeaderWin->Activate();
+			}
 			break;
 		case 'pWhC':
 			fHeaderWin = NULL;
