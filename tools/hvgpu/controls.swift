@@ -49,7 +49,8 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         let settingsChanged = cpus != Settings.cpuCount || memoryGiB != UInt64(Settings.memoryGiB)
             || networkingOn != Settings.networking || soundOn != Settings.sound
             || (appliedShares.map { $0 != hostShares() } ?? false)
-        if vm == nil || !vm.canStart || settingsChanged {
+        if vm == nil || !vm.canStart || settingsChanged || needNewMachine {
+            needNewMachine = false
             do {
                 try makeVM()
             } catch {
@@ -204,6 +205,12 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         guard !guestResetHandled, !stopping else { return }
         guestResetHandled = true
         restartPending = true
+        // A machine stopped in the middle of its own reset is not a machine to
+        // start again: VZ will say it can, and then the devices that were torn
+        // down half-way stay that way -- the shared memory pool unmapped, the
+        // RAM console unable to find guest memory, nothing ever drawn. Build a
+        // new one instead. A configuration costs nothing to make.
+        needNewMachine = true
         stateChanged()
         hardStop(thenStart: true)
     }

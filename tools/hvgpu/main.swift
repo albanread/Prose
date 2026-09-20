@@ -1422,6 +1422,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     var restartPending = false
     /// One reset per boot: the RAM console is re-read and lines can repeat.
     var guestResetHandled = false
+    /// The next start must build a machine rather than reuse the stopped one.
+    var needNewMachine = false
     var runningSince: Date?
     var failure: String?               // why the machine couldn't start
 
