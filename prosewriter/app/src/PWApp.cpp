@@ -2742,7 +2742,7 @@ SelfTest()
 		{
 			status_t loadErr = floaded.LoadFromFile(path);
 			if (loadErr != B_OK)
-				printf("fix-debug: load err=%ld\n", (long)loadErr);
+				printf("load-from-file failed: %s\n", strerror(loadErr));
 			CHECK("load from file returns B_OK", loadErr == B_OK);
 		}
 		CHECK("file round trip text",
