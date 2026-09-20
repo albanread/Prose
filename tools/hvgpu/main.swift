@@ -1046,6 +1046,16 @@ final class RAMConsole {
         logHandle?.write(Data(text.utf8))
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             print("RAM| " + line)
+            // Restart from inside the guest: the kernel calls PSCI SYSTEM_RESET and
+            // expects firmware to bring the machine back. VZ does not: the vCPUs
+            // stop, the machine stays nominally running, nothing is ever drawn
+            // again, and the screen sits on no signal for as long as anyone waits.
+            // SYSTEM_OFF it does honour, which is why shutting down works and
+            // restarting does not. So the host does what the firmware would.
+            if line.contains("PSCI SYSTEM_RESET") {
+                log("guest asked for a reset; VZ does not act on it, restarting the machine")
+                DispatchQueue.main.async { controller.restartAfterGuestReset() }
+            }
         }
     }
 }
@@ -1119,6 +1129,34 @@ final class Presenter: NSObject {
         }
     }
     private var blackShown = false
+
+    /// Static means "the guest has stopped drawing", and it only means that if
+    /// the guest was ever drawing. A machine that has just been told to start
+    /// has a good twenty seconds of firmware and kernel before app_server
+    /// commits anything, and twenty seconds of an untuned television says
+    /// something is broken when nothing is. Until the first picture of a
+    /// machine's life, the screen is dark and says what it is waiting for.
+    var everHadPicture = false
+    var startingLabel: NSTextField?
+
+    func showStarting(_ text: String?) {
+        guard let content else { return }
+        if startingLabel == nil {
+            let label = NSTextField(labelWithString: "")
+            label.font = .systemFont(ofSize: 13, weight: .regular)
+            label.textColor = NSColor.white.withAlphaComponent(0.55)
+            label.alignment = .center
+            label.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            ])
+            startingLabel = label
+        }
+        startingLabel?.stringValue = text ?? ""
+        startingLabel?.isHidden = text == nil
+    }
 
     /// decorate: the toolbar and status bar go on before the window is shown.
     func makeWindow(vm: VZVirtualMachine, source: PresentSource, decorate: (NSWindow, VMContentView) -> Void) {
@@ -1254,6 +1292,24 @@ final class Presenter: NSObject {
         // A picture needs a mode and at least one commit; anything else is no signal.
         let flushed = gpu.seq.withLock { $0 }
         let hasPicture = flushed > 0 && surface.width > 0 && surface.height > 0
+        if hasPicture && !everHadPicture { everHadPicture = true }
+        if !hasPicture && !everHadPicture {
+            // Booting: dark, with a word about it, rather than static.
+            showStarting(controller.restartPending ? "Restarting…" : "Starting…")
+            guard !blackShown, let drawable = layer.nextDrawable() else { return }
+            blackShown = true
+            let rp = MTLRenderPassDescriptor()
+            rp.colorAttachments[0].texture = drawable.texture
+            rp.colorAttachments[0].loadAction = .clear
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+            rp.colorAttachments[0].storeAction = .store
+            let cb = queue.makeCommandBuffer()!
+            cb.makeRenderCommandEncoder(descriptor: rp)?.endEncoding()
+            cb.present(drawable)
+            cb.commit()
+            return
+        }
+        if hasPicture { showStarting(nil) }
         // No signal showsstatic, which animates, so it draws every frame; a picture
         // is only redrawn when the guest has committed something new. With VZ's own
         // display underneath (--input vz) we stay out of the way until it has.
@@ -1364,6 +1420,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     lazy var macAddress = makeMACAddress()
     var shutdownRequested: Date?       // Shut Down or Restart pressed the guest's power button
     var restartPending = false
+    /// One reset per boot: the RAM console is re-read and lines can repeat.
+    var guestResetHandled = false
     var runningSince: Date?
     var failure: String?               // why the machine couldn't start
 

@@ -62,6 +62,8 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         }
         failure = nil
         presenter.poweredOff = false
+        presenter.everHadPicture = false    // a new boot draws nothing for a while
+        guestResetHandled = false           // and a new boot may ask for its own reset
         monitor?.reset()
         chrome?.forgetGuestAddress()
         log("starting \(diskURL.path) cpus=\(cpus) memory=\(memoryGiB)GiB scanout=\(width)x\(height) mac=\(macAddress.string)")
@@ -192,6 +194,18 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
             vmStopped()
             if thenStart { bootVM() }
         }
+    }
+
+    /// The guest asked for a reset (RAMConsole saw PSCI SYSTEM_RESET). Its CPUs
+    /// are already stopping and nothing more will be drawn, so there is no
+    /// graceful shutdown left to ask for: stop the machine and start it again.
+    /// Guarded because the line is read once per boot but the log is re-read.
+    func restartAfterGuestReset() {
+        guard !guestResetHandled, !stopping else { return }
+        guestResetHandled = true
+        restartPending = true
+        stateChanged()
+        hardStop(thenStart: true)
     }
 
     @objc func restart(_ sender: Any?) {
