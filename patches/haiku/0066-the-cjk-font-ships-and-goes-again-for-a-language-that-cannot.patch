@@ -1,0 +1,143 @@
+From 63a78111f135eef333c98aa909ad85fba70750a2 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 08:14:01 +0100
+Subject: [PATCH] The CJK font ships, and goes again for a language that cannot
+ use it
+
+Japanese, Korean and Chinese are three of the thirty-three languages the
+first-boot chooser offers, and none of them could draw a character: the
+regular profile installs noto_sans_cjk_jp, the Prose profile replaces that
+package list and did not carry it over. haiku.hpkg has required it all
+along; nothing enforced that, so the image shipped without it and nobody
+noticed until somebody read the list.
+
+It is 36 MiB of a one-gigabyte disk and no use to a reader of English, so
+the chooser deletes it when the language picked cannot use it -- anything
+that is not ja, ko or zh. Continue goes to the window first for this and
+then on to the application as before.
+
+Deleting the package file is how a system package is removed by hand.
+packagefs holds it open while the system runs, so the space comes back on
+the next boot rather than at once.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0066-the-cjk-font-ships-and-goes-again-for-a-language-that-cannot.patch 71f06dc5fecb94914f2c246b1bd0cadbefb6718473d70150c8b6b5b2057c8619
+---
+ build/jam/DefaultBuildProfiles                |  6 +++
+ src/apps/firstbootprompt/BootPromptWindow.cpp | 52 ++++++++++++++++++-
+ src/apps/firstbootprompt/BootPromptWindow.h   |  1 +
+ 3 files changed, 58 insertions(+), 1 deletion(-)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 1b6ccdfb58..ce3c41953b 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -219,6 +219,12 @@ rule DefineDefaultBuildProfiles
+ 			# is reported by the build ("not available") and left out.
+ 			AddHaikuImageSystemPackages
+ 				noto
++				# Japanese, Chinese and Korean. 36 MiB, and haiku.hpkg
++				# requires it; the regular profile has it and this list,
++				# which replaces that one, did not, so those three
++				# languages drew nothing at all. The first-boot chooser
++				# deletes it again for a language that cannot use it.
++				noto_sans_cjk_jp
+ 				openssl3
+ 				pe
+ 				vision
+diff --git a/src/apps/firstbootprompt/BootPromptWindow.cpp b/src/apps/firstbootprompt/BootPromptWindow.cpp
+index 2b7b09a4ea..98e1de3bf6 100644
+--- a/src/apps/firstbootprompt/BootPromptWindow.cpp
++++ b/src/apps/firstbootprompt/BootPromptWindow.cpp
+@@ -16,6 +16,8 @@
+ #include <Alert.h>
+ #include <Bitmap.h>
+ #include <Button.h>
++#include <Directory.h>
++#include <Entry.h>
+ #include <Catalog.h>
+ #include <ControlLook.h>
+ #include <Directory.h>
+@@ -206,7 +208,7 @@ BootPromptWindow::BootPromptWindow()
+ 	BIconUtils::GetVectorIcon(data, size, &desktopIcon);
+ 
+ 	fDesktopButton = new BButton("", new BMessage(MSG_BOOT_DESKTOP));
+-	fDesktopButton->SetTarget(be_app);
++	fDesktopButton->SetTarget(this);
+ 	fDesktopButton->MakeDefault(true);
+ 	fDesktopButton->SetIcon(&desktopIcon);
+ 
+@@ -328,6 +330,14 @@ BootPromptWindow::MessageReceived(BMessage* message)
+ 			_ActivateKeymap(message);
+ 			break;
+ 
++		case MSG_BOOT_DESKTOP:
++			// PROSE fork: Continue arrives here rather than at the
++			// application, so a font nobody can use goes before the desktop
++			// starts. Then on, unchanged.
++			_DropUnusedFonts();
++			be_app->PostMessage(MSG_BOOT_DESKTOP);
++			break;
++
+ 		default:
+ 			BWindow::MessageReceived(message);
+ 	}
+@@ -394,6 +404,46 @@ BootPromptWindow::_InitCatalog(bool saveSettings)
+ }
+ 
+ 
++/*!	PROSE fork: the CJK font is 36 MiB of a one-gigabyte disk and draws
++	Japanese, Chinese and Korean. It ships, because without it those three
++	languages -- all offered in the list above -- are blank boxes. It goes
++	again here when the language chosen cannot use it, which is most of them.
++
++	Deleting the package file is how a system package is removed by hand;
++	packagefs notices. The space comes back on the next boot, not at once:
++	packagefs holds the file open while the system is running.
++*/
++void
++BootPromptWindow::_DropUnusedFonts()
++{
++	LanguageItem* item = static_cast<LanguageItem*>(
++		fLanguagesListView->ItemAt(fLanguagesListView->CurrentSelection(0)));
++	if (item == NULL)
++		return;
++
++	BString code(item->Language());
++	if (code.StartsWith("ja") || code.StartsWith("ko") || code.StartsWith("zh"))
++		return;
++
++	BDirectory packages("/boot/system/packages");
++	if (packages.InitCheck() != B_OK)
++		return;
++
++	BEntry entry;
++	while (packages.GetNextEntry(&entry) == B_OK) {
++		char name[B_FILE_NAME_LENGTH];
++		if (entry.GetName(name) != B_OK
++			|| strncmp(name, "noto_sans_cjk", 13) != 0) {
++			continue;
++		}
++		status_t status = entry.Remove();
++		fprintf(stderr, "FirstBootPrompt: %s %s for language %s\n",
++			status == B_OK ? "removed" : "could not remove", name,
++			code.String());
++	}
++}
++
++
+ void
+ BootPromptWindow::_UpdateStrings()
+ {
+diff --git a/src/apps/firstbootprompt/BootPromptWindow.h b/src/apps/firstbootprompt/BootPromptWindow.h
+index 478b23b693..518814eab4 100644
+--- a/src/apps/firstbootprompt/BootPromptWindow.h
++++ b/src/apps/firstbootprompt/BootPromptWindow.h
+@@ -34,6 +34,7 @@ public:
+ 
+ private:
+ 			void				_InitCatalog(bool saveSettings);
++			void				_DropUnusedFonts();
+ 			void				_UpdateStrings();
+ 			void				_UpdateKeymapsMenu();
+ 			void				_PopulateLanguages();
