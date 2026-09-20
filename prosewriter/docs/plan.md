@@ -347,9 +347,27 @@ re-verified with the current binary; the real gaps found and fixed:
 
 Verified live: `.prose`, RTF (control words stripped) and plain-text
 opens via the property, with titles following; launch-with-file; the
-smoke suite grew typed-save and open steps (**8/8**). Double-click
-itself still needs a human mouse — the chain (type attribute →
-preferred app) is complete.
+smoke suite grew typed-save and open steps. Double-click itself still
+needs a human mouse — the chain (type attribute → preferred app) is
+complete.
+
+**Root cause found after re-audit: opening dispatched by EXTENSION.** A
+save to a bare name (exactly what the panel produced — no prefill, no
+append; sprint 8 had "panel name pre-filled" on its open list) wrote a
+valid native file that then reopened as garbage text: `HMF1&dWp…` bytes
+in the document. Proven live, then fixed both ends:
+
+- **`SniffDocumentKind()`** decides the loader by CONTENT — the review's
+  "detect by content, not extension": `HMF1` + `'pWd&'` → native,
+  `{\rtf` → RTF, otherwise the name breaks the tie (.prose/.rtf, else
+  text). A just-saved file now reopens as the document it is, whatever
+  it is called (smoke step 7: the extensionless round trip).
+- **`WithExtension()`** is the one tested rule for every save panel:
+  native/RTF/PDF completions append their extension when missing, and
+  the Save/Save-as/PDF panels prefill the current name with it (case
+  insensitive, never doubled, trailing dot tidied).
+
+Selftest **164/164** (sniff ×4, extension ×4), smoke **9/9**.
 
 Two other bugs found on the way,
 both fixed with this sprint: `ReadFileToString` did a single `Read()` (short

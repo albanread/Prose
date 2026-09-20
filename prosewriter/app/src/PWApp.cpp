@@ -105,6 +105,28 @@ WriteStringToFile(const char* path, const BString& text)
 	return wrote == text.Length() ? B_OK : B_ERROR;
 }
 
+// What loader a file needs, decided by its CONTENT (the review's rule:
+// "detect the format by content, not extension") — a just-saved document
+// must reopen regardless of what the user typed in the save panel. The
+// native format is a flattened BMessage: "HMF1" magic + our 'pWd&'
+// what-code in the first 8 bytes.
+enum PWDocKind { PW_KIND_ERROR, PW_KIND_NATIVE, PW_KIND_RTF, PW_KIND_TEXT };
+static PWDocKind
+SniffDocumentKind(const char* path)
+{
+	BFile file;
+	if (file.SetTo(path, B_READ_ONLY) != B_OK)
+		return PW_KIND_ERROR;
+	char head[8] = { 0 };
+	ssize_t got = file.Read(head, sizeof(head));
+	if (got >= 8 && memcmp(head, "HMF1", 4) == 0
+		&& memcmp(head + 4, "&dWp", 4) == 0)
+		return PW_KIND_NATIVE;
+	if (got >= 5 && memcmp(head, "{\\rtf", 5) == 0)
+		return PW_KIND_RTF;
+	return PW_KIND_TEXT;
+}
+
 // Case-insensitive extension test. IFindLast() returns an int32 offset
 // (B_ERROR when absent); comparing it to NULL made "not found" read as
 // true, so every non-RTF file was fed to the RTF parser and Open never
@@ -114,6 +136,23 @@ HasSuffix(const BString& path, const char* suffix)
 {
 	return path.IEndsWith(suffix);
 }
+
+// A file name with the given extension, appended case-insensitively if
+// missing — one rule for every save panel (native .prose, RTF, PDF) and
+// their prefilled suggestions, so a bare typed name can never produce a
+// file our own open path then misreads.
+static BString
+WithExtension(const BString& name, const char* ext)
+{
+	if (HasSuffix(name, ext))
+		return name;
+	BString with(name);
+	if (with.Length() > 0 && with[with.Length() - 1] == '.')
+		with.Truncate(with.Length() - 1);
+	with << ext;
+	return with;
+}
+
 
 // Replace the window's document with the contents of `fresh`.
 static void
@@ -1550,7 +1589,14 @@ PWWindow::MessageReceived(BMessage* message)
 			EnsurePanels()->open->Show();
 			break;
 		case SAVE_PANEL_MSG:
-			EnsurePanels()->save->Show();
+			EnsurePanels();
+			{
+				BString suggested = fFileName.Length() ? fFileName
+					: BString("Untitled");
+				fPanels->save->SetSaveText(
+					WithExtension(suggested, ".prose").String());
+			}
+			fPanels->save->Show();
 			break;
 		case EXPORT_RTF_MSG:
 			EnsurePanels()->exportRtf->Show();
@@ -1567,7 +1613,7 @@ PWWindow::MessageReceived(BMessage* message)
 				BPath path(&ref);
 				BString name;
 				message->FindString("name", &name);
-				path.Append(name.String());
+				path.Append(WithExtension(name, ".prose").String());
 				DoSave(BString(path.Path()));
 				// finish a quit that was waiting on this save
 				if (fQuitPending) {
@@ -1588,9 +1634,7 @@ PWWindow::MessageReceived(BMessage* message)
 					BPath path(&ref);
 					BString name;
 					message->FindString("name", &name);
-					if (!HasSuffix(name, ".rtf"))
-						name << ".rtf";
-					path.Append(name.String());
+					path.Append(WithExtension(name, ".rtf").String());
 					BString rtf;
 					PW_WriteRTF(&fDoc, &rtf);
 					status_t err = WriteStringToFile(path.Path(), rtf);
@@ -1607,8 +1651,14 @@ PWWindow::MessageReceived(BMessage* message)
 		case 'pWsV':
 			if (fFilePath.Length())
 				DoSave(fFilePath);
-			else
-				EnsurePanels()->save->Show();
+			else {
+				EnsurePanels();
+				BString suggested = fFileName.Length() ? fFileName
+					: BString("Untitled");
+				fPanels->save->SetSaveText(
+					WithExtension(suggested, ".prose").String());
+				fPanels->save->Show();
+			}
 			break;
 		case 'pWud':
 			fDoc.Undo();
@@ -1959,9 +2009,8 @@ PWWindow::MessageReceived(BMessage* message)
 					new BMessenger(this), NULL, B_FILE_NODE, false, pick);
 			}
 			BString suggested = fFileName.Length() ? fFileName : "Untitled";
-			if (!HasSuffix(suggested, ".pdf"))
-				suggested << ".pdf";
-			fPdfPanel->SetSaveText(suggested.String());
+			fPdfPanel->SetSaveText(
+				WithExtension(suggested, ".pdf").String());
 			fPdfPanel->Show();
 			break;
 		}
@@ -1971,9 +2020,7 @@ PWWindow::MessageReceived(BMessage* message)
 				BPath path(&ref);
 				BString name;
 				message->FindString("name", &name);
-				if (!HasSuffix(name, ".pdf"))
-					name << ".pdf";
-				path.Append(name.String());
+				path.Append(WithExtension(name, ".pdf").String());
 				ExportPDF(path.Path());
 			}
 			break;
@@ -2116,25 +2163,48 @@ PWWindow::OpenFile(const entry_ref& ref)
 	BString lower = path.Path();
 	lower.ToLower();
 	status_t err = B_ERROR;
-	if (HasSuffix(lower, ".rtf")) {
+	bool handled = false;
+	auto loadRtf = [&]() -> status_t {
 		BString rtf;
-		err = ReadFileToString(path.Path(), &rtf);
-		if (err == B_OK) {
+		status_t e = ReadFileToString(path.Path(), &rtf);
+		if (e == B_OK) {
 			PWDocument fresh;
-			err = PW_LoadRTF(&fresh, rtf.String());
-			if (err == B_OK)
+			e = PW_LoadRTF(&fresh, rtf.String());
+			if (e == B_OK)
 				AdoptDocument(&fDoc, &fresh);
 		}
-	} else if (HasSuffix(lower, ".prose")) {
-		err = fDoc.LoadFromFile(path.Path());
-	} else {
+		return e;
+	};
+	auto loadText = [&]() -> status_t {
 		BString text;
-		err = ReadFileToString(path.Path(), &text);
-		if (err == B_OK) {
+		status_t e = ReadFileToString(path.Path(), &text);
+		if (e == B_OK) {
 			PWDocument fresh;
 			fresh.Insert(0, text.String(), NULL);
 			AdoptDocument(&fDoc, &fresh);
 		}
+		return e;
+	};
+	switch (SniffDocumentKind(path.Path())) {
+		case PW_KIND_NATIVE:
+			err = fDoc.LoadFromFile(path.Path());
+			handled = true;
+			break;
+		case PW_KIND_RTF:
+			err = loadRtf();
+			handled = true;
+			break;
+		default:
+			break;
+	}
+	if (!handled) {
+		// content is not recognizable — let the name break the tie
+		if (HasSuffix(lower, ".prose"))
+			err = fDoc.LoadFromFile(path.Path());
+		else if (HasSuffix(lower, ".rtf"))
+			err = loadRtf();
+		else
+			err = loadText();
 	}
 	if (err != B_OK) {
 		BAlert* alert = new BAlert("ProseWriter",
@@ -2780,6 +2850,36 @@ SelfTest()
 		CHECK("file round trip text",
 			strcmp(floaded.PlainText(), "Save me.\nSecond para") == 0);
 		CHECK("file round trip bold", floaded.FormatAt(1).bold);
+		// content sniffing decides the loader: a just-saved file must
+		// reopen no matter what name the save panel was given
+		CHECK("sniff recognizes native", SniffDocumentKind(path)
+			== PW_KIND_NATIVE);
+		{
+			BFile rtfOut;
+			if (rtfOut.SetTo("/tmp/pw-sniff.rtf",
+					B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE) == B_OK)
+				rtfOut.Write("{\\rtf1\\ansi}", 10);
+			BFile txtOut;
+			if (txtOut.SetTo("/tmp/pw-sniff.txt",
+					B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE) == B_OK)
+				txtOut.Write("just text", 9);
+			CHECK("sniff recognizes rtf",
+				SniffDocumentKind("/tmp/pw-sniff.rtf") == PW_KIND_RTF);
+			CHECK("sniff falls through to text",
+				SniffDocumentKind("/tmp/pw-sniff.txt") == PW_KIND_TEXT);
+			CHECK("sniff rejects missing file",
+				SniffDocumentKind("/tmp/pw-sniff-none") == PW_KIND_ERROR);
+			CHECK("extension appended", WithExtension("report", ".prose")
+				== "report.prose");
+			CHECK("extension not doubled",
+				WithExtension("report.prose", ".prose") == "report.prose");
+			CHECK("extension case-insensitive",
+				WithExtension("REPORT.PROSE", ".prose") == "REPORT.PROSE");
+			CHECK("trailing dot tidied", WithExtension("report.", ".prose")
+				== "report.prose");
+			remove("/tmp/pw-sniff.rtf");
+			remove("/tmp/pw-sniff.txt");
+		}
 		remove(path);
 
 		// --- format undo: bold/undo/redo, and undo of a format must not

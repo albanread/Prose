@@ -87,8 +87,24 @@ t=$("$GUEST" run "hey $SIG get Title" 2>/dev/null | grep -a result)
 echo "$r" | grep -aq "smoke test one" && echo "$t" | grep -aq "smoke.prose" \
 	&& ok "open via property (panel path)" || bad "open ($t)"
 
-# 7 - PDF export via scripting (Sprint 10): magic + at least one page
+# 7 - a file saved WITHOUT extension must reopen as the document it is
+#     (content sniffing, not the name, decides the loader)
 n=7
+"$GUEST" run "/boot/home/apps/pwquery $SIG Text X set 'no ext test'" \
+	>/dev/null 2>&1
+"$GUEST" run "/boot/home/apps/pwquery $SIG Save X do /tmp/smoke-noext" \
+	>/dev/null 2>&1
+sleep 1
+"$GUEST" run "/boot/home/apps/pwquery $SIG Open X do /tmp/smoke-noext" \
+	>/dev/null 2>&1
+sleep 2
+r=$("$GUEST" run "hey $SIG get Text" 2>/dev/null | grep -a result)
+t=$("$GUEST" run "hey $SIG get Title" 2>/dev/null | grep -a result)
+echo "$r" | grep -aq "no ext test" && echo "$t" | grep -aq "smoke-noext" \
+	&& ok "extensionless round trip" || bad "noext round trip ($t)"
+
+# 8 - PDF export via scripting (Sprint 10): magic + at least one page
+n=8
 "$GUEST" run "/boot/home/apps/pwquery $SIG PDF X do /tmp/smoke.pdf" \
 	>/dev/null 2>&1
 sleep 1
@@ -99,8 +115,8 @@ pages=$("$GUEST" run 'grep -ac MediaBox /tmp/smoke.pdf' 2>/dev/null \
 [ "$magic" = "%PDF-1.4" ] && [ "$pages" -ge 1 ] \
 	&& ok "pdf export ($pages page(s))" || bad "pdf export ($magic/$pages)"
 
-# 8 - clean quit (unmodified document) exits the app
-n=8
+# 9 - clean quit (unmodified document) exits the app
+n=9
 "$GUEST" run "hey $SIG do Quit" >/dev/null 2>&1
 sleep 2
 c=$("$GUEST" run 'ps' 2>/dev/null | grep -ac "apps/ProseWriter")
