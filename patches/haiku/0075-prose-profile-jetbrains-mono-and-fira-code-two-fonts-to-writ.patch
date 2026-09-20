@@ -1,0 +1,48 @@
+From 20d4dd7691ecf87f1a64a8a5ae74711f19145399 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 19:36:08 +0100
+Subject: [PATCH] Prose profile: JetBrains Mono and Fira Code, two fonts to
+ write code in
+
+The image had one monospaced family, Noto Mono, and no choice for
+someone reading code all day. Both are freely licensed (SIL Open Font
+License 1.1), built by prosepkg from the haikuports recipes.
+
+Fira Code's ligatures need a shaping engine the app_server does not
+have; it draws as an ordinary monospaced font here.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0075-prose-profile-jetbrains-mono-and-fira-code-two-fonts-to-writ.patch ade0b863505a39818f995f48db597212c4f13f5e22a38d3ed60aceb053b9a147
+---
+ build/jam/DefaultBuildProfiles          | 4 ++++
+ build/jam/repositories/HaikuPorts/arm64 | 2 ++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 8edfe2a015..ece47fd74a 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -225,6 +225,10 @@ rule DefineDefaultBuildProfiles
+ 				# languages drew nothing at all. The first-boot chooser
+ 				# deletes it again for a language that cannot use it.
+ 				noto_sans_cjk_jp
++				# two fonts to write code in: JetBrains Mono and Fira Code,
++				# beside the one monospaced family (Noto Mono) the image had
++				jetbrains_mono
++				firacode
+ 				openssl3
+ 				pe
+ 				vision
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 1227d88b69..f30e0fbc48 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -5,6 +5,8 @@ RemotePackageRepository HaikuPorts
+ 	# architecture "any" packages
+ 	# from prose-packages (the server has no arm64 snapshot of this list)
+ 	ca_root_certificates-2026_07_16-1
++	firacode-4-1
++	jetbrains_mono-2.304-1
+ 	timgmsoundfont-2011.12.11-1
+ 	noto_sans_cjk_jp-2.004-2
+ 	haikuporter-0_bootstrap-1

@@ -1,0 +1,32 @@
+From 5385b6285360359f08736a057beb485305047b90 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 19:39:44 +0100
+Subject: [PATCH] Sisong 2.16-3: a new C++ file, and compiling one file on its
+ own
+
+The package list names sisong-2.16-3. The owner asked for a New C++ file
+option and a compile/link task for a single file: File > New C++ Source,
+and Run > Compile This File / Compile and Run This File, which build the
+open document on its own with the command in the setting
+SingleFileBuildCommand. The editor also asks for JetBrains Mono and Fira
+Code (patch 0075) before the system's own monospaced families.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0076-sisong-2-16-3-a-new-c-file-and-compiling-one-file-on-its-own.patch 85f63fbdfab3b5580b75c3f41d21ebcc9d114d11011ce43fb516691be81f2712
+---
+ build/jam/repositories/HaikuPorts/arm64 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index f30e0fbc48..7d8e626076 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -187,7 +187,7 @@ RemotePackageRepository HaikuPorts
+ 	samedi-1.2-1
+ 	shredder-1.0.0-3
+ 	prosewriter-0.1-1
+-	sisong-2.16-2
++	sisong-2.16-3
+ 	slayer-1.0-2
+ 	speex-1.2.1-2
+ 	speex_devel-1.2.1-2

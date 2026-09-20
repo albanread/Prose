@@ -1,0 +1,37 @@
+SUMMARY="Prints what the Be API answers about this machine's fonts"
+DESCRIPTION="font_check prints the three system fonts (plain, bold and fixed) \
+with the family and style each one resolves to and whether that family is of \
+one width, then every installed family. A program that lays text out on a \
+grid -- an editor, a terminal -- asks for a font of one width, and the \
+app_server answers with whatever it can find when the family it wants is not \
+installed. Exit status: the number of things that are wrong."
+COPYRIGHT="2026 Prose"
+LICENSE="MIT"
+REVISION="1"
+ARCHITECTURES="arm64"
+
+PROVIDES="
+	font_check = $portVersion
+	cmd:font_check = $portVersion
+	"
+REQUIRES="
+	haiku
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	"
+BUILD_PREREQUIRES="
+	cmd:g++
+	"
+
+BUILD()
+{
+	g++ -O2 -Wall -o font_check $portDir/additional-files/font_check.cpp -lbe
+}
+
+INSTALL()
+{
+	mkdir -p $binDir
+	cp font_check $binDir
+}

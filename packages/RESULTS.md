@@ -82,10 +82,12 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | feedgator | 2.4.release-1 | built | feedgator-2.4.release-1-any.hpkg |
 | filecropper | 1-3 | built | filecropper-1-3-arm64.hpkg |
 | filer | 1.4.0-2 | built | filer-1.4.0-2-arm64.hpkg |
+| firacode | 4-1 | built | firacode-4-1-any.hpkg |
 | flac | 1.5.0-1 | built | flac-1.5.0-1-arm64.hpkg, flac_devel-1.5.0-1-arm64.hpkg, flac_tools-1.5.0-1-arm64.hpkg |
 | fluidlite | 1.0.9-3 | built | fluidlite-1.0.9-3-arm64.hpkg, fluidlite_devel-1.0.9-3-arm64.hpkg |
 | flyingtroll | 0.0.1~git-1 | built | flyingtroll-0.0.1~git-1-arm64.hpkg |
 | foldershaper | 1.0-4 | built | foldershaper-1.0-4-arm64.hpkg |
+| font_check | 1.0-1 | built | font_check-1.0-1-arm64.hpkg |
 | fontboy | 0.9.8-1 | built | fontboy-0.9.8-1-arm64.hpkg |
 | fortuna | 1.0.0-3 | built | fortuna-1.0.0-3-arm64.hpkg |
 | friss | 0.9.0-1 | failed | BUILD phase failed (exit 1) |
@@ -116,6 +118,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | ideam | 0.7.7-1 | failed | BUILD phase failed (exit 2) |
 | interface_elements | 1.0-2 | built | interface_elements-1.0-2-arm64.hpkg, interface_elements_devel-1.0-2-arm64.hpkg |
 | internalmidi | 2.5.3-2 | built | internalmidi-2.5.3-2-arm64.hpkg |
+| jetbrains_mono | 2.304-1 | built | jetbrains_mono-2.304-1-any.hpkg |
 | joystickutilizer | 2.0.1-2 | failed | BUILD phase failed (exit 1) |
 | json_c | 0.15-4 | built | json_c-0.15-4-arm64.hpkg, json_c_devel-0.15-4-arm64.hpkg |
 | keycursor | 1.2-1 | built | keycursor-1.2-1-arm64.hpkg |
@@ -247,7 +250,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | sequitur | 2.2.0-4 | failed | BUILD phase failed (exit 2) |
 | setuptools | 82.0.1-1 | failed | INSTALL phase failed (exit 127) |
 | shredder | 1.0.0-3 | built | shredder-1.0.0-3-arm64.hpkg |
-| sisong | 2.16-2 | built | sisong-2.16-2-arm64.hpkg |
+| sisong | 2.16-3 | built | sisong-2.16-3-arm64.hpkg |
 | slayer | 1.0-2 | built | slayer-1.0-2-arm64.hpkg |
 | speex | 1.2.1-2 | built | speex-1.2.1-2-arm64.hpkg, speex_devel-1.2.1-2-arm64.hpkg |
 | speexdsp | 1.2.1-1 | built | speexdsp-1.2.1-1-arm64.hpkg, speexdsp_devel-1.2.1-1-arm64.hpkg |
