@@ -16,6 +16,7 @@
 #include <CheckBox.h>
 #include <Clipboard.h>
 #include <Entry.h>
+#include <Node.h>
 #include <File.h>
 #include <Font.h>
 #include <Menu.h>
@@ -1474,6 +1475,26 @@ HandleScriptingForWindow(PWWindow* window, BMessage* message,
 		ReplyString(message, "");
 		return true;
 	}
+	if (prop == "Open" && message->what == B_EXECUTE_PROPERTY) {
+		// open a document: data = path. Forwarded to the window looper as
+		// the very message the Open panel sends ('pWop' + refs), so the
+		// scripted path and the panel path are one code path — and the
+		// modified-guard's alert stays on the window thread where a modal
+		// Go() is legal.
+		BString path;
+		if (message->FindString("data", &path) == B_OK && path.Length()) {
+			entry_ref ref;
+			if (get_ref_for_path(path.String(), &ref) == B_OK) {
+				BMessage open('pWop');
+				open.AddRef("refs", &ref);
+				window->PostMessage(&open);
+				ReplyString(message, "");
+			} else
+				ReplyError(message, "bad path");
+		} else
+			ReplyError(message, "data: path required");
+		return true;
+	}
 	if (prop == "PDF" && message->what == B_EXECUTE_PROPERTY) {
 		// print to PDF: data = output path. No alert here — the caller
 		// holds the window lock and a modal Go() would deadlock the app.
@@ -2140,6 +2161,13 @@ PWWindow::DoSave(const BString& pathStr)
 		fFileName = BPath(pathStr.String()).Leaf();
 		fDoc.SavedClean();
 		UpdateTitle();
+		// Type the file on save: without BEOS:TYPE, Tracker sees an
+		// untyped blob and double-click/open-with cannot find us (the
+		// sniffer needs mimeset otherwise).
+		BNode node(pathStr.String());
+		BString docType("application/x-vnd.prose.ProseWriter-doc");
+		if (node.InitCheck() == B_OK)
+			node.WriteAttrString("BEOS:TYPE", &docType);
 	} else {
 		// A failed save is never silent — the user must know before they
 		// quit and answer "Don't save".
@@ -2258,6 +2286,10 @@ static property_info sPWProperties[] = {
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"print to a PDF file (data: output path)", 0, { B_STRING_TYPE } },
+	{ "Open",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"open a document file (data: path)", 0, { B_STRING_TYPE } },
 	{ 0 }
 };
 

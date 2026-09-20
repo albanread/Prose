@@ -326,7 +326,32 @@ drive it; paper table gains A3 and B5; the paper metrics chain
 | P4 | guest smoke step 6: PDF magic + page count on every run | PASS (7/7) |
 | P5 | host QuickLook thumbnail of page 1: typeset A4 page, correct margins, clean wraps | PASS (vm/run/s10-out.pdf) |
 
-**Status: complete.** `--selftest` **156/156**. Two bugs found on the way,
+**Status: complete.** `--selftest` **156/156**.
+
+### Load-path hardening (post-sprint-10, owner-reported)
+
+The owner reported that file load did not work. Every load path was
+re-verified with the current binary; the real gaps found and fixed:
+
+- **Saved files were untyped.** `DoSave` now stamps
+  `BEOS:TYPE = application/x-vnd.prose.ProseWriter-doc` on every save.
+  Without it Tracker sees an untyped blob: double-click / open-with
+  cannot find ProseWriter until someone runs `mimeset` by hand (the
+  sniffer rule and preferred app were registered, but nothing typed
+  freshly saved files).
+- **The panel path had no testable entry point.** New scripting property
+  `Open` (execute, `data:` path) forwards the exact `'pWop'` + refs
+  message the Open panel sends — scripted opens and panel opens are one
+  code path, and the modified-guard's alert stays on the window thread
+  where a modal `Go()` is legal.
+
+Verified live: `.prose`, RTF (control words stripped) and plain-text
+opens via the property, with titles following; launch-with-file; the
+smoke suite grew typed-save and open steps (**8/8**). Double-click
+itself still needs a human mouse — the chain (type attribute →
+preferred app) is complete.
+
+Two other bugs found on the way,
 both fixed with this sprint: `ReadFileToString` did a single `Read()` (short
 reads truncate — the dictionary bug's last surviving sibling), and the
 selftest originally read the PDF back through `BString::SetTo`, which stops
