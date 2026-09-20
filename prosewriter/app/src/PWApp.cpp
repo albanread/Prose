@@ -406,6 +406,82 @@ ParseArgs(int argc, char** argv)
 	}
 }
 
+// Insert table: rows, columns, and a header row — asked, not assumed.
+class PWInsertTableWindow : public BWindow {
+public:
+	PWInsertTableWindow(PWWindow* owner)
+		:
+		BWindow(BRect(0, 0, 240, 150), "Insert table",
+			B_TITLED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
+			B_ASYNCHRONOUS_CONTROLS),
+		fOwner(owner)
+	{
+		fRows = new BTextControl(BRect(10, 10, 110, 28), "rows", "Rows:",
+			"3", NULL);
+		fRows->SetDivider(38);
+		AddChild(fRows);
+		fCols = new BTextControl(BRect(120, 10, 225, 28), "cols", "Cols:",
+			"3", NULL);
+		fCols->SetDivider(34);
+		AddChild(fCols);
+		fHeader = new BCheckBox(BRect(10, 38, 220, 54), "header",
+			"Header row (bold)", new BMessage('pWtc'));
+		fHeader->SetValue(B_CONTROL_ON);
+		AddChild(fHeader);
+		AddChild(new BButton(BRect(50, 66, 130, 88), "ok", "Insert",
+			new BMessage('pWtI')));
+		AddChild(new BButton(BRect(140, 66, 220, 88), "cancel", "Cancel",
+			new BMessage(B_QUIT_REQUESTED)));
+		AddToSubset(owner);
+		MoveTo(owner->Frame().left + 90, owner->Frame().top + 110);
+		fRows->MakeFocus();
+	}
+
+	void	MessageReceived(BMessage* message) override
+	{
+		switch (message->what) {
+			case 'pWtI': {
+				int32 rows = atoi(fRows->Text());
+				int32 cols = atoi(fCols->Text());
+				if (rows < 1) rows = 1;
+				if (rows > 100) rows = 100;
+				if (cols < 1) cols = 1;
+				if (cols > 50) cols = 50;
+				int32 at = fOwner->View()->CaretOffset();
+				if (fOwner->View()->HasSelection()) {
+					int32 sFrom, sTo;
+					fOwner->View()->GetSelection(&sFrom, &sTo);
+					fOwner->Document()->Remove(sFrom, sTo - sFrom);
+					at = sFrom;
+				}
+				if (fOwner->Document()->InsertTable(at, rows, cols,
+						fHeader->Value() == B_CONTROL_ON) == B_OK) {
+					fOwner->View()->SetCaret(
+						at + rows * (cols - 1) + rows, false);
+					fOwner->View()->Relayout();
+					fOwner->PostMessage('pWup');
+				}
+				PostMessage(B_QUIT_REQUESTED);
+				break;
+			}
+			default:
+				BWindow::MessageReceived(message);
+		}
+	}
+
+	bool	QuitRequested() override
+	{
+		fOwner->PostMessage('pWtq');
+		return true;
+	}
+
+private:
+	PWWindow*	fOwner;
+	BTextControl*	fRows;
+	BTextControl*	fCols;
+	BCheckBox*	fHeader;
+};
+
 // Styles panel: define once, apply everywhere — the Gobe lesson.
 class PWStylesWindow : public BWindow {
 public:
@@ -1350,31 +1426,16 @@ PWWindow::MessageReceived(BMessage* message)
 		case 'pWyC':
 			fStylesWin = NULL;
 			break;
-		case 'pWtb': {
-			// three rows of three empty cells; rows are paragraphs, cells
-			// are separated by 0x1D — Enter adds rows, last-cell Enter
-			// leaves the table, Backspace at a boundary merges cells
-			int32 at = fView->CaretOffset();
-			if (fView->HasSelection()) {
-				int32 sFrom, sTo;
-				fView->GetSelection(&sFrom, &sTo);
-				fDoc.Remove(sFrom, sTo - sFrom);
-				at = sFrom;
-			}
-			for (int32 r = 0; r < 3; r++) {
-				BString row("\035\035");	// three cells: two separators
-				fDoc.Insert(at, row.String(), NULL);
-				at += 2;
-				if (r < 2) {
-					fDoc.SplitPara(at);
-					at += 1;
-				}
-			}
-			fView->SetCaret(at, false);
-			fView->Relayout();
-			UpdateStatusText();
+		case 'pWtb':
+			if (fTableWin == NULL) {
+				fTableWin = new PWInsertTableWindow(this);
+				fTableWin->Show();
+			} else
+				fTableWin->Activate();
 			break;
-		}
+		case 'pWtq':
+			fTableWin = NULL;
+			break;
 		case 'pWim': {
 			// one-shot image panel; images land scaled to the column
 			BMessage* pick = new BMessage('pWif');
@@ -2311,6 +2372,44 @@ SelfTest()
 		CHECK("line carries row height",
 			layout.Lines().size() == 2
 				&& layout.Lines()[0].height > 10);
+	}
+
+	{
+		// InsertTable + the empty-cell crash regression.
+		printf("block: insert table\n"); fflush(stdout);
+		PWDocument doc;
+		CHECK("table built", doc.InsertTable(0, 3, 3, true) == B_OK);
+		CHECK("three rows", doc.CountParagraphs() == 3);
+		CHECK("two separators per row",
+			strchr(doc.ParagraphText(1), PWLayout::kCellSep) != NULL
+			&& doc.ParagraphLength(0) == 2);
+		CHECK("header bold", doc.FormatAt(0).bold);
+		CHECK("body not bold", !doc.FormatAt(4).bold);
+		CHECK("bounds rejected", doc.InsertTable(0, 0, 3, false) == B_BAD_VALUE
+			&& doc.InsertTable(0, 3, 0, false) == B_BAD_VALUE);
+		// the crash: layout + segments over EMPTY cells used to walk
+		// past the text forever
+		PWLayout layout(&doc);
+		layout.SetPageSetup(PWPageSetup());
+		layout.Layout();
+		for (int32 li = 0; li < (int32)layout.Lines().size(); li++) {
+			std::vector<PWLayout::Segment> segs;
+			layout.FillSegments(li, &segs);
+			CHECK("empty cell segments bounded", segs.size() <= 4);
+			if (segs.size() > 4)
+				break;
+		}
+		// single cell, single row — the degenerate 1x1
+		PWDocument one;
+		one.InsertTable(0, 1, 1, false);
+		CHECK("1x1 is one plain paragraph",
+			one.CountParagraphs() == 1 && one.ParagraphLength(0) == 0);
+		PWLayout lone(&one);
+		lone.SetPageSetup(PWPageSetup());
+		lone.Layout();
+		std::vector<PWLayout::Segment> noSegs;
+		lone.FillSegments(0, &noSegs);
+		CHECK("1x1 layout survives", noSegs.empty());
 	}
 
 	{

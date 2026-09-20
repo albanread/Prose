@@ -13,6 +13,7 @@
 
 class BCheckBox;
 class PWHeaderWindow;
+class PWInsertTableWindow;
 class PWStylesWindow;
 class PWPageSetupWindow;
 class BMenu;
@@ -127,6 +128,7 @@ private:
 	PWPageSetupWindow*	fSetupWin = NULL;
 	PWHeaderWindow*	fHeaderWin = NULL;
 	PWStylesWindow*	fStylesWin = NULL;
+	PWInsertTableWindow* fTableWin = NULL;
 };
 
 #endif	// PW_WINDOW_H

@@ -157,6 +157,9 @@ public:
 	static const char* kObjectChar;		// "\357\277\274", 3 bytes
 	status_t	InsertImage(int32 offset, BBitmap* bitmap, float widthPt,
 				float heightPt);
+	// rows x cols of empty cells; header bolds the first row's cells
+	status_t	InsertTable(int32 offset, int32 rows, int32 cols,
+				bool header);
 	// The image covering a byte offset, or NULL.
 	PWImage*		ImageAt(int32 offset);
 	int32		CountImages() const;

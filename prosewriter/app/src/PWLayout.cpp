@@ -200,6 +200,8 @@ PWLayout::LayoutTableRow(int32 para)
 		// wrap the cell text greedily
 		int32 from = starts[c];
 		int32 to = c + 1 < cellCount ? starts[c + 1] - 1 : paraLen;
+		if (to < from)
+			to = from;	// empty cell
 		int32 lineStart = from;
 		while (lineStart < to || (lineStart == from && to == from)) {
 			float w = 0;
@@ -217,19 +219,24 @@ PWLayout::LayoutTableRow(int32 para)
 				else if (i < to && text[i] == ' ')
 					lastGood = i;
 			}
-			if (lastGood <= lineStart)
-				lastGood = std::max(i, lineStart + 1);
+			if (lastGood <= lineStart) {
+				// unbreakable overflow: advance at least one byte,
+				// never past the cell's end (a phantom line beyond
+				// the text made FillSegments walk forever — the
+				// insert-table crash of 2026-09-20)
+				lastGood = std::min(std::max(i, lineStart + 1), to);
+			}
 			CellLine cl;
 			cl.startByte = lineStart;
 			cl.length = lastGood - lineStart;
 			cl.baseline = ascent;
 			cl.height = ascent + descent;
 			cell.lines.push_back(cl);
+			if (lastGood >= to)
+				break;
 			lineStart = lastGood;
 			while (lineStart < to && text[lineStart] == ' ')
 				lineStart++;
-			if (cl.length <= 0)
-				break;	// safety
 		}
 		if (cell.lines.empty())
 			cell.lines.push_back(CellLine{ from, 0, ascent,
@@ -961,7 +968,9 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 				float cellTop = l.y;
 				for (const CellLine& cl : cell.lines) {
 					int32 b = cl.startByte;
-					while (b < cl.startByte + cl.length) {
+					int32 end = std::min(cl.startByte + cl.length,
+						paraLen);
+					while (b < end) {
 						const PWRun* rr = &runs[0];
 						for (const PWRun& cand : runs)
 							if (b >= cand.start
@@ -985,6 +994,8 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 							cl.startByte, b);
 						fMeasureRuns = NULL;
 						out->push_back(s);
+						if (next <= b)
+							break;	// never stall the walk
 						b = next;
 					}
 					cellTop += cl.height;

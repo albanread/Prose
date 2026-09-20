@@ -802,6 +802,28 @@ PWDocument::InsertImage(int32 offset, BBitmap* bitmap, float widthPt,
 	return B_OK;
 }
 
+status_t
+PWDocument::InsertTable(int32 offset, int32 rows, int32 cols, bool header)
+{
+	if (rows < 1 || rows > 100 || cols < 1 || cols > 50)
+		return B_BAD_VALUE;
+	int32 at = offset;
+	PWCharFormat headFmt = FormatAt(at);
+	headFmt.bold = true;
+	for (int32 r = 0; r < rows; r++) {
+		std::string row;
+		for (int32 c = 1; c < cols; c++)
+			row += '\035';
+		Insert(at, row.c_str(), header && r == 0 ? &headFmt : NULL);
+		at += (int32)row.length();
+		if (r < rows - 1) {
+			SplitPara(at);
+			at += 1;
+		}
+	}
+	return B_OK;
+}
+
 PWDocument::PWImage*
 PWDocument::ImageAt(int32 offset)
 {
