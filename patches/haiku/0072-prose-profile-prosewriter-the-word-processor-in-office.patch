@@ -1,0 +1,40 @@
+From 2bcd03d9f361d391b87b9d403a86e8384daf7fdd Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 18:16:37 +0100
+Subject: [PATCH] Prose profile: ProseWriter, the word processor, in Office
+
+The package is built by prosepkg from the Prose repository's own tree
+(packages/builder/overlay/haiku-apps/prosewriter), and local-packages
+copies it in at the image build; its Deskbar entry goes into Office.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0072-prose-profile-prosewriter-the-word-processor-in-office.patch 0b2de4f3e6b86b6c4140dcd91caa968136a057e85b54c18ecc8c633295ccd631
+---
+ build/jam/DefaultBuildProfiles | 1 +
+ build/jam/DeskbarCategories    | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index dd6e40f2d7..8edfe2a015 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -305,6 +305,7 @@ rule DefineDefaultBuildProfiles
+ 				ponpokodiff
+ 				ponyexpress
+ 				ppviewer
++				prosewriter
+ 				querywatcher
+ 				remember
+ 				remotecontrol
+diff --git a/build/jam/DeskbarCategories b/build/jam/DeskbarCategories
+index 24967d1ad7..c80b11e4e0 100644
+--- a/build/jam/DeskbarCategories
++++ b/build/jam/DeskbarCategories
+@@ -134,6 +134,7 @@ DESKBAR_CATEGORY_Office =
+ 	Lingua
+ 	"Mr. Peeps!"
+ 	People
++	ProseWriter
+ 	TimeTracker
+ 	Tolmach
+ 	;

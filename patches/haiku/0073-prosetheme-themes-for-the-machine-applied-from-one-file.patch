@@ -1,0 +1,807 @@
+From cf57e517ed80e3a990784516288bfc175d112d88 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 18:14:53 +0100
+Subject: [PATCH] prosetheme: themes for the machine, applied from one file
+
+A theme is a window decorator, the system's colours and the desktop's
+wallpaper; prosetheme lists the NAME.theme files in
+/boot/system/data/prose/themes and ~/config/settings/prose/themes and
+applies one: colours through set_ui_color(), the decorator as setdecor
+does, the wallpaper as the Backgrounds preferences write it (the
+attribute on the Desktop folder, then B_RESTORE_BACKGROUND_IMAGE to
+Tracker). Every part is kept by the server that owns it, so a theme
+survives a restart; the name is kept for --list and --current. A key a
+theme leaves out keeps its value, so a theme may be partial.
+
+Three ship: Prose Light (the paper wallpaper, a light frame with the
+round buttons at the left), Prose Dark (the ink wallpaper, a charcoal
+frame, the system's dark palette), and Classic (the yellow tab and the
+default colours a new machine has). All three list every colour, so
+switching back restores everything.
+
+In the prose_portal package with the daemon: the host offers them in
+View > Theme and applies one through the portal.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0073-prosetheme-themes-for-the-machine-applied-from-one-file.patch e08c44a9e4dea7c974cd8d2c0704daa7155f317e05e1697b1afc2b9e0d8e4ed1
+---
+ build/jam/packages/ProsePortal              |  10 +
+ data/prose/themes/Classic.theme             |  51 ++
+ data/prose/themes/Prose Dark.theme          |  51 ++
+ data/prose/themes/Prose Light.theme         |  51 ++
+ src/bin/Jamfile                             |   1 +
+ src/bin/prosetheme/Jamfile                  |   8 +
+ src/bin/prosetheme/prosetheme.cpp           | 521 ++++++++++++++++++++
+ src/data/package_infos/generic/prose_portal |   4 +-
+ 8 files changed, 696 insertions(+), 1 deletion(-)
+ create mode 100644 data/prose/themes/Classic.theme
+ create mode 100644 data/prose/themes/Prose Dark.theme
+ create mode 100644 data/prose/themes/Prose Light.theme
+ create mode 100644 src/bin/prosetheme/Jamfile
+ create mode 100644 src/bin/prosetheme/prosetheme.cpp
+
+diff --git a/build/jam/packages/ProsePortal b/build/jam/packages/ProsePortal
+index e6ef8ec1cd..c62b7f6cb4 100644
+--- a/build/jam/packages/ProsePortal
++++ b/build/jam/packages/ProsePortal
+@@ -15,4 +15,14 @@ portalLaunch = $(portalLaunch:G=launch) ;
+ SEARCH on $(portalLaunch) = [ FDirName $(HAIKU_TOP) data launch ] ;
+ AddFilesToPackage data launch : $(portalLaunch) ;
+ 
++# The themes the host offers in View > Theme and the tool that applies one
++# (prosetheme): here for the same reason, so a newer Prose can bring newer
++# themes without a new system.
++AddFilesToPackage bin : prosetheme ;
++
++local proseThemes = "Prose Light.theme" "Prose Dark.theme" Classic.theme ;
++proseThemes = $(proseThemes:G=prose-themes) ;
++SEARCH on $(proseThemes) = [ FDirName $(HAIKU_TOP) data prose themes ] ;
++AddFilesToPackage data prose themes : $(proseThemes) ;
++
+ BuildHaikuPackage $(prosePortalPackage) : prose_portal ;
+diff --git a/data/prose/themes/Classic.theme b/data/prose/themes/Classic.theme
+new file mode 100644
+index 0000000000..b1ff5d9da5
+--- /dev/null
++++ b/data/prose/themes/Classic.theme
+@@ -0,0 +1,51 @@
++# Classic
++# The yellow tab and the system's own colours, on the dark wallpaper:
++# what a new machine looks like.
++
++decorator = Default
++wallpaper = /boot/system/data/artwork/PROSE wallpaper - ink dark.png
++
++# the window frame
++window_tab = 255,203,0
++window_text = 0,0,0
++window_inactive_tab = 232,232,232
++window_inactive_text = 80,80,80
++window_border = 224,224,224
++window_inactive_border = 232,232,232
++
++# the desktop, behind the wallpaper and under the icons' labels
++desktop = 51,102,152
++
++# panels, menus, documents, controls, lists
++panel_background = 216,216,216
++menu_background = 216,216,216
++navigation_base = 0,0,229
++menu_selected_background = 153,153,153
++menu_text = 0,0,0
++menu_selected_text = 0,0,0
++menu_selected_border = 0,0,0
++panel_text = 0,0,0
++document_background = 255,255,255
++document_text = 0,0,0
++control_background = 222,222,222
++control_text = 0,0,0
++control_border = 172,172,172
++control_highlight = 102,152,203
++navigation_pulse = 0,0,0
++shine = 255,255,255
++shadow = 0,0,0
++tooltip_background = 255,255,216
++tooltip_text = 0,0,0
++control_mark = 27,82,140
++list_background = 255,255,255
++list_selected_background = 190,190,190
++list_text = 0,0,0
++list_selected_text = 0,0,0
++scroll_bar_thumb = 216,216,216
++link_text = 51,102,187
++link_hover = 102,152,203
++link_visited = 145,112,155
++link_active = 121,142,203
++status_bar = 50,150,255
++success = 46,204,64
++failure = 255,65,54
+diff --git a/data/prose/themes/Prose Dark.theme b/data/prose/themes/Prose Dark.theme
+new file mode 100644
+index 0000000000..58e44b6448
+--- /dev/null
++++ b/data/prose/themes/Prose Dark.theme	
+@@ -0,0 +1,51 @@
++# Prose Dark
++# Ink: the dark wallpaper, a charcoal frame with the round buttons at the
++# left, and the system's dark palette for panels, menus and documents.
++
++decorator = ProseDecorator
++wallpaper = /boot/system/data/artwork/PROSE wallpaper - ink dark.png
++
++# the window frame
++window_tab = 56,56,60
++window_text = 232,232,232
++window_inactive_tab = 44,44,48
++window_inactive_text = 150,150,150
++window_border = 56,56,60
++window_inactive_border = 44,44,48
++
++# the desktop, behind the wallpaper and under the icons' labels
++desktop = 24,26,32
++
++# panels, menus, documents, controls, lists
++panel_background = 43,43,43
++menu_background = 28,28,28
++navigation_base = 0,0,229
++menu_selected_background = 90,90,90
++menu_text = 255,255,255
++menu_selected_text = 255,255,255
++menu_selected_border = 0,0,0
++panel_text = 253,253,253
++document_background = 0,0,0
++document_text = 234,234,234
++control_background = 29,29,29
++control_text = 230,230,230
++control_border = 195,195,195
++control_highlight = 75,124,168
++navigation_pulse = 0,0,0
++shine = 255,255,255
++shadow = 0,0,0
++tooltip_background = 76,68,79
++tooltip_text = 255,255,255
++control_mark = 27,82,140
++list_background = 0,0,0
++list_selected_background = 90,90,90
++list_text = 255,255,255
++list_selected_text = 255,255,255
++scroll_bar_thumb = 39,39,39
++link_text = 106,112,212
++link_hover = 102,152,203
++link_visited = 145,112,155
++link_active = 121,142,203
++status_bar = 50,150,255
++success = 46,204,64
++failure = 255,40,54
+diff --git a/data/prose/themes/Prose Light.theme b/data/prose/themes/Prose Light.theme
+new file mode 100644
+index 0000000000..184f6dbaee
+--- /dev/null
++++ b/data/prose/themes/Prose Light.theme	
+@@ -0,0 +1,51 @@
++# Prose Light
++# A pale desk: the paper wallpaper, a light grey frame with the round
++# buttons at the left, and the system's own colours for everything else.
++
++decorator = ProseDecorator
++wallpaper = /boot/system/data/artwork/PROSE wallpaper - paper light.png
++
++# the window frame
++window_tab = 236,236,236
++window_text = 30,30,30
++window_inactive_tab = 246,246,246
++window_inactive_text = 128,128,128
++window_border = 236,236,236
++window_inactive_border = 246,246,246
++
++# the desktop, behind the wallpaper and under the icons' labels
++desktop = 226,226,226
++
++# panels, menus, documents, controls, lists
++panel_background = 216,216,216
++menu_background = 216,216,216
++navigation_base = 0,0,229
++menu_selected_background = 153,153,153
++menu_text = 0,0,0
++menu_selected_text = 0,0,0
++menu_selected_border = 0,0,0
++panel_text = 0,0,0
++document_background = 255,255,255
++document_text = 0,0,0
++control_background = 222,222,222
++control_text = 0,0,0
++control_border = 172,172,172
++control_highlight = 102,152,203
++navigation_pulse = 0,0,0
++shine = 255,255,255
++shadow = 0,0,0
++tooltip_background = 255,255,216
++tooltip_text = 0,0,0
++control_mark = 27,82,140
++list_background = 255,255,255
++list_selected_background = 190,190,190
++list_text = 0,0,0
++list_selected_text = 0,0,0
++scroll_bar_thumb = 216,216,216
++link_text = 51,102,187
++link_hover = 102,152,203
++link_visited = 145,112,155
++link_active = 121,142,203
++status_bar = 50,150,255
++success = 46,204,64
++failure = 255,65,54
+diff --git a/src/bin/Jamfile b/src/bin/Jamfile
+index 4198d6f0aa..b865ed2aed 100644
+--- a/src/bin/Jamfile
++++ b/src/bin/Jamfile
+@@ -273,6 +273,7 @@ SubInclude HAIKU_TOP src bin package_repo ;
+ SubInclude HAIKU_TOP src bin pc ;
+ SubInclude HAIKU_TOP src bin pcmcia-cs ;
+ SubInclude HAIKU_TOP src bin pkgman ;
++SubInclude HAIKU_TOP src bin prosetheme ;
+ SubInclude HAIKU_TOP src bin query ;
+ SubInclude HAIKU_TOP src bin rc ;
+ SubInclude HAIKU_TOP src bin screen_blanker ;
+diff --git a/src/bin/prosetheme/Jamfile b/src/bin/prosetheme/Jamfile
+new file mode 100644
+index 0000000000..b62c382387
+--- /dev/null
++++ b/src/bin/prosetheme/Jamfile
+@@ -0,0 +1,8 @@
++SubDir HAIKU_TOP src bin prosetheme ;
++
++UsePrivateHeaders interface ;
++
++Application prosetheme :
++	prosetheme.cpp
++	: be [ TargetLibsupc++ ]
++	;
+diff --git a/src/bin/prosetheme/prosetheme.cpp b/src/bin/prosetheme/prosetheme.cpp
+new file mode 100644
+index 0000000000..f6682c1467
+--- /dev/null
++++ b/src/bin/prosetheme/prosetheme.cpp
+@@ -0,0 +1,521 @@
++/*
++ * Copyright 2026, the Prose project. MIT licence.
++ *
++ * prosetheme: apply a theme to this machine -- a window decorator, the
++ * system's colours and the desktop's wallpaper, from one file -- so the host
++ * can offer themes in a menu and switch them through the portal.
++ *
++ *   prosetheme --list        the themes there are; "* " marks the current one
++ *   prosetheme --current     the current theme's name
++ *   prosetheme --show NAME   what a theme sets
++ *   prosetheme NAME          apply it
++ *
++ * A theme is NAME.theme in /boot/system/data/prose/themes (shipped) or in
++ * ~/config/settings/prose/themes (the user's, which win), lines of
++ * "key = value":
++ *
++ *   decorator = ProseDecorator      a decorator's name as setdecor knows it
++ *   wallpaper = /path/to/image.png  scaled to the screen; "none" clears it
++ *   window_tab = 236,236,236        a colour, r,g,b -- the keys are below
++ *
++ * A key a theme leaves out keeps its current value, so a theme may be partial.
++ * app_server keeps the colours and the decorator, Tracker keeps the wallpaper,
++ * so what was applied survives a restart; the name is kept in
++ * ~/config/settings/prose/theme for --list and --current.
++ */
++
++
++#include <ctype.h>
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <Application.h>
++#include <Directory.h>
++#include <Entry.h>
++#include <File.h>
++#include <FindDirectory.h>
++#include <InterfaceDefs.h>
++#include <Message.h>
++#include <Messenger.h>
++#include <Node.h>
++#include <Path.h>
++#include <String.h>
++
++#include <be_apps/Tracker/Background.h>
++#include <DecorInfo.h>
++
++
++static const char* kTrackerSignature = "application/x-vnd.Be-TRAK";
++static const char* kThemesSubdirectory = "prose/themes";
++static const char* kCurrentFile = "prose/theme";
++
++
++static const struct {
++	const char*	key;
++	color_which	which;
++} kColorKeys[] = {
++	{ "panel_background", B_PANEL_BACKGROUND_COLOR },
++	{ "panel_text", B_PANEL_TEXT_COLOR },
++	{ "document_background", B_DOCUMENT_BACKGROUND_COLOR },
++	{ "document_text", B_DOCUMENT_TEXT_COLOR },
++	{ "control_background", B_CONTROL_BACKGROUND_COLOR },
++	{ "control_text", B_CONTROL_TEXT_COLOR },
++	{ "control_border", B_CONTROL_BORDER_COLOR },
++	{ "control_highlight", B_CONTROL_HIGHLIGHT_COLOR },
++	{ "control_mark", B_CONTROL_MARK_COLOR },
++	{ "navigation_base", B_NAVIGATION_BASE_COLOR },
++	{ "navigation_pulse", B_NAVIGATION_PULSE_COLOR },
++	{ "shine", B_SHINE_COLOR },
++	{ "shadow", B_SHADOW_COLOR },
++	{ "link_text", B_LINK_TEXT_COLOR },
++	{ "link_hover", B_LINK_HOVER_COLOR },
++	{ "link_visited", B_LINK_VISITED_COLOR },
++	{ "link_active", B_LINK_ACTIVE_COLOR },
++	{ "menu_background", B_MENU_BACKGROUND_COLOR },
++	{ "menu_selected_background", B_MENU_SELECTED_BACKGROUND_COLOR },
++	{ "menu_text", B_MENU_ITEM_TEXT_COLOR },
++	{ "menu_selected_text", B_MENU_SELECTED_ITEM_TEXT_COLOR },
++	{ "menu_selected_border", B_MENU_SELECTED_BORDER_COLOR },
++	{ "list_background", B_LIST_BACKGROUND_COLOR },
++	{ "list_selected_background", B_LIST_SELECTED_BACKGROUND_COLOR },
++	{ "list_text", B_LIST_ITEM_TEXT_COLOR },
++	{ "list_selected_text", B_LIST_SELECTED_ITEM_TEXT_COLOR },
++	{ "scroll_bar_thumb", B_SCROLL_BAR_THUMB_COLOR },
++	{ "tooltip_background", B_TOOL_TIP_BACKGROUND_COLOR },
++	{ "tooltip_text", B_TOOL_TIP_TEXT_COLOR },
++	{ "status_bar", B_STATUS_BAR_COLOR },
++	{ "success", B_SUCCESS_COLOR },
++	{ "failure", B_FAILURE_COLOR },
++	{ "window_tab", B_WINDOW_TAB_COLOR },
++	{ "window_text", B_WINDOW_TEXT_COLOR },
++	{ "window_inactive_tab", B_WINDOW_INACTIVE_TAB_COLOR },
++	{ "window_inactive_text", B_WINDOW_INACTIVE_TEXT_COLOR },
++	{ "window_border", B_WINDOW_BORDER_COLOR },
++	{ "window_inactive_border", B_WINDOW_INACTIVE_BORDER_COLOR },
++	{ "desktop", B_DESKTOP_COLOR },
++};
++static const size_t kColorKeyCount = sizeof(kColorKeys) / sizeof(kColorKeys[0]);
++
++
++struct Theme {
++	BString		name;
++	BString		decorator;
++	bool		hasWallpaper;
++	BString		wallpaper;			// empty with hasWallpaper: none
++	bool		hasColor[kColorKeyCount];
++	rgb_color	color[kColorKeyCount];
++
++	Theme()
++		:
++		hasWallpaper(false)
++	{
++		memset(hasColor, 0, sizeof(hasColor));
++	}
++};
++
++
++// #pragma mark - where themes are
++
++
++static bool
++themes_directory(directory_which which, BPath& path)
++{
++	if (find_directory(which, &path) != B_OK)
++		return false;
++	path.Append(kThemesSubdirectory);
++	return true;
++}
++
++
++static bool
++current_theme_path(BPath& path)
++{
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK)
++		return false;
++	path.Append(kCurrentFile);
++	return true;
++}
++
++
++static BString
++current_theme()
++{
++	BPath path;
++	if (!current_theme_path(path))
++		return BString();
++	BFile file(path.Path(), B_READ_ONLY);
++	if (file.InitCheck() != B_OK)
++		return BString();
++	char buffer[256];
++	ssize_t read = file.Read(buffer, sizeof(buffer) - 1);
++	if (read <= 0)
++		return BString();
++	buffer[read] = '\0';
++	BString name(buffer);
++	name.Trim();
++	return name;
++}
++
++
++static status_t
++remember_theme(const char* name)
++{
++	BPath path;
++	if (!current_theme_path(path))
++		return B_ERROR;
++	BPath parent;
++	path.GetParent(&parent);
++	create_directory(parent.Path(), 0755);
++	BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
++	if (file.InitCheck() != B_OK)
++		return file.InitCheck();
++	BString line(name);
++	line << "\n";
++	ssize_t written = file.Write(line.String(), line.Length());
++	return written == line.Length() ? B_OK : B_ERROR;
++}
++
++
++/*!	The theme's file: the user's directory first, then the shipped one. */
++static bool
++find_theme(const char* name, BPath& path)
++{
++	const directory_which places[] = {
++		B_USER_SETTINGS_DIRECTORY, B_SYSTEM_DATA_DIRECTORY
++	};
++	for (size_t i = 0; i < sizeof(places) / sizeof(places[0]); i++) {
++		if (!themes_directory(places[i], path))
++			continue;
++		BString file(name);
++		file << ".theme";
++		path.Append(file.String());
++		BEntry entry(path.Path());
++		if (entry.Exists() && entry.IsFile())
++			return true;
++	}
++	return false;
++}
++
++
++static int
++compare_names(const void* a, const void* b)
++{
++	return strcasecmp(*(const char* const*)a, *(const char* const*)b);
++}
++
++
++/*!	Every NAME.theme in the two directories, each name once, sorted. */
++static int32
++list_themes(BString* names, int32 capacity)
++{
++	int32 count = 0;
++	const directory_which places[] = {
++		B_SYSTEM_DATA_DIRECTORY, B_USER_SETTINGS_DIRECTORY
++	};
++	for (size_t i = 0; i < sizeof(places) / sizeof(places[0]); i++) {
++		BPath path;
++		if (!themes_directory(places[i], path))
++			continue;
++		BDirectory directory(path.Path());
++		if (directory.InitCheck() != B_OK)
++			continue;
++		BEntry entry;
++		while (directory.GetNextEntry(&entry) == B_OK && count < capacity) {
++			char leaf[B_FILE_NAME_LENGTH];
++			if (!entry.IsFile() || entry.GetName(leaf) != B_OK)
++				continue;
++			BString name(leaf);
++			if (!name.EndsWith(".theme"))
++				continue;
++			name.Truncate(name.Length() - 6);
++			bool seen = false;
++			for (int32 j = 0; j < count; j++) {
++				if (names[j].ICompare(name) == 0)
++					seen = true;
++			}
++			if (!seen)
++				names[count++] = name;
++		}
++	}
++	const char* raw[64];
++	for (int32 i = 0; i < count; i++)
++		raw[i] = names[i].String();
++	qsort(raw, count, sizeof(raw[0]), compare_names);
++	BString sorted[64];
++	for (int32 i = 0; i < count; i++)
++		sorted[i] = raw[i];
++	for (int32 i = 0; i < count; i++)
++		names[i] = sorted[i];
++	return count;
++}
++
++
++// #pragma mark - reading a theme
++
++
++static bool
++parse_color(const char* text, rgb_color& color)
++{
++	int r, g, b;
++	if (sscanf(text, "%d , %d , %d", &r, &g, &b) != 3)
++		return false;
++	if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255)
++		return false;
++	color.red = r;
++	color.green = g;
++	color.blue = b;
++	color.alpha = 255;
++	return true;
++}
++
++
++static status_t
++read_theme(const char* name, Theme& theme)
++{
++	BPath path;
++	if (!find_theme(name, path))
++		return B_NAME_NOT_FOUND;
++	FILE* file = fopen(path.Path(), "r");
++	if (file == NULL)
++		return errno;
++
++	theme.name = name;
++	char line[1024];
++	int lineNumber = 0;
++	while (fgets(line, sizeof(line), file) != NULL) {
++		lineNumber++;
++		char* text = line;
++		while (isspace(*text))
++			text++;
++		if (*text == '#' || *text == '\0')
++			continue;
++		char* equals = strchr(text, '=');
++		if (equals == NULL) {
++			fprintf(stderr, "%s:%d: not \"key = value\"\n", path.Path(),
++				lineNumber);
++			continue;
++		}
++		*equals = '\0';
++		BString key(text);
++		key.Trim();
++		key.ToLower();
++		BString value(equals + 1);
++		value.Trim();
++
++		if (key == "decorator") {
++			theme.decorator = value;
++			continue;
++		}
++		if (key == "wallpaper") {
++			theme.hasWallpaper = true;
++			theme.wallpaper = value.ICompare("none") == 0 ? "" : value;
++			continue;
++		}
++		bool known = false;
++		for (size_t i = 0; i < kColorKeyCount; i++) {
++			if (key != kColorKeys[i].key)
++				continue;
++			known = true;
++			if (parse_color(value.String(), theme.color[i]))
++				theme.hasColor[i] = true;
++			else {
++				fprintf(stderr, "%s:%d: %s is not a colour (r,g,b)\n",
++					path.Path(), lineNumber, value.String());
++			}
++		}
++		if (!known) {
++			fprintf(stderr, "%s:%d: unknown key \"%s\"\n", path.Path(),
++				lineNumber, key.String());
++		}
++	}
++	fclose(file);
++	return B_OK;
++}
++
++
++// #pragma mark - applying one
++
++
++static status_t
++apply_decorator(const char* name)
++{
++	DecorInfoUtility utility;
++	DecorInfo* decorator = utility.FindDecorator(name);
++	if (decorator == NULL)
++		return B_NAME_NOT_FOUND;
++	if (utility.IsCurrentDecorator(decorator))
++		return B_OK;
++	return utility.SetDecorator(decorator);
++}
++
++
++/*!	What the Backgrounds preferences write for "scaled to fit" on every
++	workspace, and the refresh they ask Tracker for. An empty message is a
++	desktop with no image: the desktop colour shows. */
++static status_t
++apply_wallpaper(const char* imagePath)
++{
++	BPath desktop;
++	status_t status = find_directory(B_DESKTOP_DIRECTORY, &desktop);
++	if (status != B_OK)
++		return status;
++	BNode node(desktop.Path());
++	if (node.InitCheck() != B_OK)
++		return node.InitCheck();
++
++	BMessage info;
++	if (imagePath != NULL && imagePath[0] != '\0') {
++		BEntry image(imagePath);
++		if (!image.Exists())
++			return B_ENTRY_NOT_FOUND;
++		info.AddString(B_BACKGROUND_IMAGE, imagePath);
++		info.AddInt32(B_BACKGROUND_WORKSPACES, (int32)0xffffffff);
++		info.AddInt32(B_BACKGROUND_MODE, B_BACKGROUND_MODE_SCALED);
++		info.AddBool(B_BACKGROUND_ERASE_TEXT, false);
++		info.AddPoint(B_BACKGROUND_ORIGIN, BPoint(0, 0));
++	}
++	ssize_t size = info.FlattenedSize();
++	char* buffer = new char[size];
++	info.Flatten(buffer, size);
++	ssize_t written = node.WriteAttr(B_BACKGROUND_INFO, B_MESSAGE_TYPE, 0,
++		buffer, size);
++	delete[] buffer;
++	if (written < 0)
++		return written;
++	if (written != size)
++		return B_ERROR;
++
++	BMessenger tracker(kTrackerSignature);
++	if (tracker.IsValid())
++		tracker.SendMessage(B_RESTORE_BACKGROUND_IMAGE);
++	return B_OK;
++}
++
++
++static int
++apply_theme(const Theme& theme)
++{
++	int failures = 0;
++
++	int32 colors = 0;
++	for (size_t i = 0; i < kColorKeyCount; i++) {
++		if (!theme.hasColor[i])
++			continue;
++		set_ui_color(kColorKeys[i].which, theme.color[i]);
++		colors++;
++	}
++	printf("%s: %" B_PRId32 " colour%s", theme.name.String(), colors,
++		colors == 1 ? "" : "s");
++
++	if (theme.decorator.Length() > 0) {
++		status_t status = apply_decorator(theme.decorator.String());
++		if (status == B_OK)
++			printf(", decorator %s", theme.decorator.String());
++		else {
++			printf(", decorator %s: %s", theme.decorator.String(),
++				strerror(status));
++			failures++;
++		}
++	}
++
++	if (theme.hasWallpaper) {
++		status_t status = apply_wallpaper(theme.wallpaper.String());
++		const char* what = theme.wallpaper.Length() > 0
++			? theme.wallpaper.String() : "no wallpaper";
++		if (status == B_OK)
++			printf(", %s", what);
++		else {
++			printf(", %s: %s", what, strerror(status));
++			failures++;
++		}
++	}
++	printf("\n");
++
++	if (failures == 0 && remember_theme(theme.name.String()) != B_OK)
++		fprintf(stderr, "could not remember the theme's name\n");
++	return failures;
++}
++
++
++// #pragma mark - main
++
++
++static void
++usage()
++{
++	fprintf(stderr,
++		"usage: prosetheme --list | --current | --show NAME | NAME\n"
++		"  --list      the themes there are; \"* \" marks the current one\n"
++		"  --current   the current theme's name\n"
++		"  --show      what a theme sets\n"
++		"  NAME        apply that theme\n");
++}
++
++
++int
++main(int argc, char** argv)
++{
++	if (argc < 2) {
++		usage();
++		return 1;
++	}
++
++	if (strcmp(argv[1], "--list") == 0) {
++		BString names[64];
++		int32 count = list_themes(names, 64);
++		BString current = current_theme();
++		for (int32 i = 0; i < count; i++) {
++			printf("%s%s\n", names[i] == current ? "* " : "",
++				names[i].String());
++		}
++		return 0;
++	}
++
++	if (strcmp(argv[1], "--current") == 0) {
++		printf("%s\n", current_theme().String());
++		return 0;
++	}
++
++	// the name may be given in several words
++	BString name;
++	int first = strcmp(argv[1], "--show") == 0 ? 2 : 1;
++	for (int i = first; i < argc; i++) {
++		if (i > first)
++			name << " ";
++		name << argv[i];
++	}
++	if (name.Length() == 0) {
++		usage();
++		return 1;
++	}
++
++	Theme theme;
++	status_t status = read_theme(name.String(), theme);
++	if (status != B_OK) {
++		fprintf(stderr, "%s: %s\n", name.String(),
++			status == B_NAME_NOT_FOUND ? "no such theme" : strerror(status));
++		return 1;
++	}
++
++	if (first == 2) {
++		if (theme.decorator.Length() > 0)
++			printf("decorator = %s\n", theme.decorator.String());
++		if (theme.hasWallpaper) {
++			printf("wallpaper = %s\n", theme.wallpaper.Length() > 0
++				? theme.wallpaper.String() : "none");
++		}
++		for (size_t i = 0; i < kColorKeyCount; i++) {
++			if (!theme.hasColor[i])
++				continue;
++			printf("%s = %d,%d,%d\n", kColorKeys[i].key, theme.color[i].red,
++				theme.color[i].green, theme.color[i].blue);
++		}
++		return 0;
++	}
++
++	// colours and the decorator go through app_server: that takes a BApplication
++	BApplication application("application/x-vnd.prose-theme");
++	return apply_theme(theme) == 0 ? 0 : 1;
++}
+diff --git a/src/data/package_infos/generic/prose_portal b/src/data/package_infos/generic/prose_portal
+index 8057b8f39f..4aae1ffd11 100644
+--- a/src/data/package_infos/generic/prose_portal
++++ b/src/data/package_infos/generic/prose_portal
+@@ -5,7 +5,8 @@ summary			"The portal the host drives this machine through"
+ 
+ description		"A driver for the Prose Portal device and the daemon that \
+ answers on it: the host asks this machine to do something and hears what \
+-happened. Its own package so it can be replaced on its own."
++happened, and the themes the host offers with the tool that applies them. \
++Its own package so it can be replaced on its own."
+ 
+ packager		"The Haiku build system"
+ vendor			"Prose"
+@@ -15,6 +16,7 @@ licenses		"MIT"
+ 
+ provides {
+ 	prose_portal = %HAIKU_VERSION%
++	cmd:prosetheme = %HAIKU_VERSION%
+ }
+ 
+ requires {
