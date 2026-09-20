@@ -104,7 +104,7 @@ their work produced, and everything that makes it good is theirs.
   Virtualization.framework VM with custom virtio devices of its own — a
   shared-surface display, keyboard and tablet, a MIDI port — plus networking,
   sound, and a Mac folder shared into the guest.
-- **`patches/haiku`** — 60 patches against Haiku at hrev60122, applied to a
+- **`patches/haiku`** — 76 patches against Haiku at hrev60122, applied to a
   local tree to build the guest.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
@@ -165,6 +165,37 @@ that Haiku did most of it already: BeOS's scripting system is message-based, so
 every application in the guest is scriptable without being modified, and a
 `BMessage` flattens straight onto the wire.
 
+### Writing software on it
+
+Prose compiles its own programs. **clang** and **lld** (LLVM 23) are in the
+image, cross-built here by `prosepkg` from a recipe of our own: the community's
+LLVM recipe builds the whole project natively on Haiku, which a machine with no
+compiler cannot do. Clang assembles the code it generates itself and lld links
+it, so a whole toolchain is two programs and no `binutils`. They compile against
+Haiku's own headers and link against the C++ library the system already carries;
+`make` and `mkdepend` are there for anything bigger than one file.
+
+**Sisong** (Deskbar ▸ Development) is the editor: Caitlin Shaw's programmer's
+editor and small IDE for BeOS, from 2009, ported here — tabs, syntax colouring,
+a function list, brace matching, find in files, and projects with build scripts
+whose compiler errors are lines you can click. It was written for 32-bit x86 and
+gcc 2, so the port is mostly about what changes on arm64 with a current
+compiler; [ProseApps `ports/Sisong/PORT.md`](https://github.com/albanread/ProseApps)
+lists what that came to. **File ▸ New C++ Source** starts a program, and **Run ▸
+Compile This File** builds and runs the one being edited, with no project around
+it.
+
+Six short programs to read and change are in `/boot/system/data/prose-examples`:
+hello in C, C++ and the standard library, a window, a view that paints itself,
+the named values a file carries beside its contents, and threads with the lock
+that keeps them honest. Each has a Makefile, and its first lines say what to
+type without one.
+
+```sh
+cp -r /boot/system/data/prose-examples ~/examples
+cd ~/examples && make
+```
+
 ### What works
 
 | | |
@@ -177,6 +208,7 @@ every application in the guest is scriptable without being modified, and a
 | Storage | NVMe, virtio-block, and a Mac folder mounted in the guest |
 | Automation | A portal device the guest answers on — run a command, get its exit status — and an AppleScript dictionary |
 | Look | Two conventional window frames of its own, and themes — wallpaper, colours and frame together — chosen from the host's View menu ([docs/decorators.md](docs/decorators.md)) |
+| Development | clang and lld (LLVM 23), `make`, Haiku's headers and link libraries, and six examples: the machine compiles and runs its own programs |
 | Software | ~120 applications, a web browser, codecs, OpenSSL; ProseWriter, a word processor, and Sisong, a programmer's editor, ported and built here |
 
 ## Requirements
