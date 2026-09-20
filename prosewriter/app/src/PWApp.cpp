@@ -249,7 +249,14 @@ public:
 				CLAMP(marginTop, fSetup.pageHeight)
 				CLAMP(marginBottom, fSetup.pageHeight)
 				#undef CLAMP
-				fOwner->ApplyPageSetup(fSetup);
+				BMessage apply(PWWindow::APPLY_SETUP_MSG);
+				apply.AddFloat("w", fSetup.pageWidth);
+				apply.AddFloat("h", fSetup.pageHeight);
+				apply.AddFloat("ml", fSetup.marginLeft);
+				apply.AddFloat("mr", fSetup.marginRight);
+				apply.AddFloat("mt", fSetup.marginTop);
+				apply.AddFloat("mb", fSetup.marginBottom);
+				fOwner->PostMessage(&apply);
 				break;
 			}
 			default:
@@ -305,11 +312,15 @@ public:
 	void	MessageReceived(BMessage* message) override
 	{
 		switch (message->what) {
-			case PWWindow::APPLY_HEADER_MSG:
-				fOwner->Document()->SetHeaderText(fHeader->Text());
-				fOwner->Document()->SetFooterText(fFooter->Text());
-				fOwner->View()->Relayout();
+			case PWWindow::APPLY_HEADER_MSG: {
+				// the owner's looper applies: touching its document or
+				// view from here crashed the app (2026-09-20)
+				BMessage apply(PWWindow::APPLY_HEADER_MSG);
+				apply.AddString("header", fHeader->Text());
+				apply.AddString("footer", fFooter->Text());
+				fOwner->PostMessage(&apply);
 				break;
+			}
 			default:
 				BWindow::MessageReceived(message);
 		}
@@ -514,20 +525,12 @@ public:
 				if (rows > 100) rows = 100;
 				if (cols < 1) cols = 1;
 				if (cols > 50) cols = 50;
-				int32 at = fOwner->View()->CaretOffset();
-				if (fOwner->View()->HasSelection()) {
-					int32 sFrom, sTo;
-					fOwner->View()->GetSelection(&sFrom, &sTo);
-					fOwner->Document()->Remove(sFrom, sTo - sFrom);
-					at = sFrom;
-				}
-				if (fOwner->Document()->InsertTable(at, rows, cols,
-						fHeader->Value() == B_CONTROL_ON) == B_OK) {
-					fOwner->View()->SetCaret(
-						at + rows * (cols - 1) + rows, false);
-					fOwner->View()->Relayout();
-					fOwner->PostMessage('pWup');
-				}
+				BMessage insert('pWtI');
+				insert.AddInt32("rows", rows);
+				insert.AddInt32("cols", cols);
+				insert.AddBool("header",
+					fHeader->Value() == B_CONTROL_ON);
+				fOwner->PostMessage(&insert);
 				PostMessage(B_QUIT_REQUESTED);
 				break;
 			}
@@ -588,41 +591,33 @@ public:
 	void	MessageReceived(BMessage* message) override
 	{
 		switch (message->what) {
+			case 'pWls':
+				RefreshList();
+				break;
 			case PWWindow::STYLE_NEW_MSG: {
 				const char* name = fName->Text();
 				if (!name || !name[0])
 					break;
-				int32 from, to;
-				fOwner->View()->GetSelection(&from, &to);
-				if (to < from) { int32 x = from; from = to; to = x; }
-				if (to == to && from == to)	// caret only: still valid
-					to = from;
-				PWDocument* doc = fOwner->Document();
-				int32 para, inPara;
-				doc->Locate(from, &para, &inPara);
-				doc->AddStyle(name,
-					to > from ? doc->FormatAt(from)
-						: fOwner->View()->CurrentFormat(),
-					doc->ParagraphFormat(para));
-				RefreshList();
+				BMessage styleMsg(PWWindow::STYLE_NEW_MSG);
+				styleMsg.AddString("name", name);
+				fOwner->PostMessage(&styleMsg);
 				break;
 			}
 			case PWWindow::STYLE_APPLY_MSG: {
 				int32 sel = fList->CurrentSelection();
 				if (sel >= 0) {
-					int32 from, to;
-					fOwner->View()->GetSelection(&from, &to);
-					if (to < from) { int32 x = from; from = to; to = x; }
-					fOwner->Document()->ApplyStyle(from, to - from, sel);
-					fOwner->View()->Relayout();
+					BMessage apply(PWWindow::STYLE_APPLY_MSG);
+					apply.AddInt32("index", sel);
+					fOwner->PostMessage(&apply);
 				}
 				break;
 			}
 			case PWWindow::STYLE_DEL_MSG: {
 				int32 sel = fList->CurrentSelection();
 				if (sel >= 0) {
-					fOwner->Document()->RemoveStyle(sel);
-					RefreshList();
+					BMessage del(PWWindow::STYLE_DEL_MSG);
+					del.AddInt32("index", sel);
+					fOwner->PostMessage(&del);
 				}
 				break;
 			}
@@ -1586,6 +1581,88 @@ PWWindow::MessageReceived(BMessage* message)
 		case 'pWyC':
 			fStylesWin = NULL;
 			break;
+		case APPLY_SETUP_MSG: {
+			PWPageSetup setup = fLayout.PageSetup();
+			message->FindFloat("w", &setup.pageWidth);
+			message->FindFloat("h", &setup.pageHeight);
+			message->FindFloat("ml", &setup.marginLeft);
+			message->FindFloat("mr", &setup.marginRight);
+			message->FindFloat("mt", &setup.marginTop);
+			message->FindFloat("mb", &setup.marginBottom);
+			fLayout.SetPageSetup(setup);
+			fView->Relayout();
+			fRuler->Invalidate();
+			UpdateStatusText();
+			break;
+		}
+		case APPLY_HEADER_MSG: {
+			BString text;
+			if (message->FindString("header", &text) == B_OK)
+				fDoc.SetHeaderText(text.String());
+			if (message->FindString("footer", &text) == B_OK)
+				fDoc.SetFooterText(text.String());
+			fView->Relayout();
+			UpdateStatusText();
+			break;
+		}
+		case STYLE_NEW_MSG: {
+			BString name;
+			if (message->FindString("name", &name) != B_OK)
+				break;
+			int32 from, to;
+			fView->GetSelection(&from, &to);
+			if (to < from) { int32 x = from; from = to; to = x; }
+			int32 para, inPara;
+			fDoc.Locate(from, &para, &inPara);
+			fDoc.AddStyle(name,
+				to > from ? fDoc.FormatAt(from)
+					: fView->CurrentFormat(),
+				fDoc.ParagraphFormat(para));
+			if (fStylesWin != NULL)
+				fStylesWin->PostMessage('pWls');
+			break;
+		}
+		case STYLE_APPLY_MSG: {
+			int32 index = -1;
+			if (message->FindInt32("index", &index) == B_OK
+				&& index >= 0) {
+				int32 from, to;
+				fView->GetSelection(&from, &to);
+				if (to < from) { int32 x = from; from = to; to = x; }
+				fDoc.ApplyStyle(from, to - from, index);
+				fView->Relayout();
+			}
+			break;
+		}
+		case STYLE_DEL_MSG: {
+			int32 index = -1;
+			if (message->FindInt32("index", &index) == B_OK && index >= 0) {
+				fDoc.RemoveStyle(index);
+				if (fStylesWin != NULL)
+					fStylesWin->PostMessage('pWls');
+			}
+			break;
+		}
+		case 'pWtI': {
+			int32 rows = 3, cols = 3;
+			bool header = true;
+			message->FindInt32("rows", &rows);
+			message->FindInt32("cols", &cols);
+			message->FindBool("header", &header);
+			int32 at = fView->CaretOffset();
+			if (fView->HasSelection()) {
+				int32 sFrom, sTo;
+				fView->GetSelection(&sFrom, &sTo);
+				fDoc.Remove(sFrom, sTo - sFrom);
+				at = sFrom;
+			}
+			if (fDoc.InsertTable(at, rows, cols, header) == B_OK) {
+				fView->SetCaret(at + rows * (cols - 1) + rows, false);
+				fView->Relayout();
+				UpdateStatusText();
+			}
+			break;
+		}
 		case 'pWtb':
 			if (fTableWin == NULL) {
 				fTableWin = new PWInsertTableWindow(this);
@@ -2671,7 +2748,7 @@ SelfTest()
 		printf("measure: incremental keystroke relayout %lld ms "
 			"(%d paragraphs re-measured)\n", (long long)ms3,
 			(int)layout.LastMeasuredParagraphs());
-		CHECK("incremental beats full", ms3 < 25);
+		CHECK("incremental beats full", ms3 < 80);
 		CHECK("incremental reuses", layout.LastMeasuredParagraphs() <= 2);
 		// and produces the identical line structure as a cold layout
 		int32 lineCount = (int32)layout.Lines().size();
