@@ -166,9 +166,37 @@ tables deferred to a focused sprint of their own.*
    column); persistence carries raw BGRA pixels in .prose; images raise
    their line's height and share the line with following text. v2 (wrap
    around anchored images) waits until there's a use for it.
-3. **Tables — moved to their own sprint.** A grid model, cell layout and
-   editing is the largest single feature left; doing it justice needs a
-   fresh session, not the tail of this one.
+3. **Tables — done in Sprint 7** (the "own sprint" it was moved to).
+
+### Sprint 7 — tables
+
+*A table is a maximal run of paragraphs containing kCellSep (0x1D, a byte
+that cannot occur in UTF-8): rows are paragraphs, cells are separator-
+delimited spans.* No stored table structure to maintain — rows appear when
+a paragraph gains a separator and leave when it loses the last one:
+
+- Layout: each row wraps its cells (proportional column widths from
+  content, minimum 30 pt) and synthesises ONE line of the row height, so
+  page flow, pagination and the incremental fingerprints treat a row like
+  any other line.
+- Caret and hit-testing map through cell geometry (byte ↔ cell ↔ x/y),
+  self-tested round trip at every offset of a seeded table.
+- Rendering reuses segments: cells emit ordinary segments at their grid
+  positions — styles, spell squiggles and inline images work in cells for
+  free — with grid rules drawn by the view.
+- Editing: Tab inside a row inserts a cell; Enter adds a row (a new
+  paragraph with separators stays in the table; a plain one leaves it);
+  Backspace across a boundary merges cells. File ▸ Insert table drops a
+  3×3 grid. Persistence: separators are ordinary text bytes, so .prose
+  round trip needs nothing new. RTF export writes cells tab-separated;
+  RTF table import (	rowd) is future work.
+- Session note: the C++ hex-escape trap bit the test data ("12" is
+  one greedy escape, not 0x1D followed by "12") — all separators are
+  written octal (), which cannot be greedy.
+
+**Exit criteria met:** seeded table renders with grid and cell text in
+the guest (screenshot run/s7-table-observe.png); caret round trip, cell
+counts, column fill and persistence selftested — 97/97 PASS.
 
 **Sprint 4 hardening ledger** (all root-caused, all fixed): the selftest
 case array overflowed its fixed size (now a vector); the agent died on

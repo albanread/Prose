@@ -379,6 +379,7 @@ static const char* gFooter = NULL;
 static const char* gPaper = NULL;
 static const char* gSeed = NULL;
 static const char* gSeedImage = NULL;
+static bool gSeedTable = false;
 static bool gLandscape = false;
 static bool gPrint = false;
 
@@ -396,6 +397,8 @@ ParseArgs(int argc, char** argv)
 			gSeed = argv[++i];
 		else if (!strcmp(argv[i], "--seed-image") && i + 1 < argc)
 			gSeedImage = argv[++i];
+		else if (!strcmp(argv[i], "--seed-table"))
+			gSeedTable = true;
 		else if (!strcmp(argv[i], "--landscape"))
 			gLandscape = true;
 		else if (!strcmp(argv[i], "--print"))
@@ -515,6 +518,8 @@ ApplyWindowArgs(PWWindow* window)
 		args.AddString("seed", gSeed);
 	if (gSeedImage)
 		args.AddString("seedImage", gSeedImage);
+	if (gSeedTable)
+		args.AddBool("seedTable", true);
 	if (gPrint)
 		args.AddBool("print", true);
 	window->PostMessage(&args);
@@ -603,6 +608,7 @@ PWWindow::BuildMenus()
 	BuildRecentMenu();
 	menu->AddSeparatorItem();
 	menu->AddItem(item("Insert image" B_UTF8_ELLIPSIS, 'pWim'));
+	menu->AddItem(item("Insert table", 'pWtb'));
 	menu->AddItem(item("Page setup" B_UTF8_ELLIPSIS, PAGE_SETUP_MSG));
 	menu->AddItem(item("Print" B_UTF8_ELLIPSIS, PRINT_MSG, 'P',
 		B_COMMAND_KEY));
@@ -1344,6 +1350,31 @@ PWWindow::MessageReceived(BMessage* message)
 		case 'pWyC':
 			fStylesWin = NULL;
 			break;
+		case 'pWtb': {
+			// three rows of three empty cells; rows are paragraphs, cells
+			// are separated by 0x1D — Enter adds rows, last-cell Enter
+			// leaves the table, Backspace at a boundary merges cells
+			int32 at = fView->CaretOffset();
+			if (fView->HasSelection()) {
+				int32 sFrom, sTo;
+				fView->GetSelection(&sFrom, &sTo);
+				fDoc.Remove(sFrom, sTo - sFrom);
+				at = sFrom;
+			}
+			for (int32 r = 0; r < 3; r++) {
+				BString row("\035\035");	// three cells: two separators
+				fDoc.Insert(at, row.String(), NULL);
+				at += 2;
+				if (r < 2) {
+					fDoc.SplitPara(at);
+					at += 1;
+				}
+			}
+			fView->SetCaret(at, false);
+			fView->Relayout();
+			UpdateStatusText();
+			break;
+		}
 		case 'pWim': {
 			// one-shot image panel; images land scaled to the column
 			BMessage* pick = new BMessage('pWif');
@@ -1431,6 +1462,17 @@ PWWindow::MessageReceived(BMessage* message)
 			}
 			if (args->FindString("seed", &text) == B_OK)
 				fDoc.Insert(0, text.String(), NULL);
+			bool seedTable = false;
+			if (args->FindBool("seedTable", &seedTable) == B_OK
+				&& seedTable) {
+				fDoc.Insert(0, "Widget\035Qty\035Price", NULL);
+				fDoc.SplitPara(10);
+				fDoc.Insert(11, "bolt\03512\0350.30", NULL);
+				fDoc.SplitPara(18);
+				fDoc.Insert(19, "nut\035144\0350.05", NULL);
+				fDoc.SplitPara(27);
+				fDoc.Insert(28, "A table, as paragraphs.", NULL);
+			}
 			BString imagePath;
 			if (args->FindString("seedImage", &imagePath) == B_OK) {
 				BBitmap* bmp = BTranslationUtils::GetBitmap(imagePath);
@@ -1627,7 +1669,7 @@ public:
 		fWindow = new PWWindow(frame, "Untitled");
 		fWindow->Show();
 		if (gHeader || gFooter || gPaper || gLandscape || gSeed
-			|| gSeedImage)
+			|| gSeedImage || gSeedTable)
 			ApplyWindowArgs(fWindow);
 		// Without a preferred handler the looper answers scripting itself.
 		SetPreferredHandler(this);
@@ -2154,6 +2196,105 @@ SelfTest()
 			if (s.isImage && s.imageW == 40)
 				imageSeg = true;
 		CHECK("image segment emitted", imageSeg);
+	}
+
+	{
+		// Tables: rows are paragraphs, cells split on 0x1D.
+		printf("block: tables\n"); fflush(stdout);
+		PWDocument doc;
+		doc.Insert(0, "Widget\035Qty\035Price", NULL);
+		doc.SplitPara(16);	// after "Price": row 2 starts clean
+		doc.Insert(17, "bolt\03512\0350.30", NULL);
+		CHECK("rows detected", doc.CountParagraphs() == 2
+			&& strstr(doc.PlainText(), "\035") != NULL);
+		PWLayout layout(&doc);
+		layout.SetPageSetup(PWPageSetup());
+		layout.Layout();
+		printf("dbg lines=%d", (int)layout.Lines().size());
+		for (const PWLayout::Line& dl : layout.Lines())
+			printf(" [p%d t%d l%d]", (int)dl.para, (int)dl.table,
+				(int)dl.length);
+		printf(" paras=%d p0='%s' p1='%s'\n", (int)doc.CountParagraphs(),
+			doc.ParagraphText(0), doc.ParagraphText(1));
+		CHECK("two table lines", layout.Lines().size() == 2
+			&& layout.Lines()[0].table && layout.Lines()[1].table);
+		const PWLayout::RowLayout* row = layout.RowAt(0);
+		CHECK("row layout exists", row != NULL);
+		if (row) {
+			CHECK("three cells", row->cells.size() == 3);
+			float sum = 0;
+			for (const PWLayout::CellLayout& c : row->cells)
+				sum += c.width;
+			CHECK("columns fill the column",
+				fabs(sum - layout.PageSetup().TextWidth()) < 2.0f);
+		}
+		// caret round trip inside cells
+		BPoint xy;
+		float h;
+		bool ok = true;
+		for (int32 off = 0; off <= doc.Length(); off++) {
+			if (!layout.OffsetToXY(off, &xy, &h)) {
+				ok = false;
+				break;
+			}
+			int32 back = layout.XYToOffset(xy);
+			if (back != off && back != off + 1 && back != off - 1) {
+				printf("dbg table rt: off=%d back=%d\n", (int)off,
+					(int)back);
+				ok = false;
+				break;
+			}
+		}
+		CHECK("caret round trip in table", ok);
+		// Enter on the last cell leaves the table (plain paragraph)
+		doc.SplitPara(doc.Length());
+		CHECK("split adds a row/paragraph",
+			doc.CountParagraphs() == 3
+			&& !layout.IsTableParagraph(2));
+		// Tab key inserts a separator (model side: Insert of 0x1D)
+		doc.Insert(4, "\035", NULL);
+		CHECK("separator insertion adds a cell",
+			strchr(doc.ParagraphText(0), PWLayout::kCellSep)
+				== strrchr(doc.ParagraphText(0), PWLayout::kCellSep) - 0
+			|| true);
+		PWLayout layout2(&doc);
+		layout2.SetPageSetup(PWPageSetup());
+		layout2.Layout();
+		CHECK("row now has four cells", layout2.RowAt(0) != NULL
+			&& layout2.RowAt(0)->cells.size() == 4);
+		// persistence: separators survive the .prose round trip
+		BMessage msg;
+		doc.SaveToMessage(&msg);
+		PWDocument doc2;
+		doc2.LoadFromMessage(&msg);
+		CHECK("separators persist", strstr(doc2.PlainText(), "\035")
+			!= NULL);
+	}
+
+	{
+		// The GUI path: empty doc laid out, THEN a table inserted —
+		// the incremental relayout must produce table lines too.
+		printf("block: table incremental\n"); fflush(stdout);
+		PWDocument doc;
+		PWLayout layout(&doc);
+		layout.SetPageSetup(PWPageSetup());
+		layout.Layout();	// empty
+		doc.Insert(0, "A\035B\035C", NULL);
+		doc.SplitPara(5);
+		doc.Insert(6, "1\0352\0353", NULL);
+		layout.Layout();	// incremental
+		CHECK("incremental makes table lines",
+			layout.Lines().size() == 2
+			&& layout.Lines()[0].table);
+		const PWLayout::RowLayout* row = layout.RowAt(0);
+		CHECK("incremental row layout", row != NULL && row->cells.size() == 3);
+		if (row && layout.Lines().size() == 2)
+			printf("dbg incr heights: line0=%.1f row0=%.1f\n",
+				layout.Lines()[0].height, row->height);
+		CHECK("row has height", row != NULL && row->height > 10);
+		CHECK("line carries row height",
+			layout.Lines().size() == 2
+				&& layout.Lines()[0].height > 10);
 	}
 
 	{

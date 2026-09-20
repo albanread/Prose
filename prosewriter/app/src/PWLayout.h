@@ -61,7 +61,33 @@ public:
 		bool	last = false;	// last line of its paragraph
 		uint8	listMark = 0;	// PWListKind of the paragraph, first line only
 		int32	listSeq = 0;	// 1-based ordinal for numbered lists
+		bool	table = false;	// one synthesized line per table row
 	};
+
+	// A table is a maximal run of paragraphs containing kCellSep; no
+	// stored structure to maintain — rows appear and leave naturally.
+	static const char kCellSep;		// 0x1D
+	bool	IsTableParagraph(int32 para) const;
+
+	struct CellLine {
+		int32	startByte = 0;	// within the row paragraph
+		int32	length = 0;
+		float	baseline = 0;
+		float	height = 0;
+	};
+	struct CellLayout {
+		int32	firstByte = 0;
+		float	x = 0, width = 0;
+		std::vector<CellLine> lines;
+		float	CellWidthOfByte(int32 byte, const PWLayout* layout,
+					const char* text) const;
+	};
+	struct RowLayout {
+		int32	para = 0;
+		float	height = 0;
+		std::vector<CellLayout> cells;
+	};
+	const RowLayout* RowAt(int32 para) const;
 	const std::vector<Line>& Lines() const { return fLines; }
 	// The lines of one page, for per-page drawing (see PWPageView).
 	void	PageLines(int32 page, int32* firstLine, int32* lineCount) const;
@@ -140,7 +166,16 @@ private:
 	};
 	bool	FingerprintMatch(const ParaSummary& s, int32 para) const;
 	void	BuildSummaries();
+	void	LayoutTableRow(int32 para);
+	float	TextWidthOfSpan(const char* text, int32 from, int32 to) const;
+	float	MeasureWithRuns(const char* text, int32 from, int32 to) const;
+	float	ByteWidthOfSpan(const char* text, int32 from, int32 to,
+			const std::vector<PWRun>& runs, int32 para) const;
+	PWCharFormat FormatForSpan(const std::vector<PWRun>& runs,
+			int32 at) const;
+	mutable const std::vector<PWRun>* fMeasureRuns = NULL;
 	std::vector<ParaSummary> fPrevSummaries;
+	std::map<int32, RowLayout> fRows;
 	bool	fPrevValid = false;
 	bool	fIncremental = true;
 	int32	fMeasuredParas = 0;

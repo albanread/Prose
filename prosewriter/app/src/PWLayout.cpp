@@ -97,6 +97,164 @@ PWLayout::ByteWidth(int32 para, const std::vector<PWRun>& runs,
 	return f.StringWidth(text + at, 1);
 }
 
+const char PWLayout::kCellSep = 0x1D;
+
+bool
+PWLayout::IsTableParagraph(int32 para) const
+{
+	if (fDoc == NULL || para >= fDoc->CountParagraphs())
+		return false;
+	return strchr(fDoc->ParagraphText(para), kCellSep) != NULL;
+}
+
+const PWLayout::RowLayout*
+PWLayout::RowAt(int32 para) const
+{
+	auto it = fRows.find(para);
+	return it == fRows.end() ? NULL : &it->second;
+}
+
+float
+PWLayout::CellLayout::CellWidthOfByte(int32 byte, const PWLayout* layout,
+	const char* text) const
+{
+	// width of text from the cell start to `byte` on its wrapped line
+	for (const CellLine& cl : lines) {
+		if (byte >= cl.startByte && byte <= cl.startByte + cl.length)
+			return layout->TextWidthOfSpan(text, cl.startByte, byte);
+	}
+	return 0;
+}
+
+// Table row layout: cells wrap inside their column; the row becomes one
+// synthesized Line of the row's height, so page flow, fingerprints and
+// the rest of the engine treat it like any other line.
+void
+PWLayout::LayoutTableRow(int32 para)
+{
+	const char* text = fDoc->ParagraphText(para);
+	int32 paraLen = fDoc->ParagraphLength(para);
+	const std::vector<PWRun>& runs = fDoc->ParagraphRuns(para);
+	const PWParaFormat& fmt = fDoc->ParagraphFormat(para);
+	float column = fSetup.pageWidth - fSetup.marginRight - fmt.indentRight
+		- (fSetup.marginLeft + fmt.indentLeft);
+
+	// cell boundaries
+	std::vector<int32> starts;
+	starts.push_back(0);
+	for (int32 i = 0; i < paraLen; i++)
+		if (text[i] == kCellSep)
+			starts.push_back(i + 1);
+	int32 cellCount = (int32)starts.size();
+	starts.push_back(paraLen + 1);	// sentinel
+
+	// natural width per cell (capped), then proportional columns
+	std::vector<float> natural(cellCount, 40.0f);
+	for (int32 c = 0; c < cellCount; c++) {
+		int32 from = starts[c];
+		int32 to = c + 1 < cellCount ? starts[c + 1] - 1 : paraLen;
+		if (to > from) {
+			BFont font(be_plain_font);
+			const PWCharFormat& f = FormatForSpan(runs, from);
+			font.SetFamilyAndFace(f.family,
+				(uint16)((f.bold ? B_BOLD_FACE : 0)
+					| (f.italic ? B_ITALIC_FACE : 0)));
+			font.SetSize(f.size);
+			float w = font.StringWidth(text + from, to - from);
+			natural[c] = std::min(w + 16.0f, column * 0.7f);
+		}
+	}
+	float sum = 0;
+	for (float n : natural)
+		sum += n;
+	std::vector<float> widths(cellCount, 0);
+	for (int32 c = 0; c < cellCount; c++)
+		widths[c] = std::max(30.0f, natural[c] / sum * column);
+	// renormalise after the minimum clamp
+	sum = 0;
+	for (float w : widths)
+		sum += w;
+	for (float& w : widths)
+		w = w / sum * column;
+
+	RowLayout row;
+	row.para = para;
+	float edge = fSetup.marginLeft + fmt.indentLeft;
+	float ascent = 0, descent = 0;
+	{
+		font_height fh;
+		BFont font(be_plain_font);
+		const PWCharFormat& f = FormatForSpan(runs, 0);
+		font.SetFamilyAndFace(f.family, 0);
+		font.SetSize(f.size);
+		font.GetHeight(&fh);
+		ascent = fh.ascent * fmt.lineSpacing;
+		descent = (fh.descent + fh.leading) * fmt.lineSpacing;
+	}
+	for (int32 c = 0; c < cellCount; c++) {
+		CellLayout cell;
+		cell.firstByte = starts[c];
+		cell.x = edge;
+		cell.width = widths[c];
+		edge += widths[c];
+		// wrap the cell text greedily
+		int32 from = starts[c];
+		int32 to = c + 1 < cellCount ? starts[c + 1] - 1 : paraLen;
+		int32 lineStart = from;
+		while (lineStart < to || (lineStart == from && to == from)) {
+			float w = 0;
+			int32 i = lineStart;
+			int32 lastGood = lineStart;
+			while (i < to) {
+				int32 next = UTF8Next(text, i, paraLen);
+				float cw = ByteWidthOfSpan(text, i, next, runs, para);
+				w += cw;
+				if (w > cell.width - 8 && lastGood > lineStart)
+					break;
+				i = next;
+				if (text[i > 0 ? i - 1 : 0] == ' ' || i >= to)
+					lastGood = i;
+				else if (i < to && text[i] == ' ')
+					lastGood = i;
+			}
+			if (lastGood <= lineStart)
+				lastGood = std::max(i, lineStart + 1);
+			CellLine cl;
+			cl.startByte = lineStart;
+			cl.length = lastGood - lineStart;
+			cl.baseline = ascent;
+			cl.height = ascent + descent;
+			cell.lines.push_back(cl);
+			lineStart = lastGood;
+			while (lineStart < to && text[lineStart] == ' ')
+				lineStart++;
+			if (cl.length <= 0)
+				break;	// safety
+		}
+		if (cell.lines.empty())
+			cell.lines.push_back(CellLine{ from, 0, ascent,
+				ascent + descent });
+		row.height = std::max(row.height,
+			cell.lines.size() * (ascent + descent));
+		row.cells.push_back(cell);
+	}
+	row.height += 8;	// cell padding
+	fRows[para] = row;
+
+	Line line;
+	line.para = para;
+	line.startPara = 0;
+	line.length = paraLen;
+	line.startAbs = 0;	// CacheAbsoluteStarts fixes this
+	line.x = fSetup.marginLeft + fmt.indentLeft;
+	line.width = column;
+	line.height = row.height;
+	line.baseline = ascent;
+	line.last = true;
+	line.table = true;
+	fLines.push_back(line);
+}
+
 void
 PWLayout::LayoutParagraph(int32 para)
 {
@@ -104,6 +262,11 @@ PWLayout::LayoutParagraph(int32 para)
 	int32 paraLen = fDoc->ParagraphLength(para);
 	const std::vector<PWRun>& runs = fDoc->ParagraphRuns(para);
 	const PWParaFormat& fmt = fDoc->ParagraphFormat(para);
+
+	if (strchr(text, kCellSep)) {
+		LayoutTableRow(para);
+		return;
+	}
 
 	// The paragraph's text box, inside the page margins and indents. Lists
 	// hang their marker in the left indent.
@@ -452,6 +615,63 @@ PWLayout::PageBounds(int32 page) const
 	return BRect(0, top, fSetup.pageWidth, top + fSetup.pageHeight);
 }
 
+float
+PWLayout::TextWidthOfSpan(const char* text, int32 from, int32 to) const
+{
+	if (to <= from)
+		return 0;
+	// measure across runs for the paragraph of the current walk; used by
+	// cell geometry — runs come from the caller's paragraph context via
+	// fMeasurePara
+	return MeasureWithRuns(text, from, to);
+}
+
+PWCharFormat
+PWLayout::FormatForSpan(const std::vector<PWRun>& runs, int32 at) const
+{
+	for (const PWRun& r : runs)
+		if (at >= r.start && at < r.start + r.length)
+			return r.format;
+	return runs.empty() ? PWDocument::MakeDefaultFormat() : runs[0].format;
+}
+
+float
+PWLayout::MeasureWithRuns(const char* text, int32 from, int32 to) const
+{
+	if (!fMeasureRuns || to <= from)
+		return 0;
+	float w = 0;
+	int32 b = from;
+	while (b < to) {
+		const PWRun* r = &fMeasureRuns->at(0);
+		for (const PWRun& rr : *fMeasureRuns)
+			if (b >= rr.start && b < rr.start + rr.length) { r = &rr; break; }
+		int32 segEnd = std::min(r->start + r->length, to);
+		if (segEnd <= b)
+			segEnd = b + 1;
+		BFont f = FontForRun(*r);
+		w += f.StringWidth(text + b, segEnd - b);
+		b = segEnd;
+	}
+	return w;
+}
+
+float
+PWLayout::ByteWidthOfSpan(const char* text, int32 from, int32 to,
+	const std::vector<PWRun>& runs, int32 para) const
+{
+	float iw = 0, ih = 0;
+	ImageSizeAt(para, from, &iw, &ih);
+	if (iw > 0)
+		return iw;
+	if (text[from] == kCellSep)
+		return 0;
+	fMeasureRuns = &runs;
+	float w = MeasureWithRuns(text, from, to);
+	fMeasureRuns = NULL;
+	return w;
+}
+
 int32
 PWLayout::LineStart(int32 lineIndex) const
 {
@@ -535,6 +755,49 @@ PWLayout::OffsetToXY(int32 offset, BPoint* xy, float* caretHeight) const
 	const Line& l = fLines[line];
 	int32 para, inPara;
 	fDoc->Locate(offset, &para, &inPara);
+
+	if (l.table) {
+		const RowLayout* row = RowAt(l.para);
+		if (row) {
+			const char* text = fDoc->ParagraphText(l.para);
+			for (const CellLayout& cell : row->cells) {
+				int32 cellEnd = &cell == &row->cells.back()
+					? fDoc->ParagraphLength(l.para) : -1;
+				if (cellEnd < 0) {
+					// next cell's firstByte - 1 (the separator)
+					size_t idx = &cell - &row->cells[0];
+					cellEnd = row->cells[idx + 1].firstByte - 1;
+				}
+				if (inPara < cell.firstByte || inPara > cellEnd)
+					continue;
+				const std::vector<PWRun>& runs =
+					fDoc->ParagraphRuns(l.para);
+				fMeasureRuns = &runs;
+				float w = cell.CellWidthOfByte(inPara, this, text);
+				fMeasureRuns = NULL;
+				// vertical: the wrapped line containing the byte
+				float y = l.y;
+				float lineH = row->cells.size()
+					? row->cells[0].lines.empty() ? l.height
+						: row->cells[0].lines[0].height : l.height;
+				for (const CellLine& cl : cell.lines)
+					if (inPara >= cl.startByte
+						&& inPara <= cl.startByte + cl.length) {
+						y = l.y + cl.baseline;
+						lineH = cl.height;
+						break;
+					}
+				xy->x = cell.x + w;
+				xy->y = y;
+				*caretHeight = lineH;
+				return true;
+			}
+		}
+		xy->x = l.x;
+		xy->y = l.y + l.baseline;
+		*caretHeight = l.height;
+		return true;
+	}
 	int32 caretPara = inPara - l.startPara;
 	if (caretPara < 0) caretPara = 0;
 	const char* text = fDoc->ParagraphText(l.para);
@@ -603,6 +866,38 @@ PWLayout::XYToOffset(BPoint p) const
 	const std::vector<PWRun>& runs = fDoc->ParagraphRuns(l.para);
 	int32 paraLen = fDoc->ParagraphLength(l.para);
 
+	if (l.table) {
+		const RowLayout* row = RowAt(l.para);
+		if (row) {
+			for (const CellLayout& cell : row->cells) {
+				if (p.x < cell.x || p.x > cell.x + cell.width)
+					continue;
+				// vertical: pick the wrapped line
+				int32 lineIdx = 0;
+				for (size_t li = 0; li < cell.lines.size(); li++)
+					if (p.y < l.y + (li + 1) * cell.lines[li].height) {
+						lineIdx = (int32)li;
+						break;
+					} else
+						lineIdx = (int32)li;
+				const CellLine& cl = cell.lines[lineIdx];
+				// horizontal within the cell line
+				float x = cell.x;
+				int32 b = cl.startByte;
+				while (b < cl.startByte + cl.length) {
+					int32 next = UTF8Next(text, b, paraLen);
+					float w = ByteWidthOfSpan(text, b, next, runs, l.para);
+					if (x + w / 2 > p.x)
+						break;
+					x += w;
+					b = next;
+				}
+				return fDoc->ParaStart(l.para) + b;
+			}
+			return fDoc->ParaStart(l.para);
+		}
+	}
+
 	// Walk the line accumulating width until we pass p.x.
 	float x = l.x;
 	int32 b = l.startPara;
@@ -657,6 +952,48 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 	const std::vector<PWRun>& runs = fDoc->ParagraphRuns(l.para);
 	const char* text = fDoc->ParagraphText(l.para);
 	int32 paraLen = fDoc->ParagraphLength(l.para);
+
+	if (l.table) {
+		const RowLayout* row = RowAt(l.para);
+		if (row) {
+			for (const CellLayout& cell : row->cells) {
+				const PWRun* r = runs.empty() ? NULL : &runs[0];
+				float cellTop = l.y;
+				for (const CellLine& cl : cell.lines) {
+					int32 b = cl.startByte;
+					while (b < cl.startByte + cl.length) {
+						const PWRun* rr = &runs[0];
+						for (const PWRun& cand : runs)
+							if (b >= cand.start
+								&& b < cand.start + cand.length) {
+								rr = &cand;
+								break;
+							}
+						int32 next = UTF8Next(text, b, paraLen);
+						float iw = 0, ih = 0;
+						ImageSizeAt(l.para, b, &iw, &ih);
+						Segment s;
+						s.run = rr;
+						s.startPara = b;
+						s.length = next - b;
+						s.isImage = iw > 0;
+						s.imageW = iw;
+						s.imageH = ih;
+						s.baseline = cellTop + cl.baseline;
+						fMeasureRuns = &runs;
+						s.x = cell.x + MeasureWithRuns(text,
+							cl.startByte, b);
+						fMeasureRuns = NULL;
+						out->push_back(s);
+						b = next;
+					}
+					cellTop += cl.height;
+				}
+			}
+		}
+		return;
+	}
+
 	bool justify = LineIsJustified(lineIndex);
 	float slack = justify ? SlackPerGap(lineIndex) : 0;
 	float edge = fSetup.marginLeft

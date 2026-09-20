@@ -213,6 +213,35 @@ PWPageView::DrawPages(BRect updateRect)
 					BPoint(px, 24 + line.y * fZoom + line.baseline * fZoom
 						- (fPrinting ? 24 : 0)));
 			}
+			if (line.table) {
+				// grid: cell boundaries from the row layout
+				const PWLayout::RowLayout* row = fLayout->RowAt(line.para);
+				if (row) {
+					SetHighColor(ui_color(B_CONTROL_TEXT_COLOR));
+					float top = 24 + line.y * fZoom;
+					float bottom = top + line.height * fZoom;
+					if (fPrinting) {
+						top = line.y * fZoom;
+						bottom = line.height * fZoom + top;
+					}
+					float left = 24 + line.x * fZoom;
+					if (fPrinting)
+						left = line.x * fZoom;
+					// horizontal rules
+					StrokeLine(BPoint(left, top),
+						BPoint(left + line.width * fZoom, top));
+					StrokeLine(BPoint(left, bottom),
+						BPoint(left + line.width * fZoom, bottom));
+					// vertical rules at each cell edge
+					StrokeLine(BPoint(left, top), BPoint(left, bottom));
+					for (const PWLayout::CellLayout& cell : row->cells) {
+						float x = 24 + (cell.x + cell.width) * fZoom;
+						if (fPrinting)
+							x = (cell.x + cell.width) * fZoom;
+						StrokeLine(BPoint(x, top), BPoint(x, bottom));
+					}
+				}
+			}
 			DrawSquiggles(line, segs);
 			for (const PWLayout::Segment& s : segs) {
 				if (s.isImage) {
@@ -576,8 +605,12 @@ PWPageView::HandleNavigationKey(const char* bytes, int32 mods)
 			return;
 		case B_TAB:
 			if (HasSelection()) DeleteSelection();
-			// A soft tab: four spaces until the ruler arrives in sprint 2.
-			InsertText("    ", 4);
+			if (fLayout->IsTableParagraph(
+					fLayout->Lines()[fLayout->LineOfOffset(fCaret)].para)) {
+				InsertText("\x1d", 1);	// next cell in the row
+				return;
+			}
+			InsertText("\t", 1);
 			return;
 		case B_ESCAPE:
 			fSelAnchor = -1;
