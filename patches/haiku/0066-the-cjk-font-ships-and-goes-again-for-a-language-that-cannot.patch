@@ -1,4 +1,4 @@
-From 63a78111f135eef333c98aa909ad85fba70750a2 Mon Sep 17 00:00:00 2001
+From 05d3133c7cf528278b08c7a720ff4d26213c031c Mon Sep 17 00:00:00 2001
 From: albanread <albanread@googlemail.com>
 Date: Sun, 20 Sep 2026 08:14:01 +0100
 Subject: [PATCH] The CJK font ships, and goes again for a language that cannot
@@ -21,12 +21,13 @@ packagefs holds it open while the system runs, so the space comes back on
 the next boot rather than at once.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-Prose-Patch: 0066-the-cjk-font-ships-and-goes-again-for-a-language-that-cannot.patch 71f06dc5fecb94914f2c246b1bd0cadbefb6718473d70150c8b6b5b2057c8619
+Prose-Patch: 0066-the-cjk-font-ships-and-goes-again-for-a-language-that-cannot.patch 1aad451fb47097e6df5fe582c3b1e08890b887caae2d7789a11743eabf605165
 ---
  build/jam/DefaultBuildProfiles                |  6 +++
  src/apps/firstbootprompt/BootPromptWindow.cpp | 52 ++++++++++++++++++-
  src/apps/firstbootprompt/BootPromptWindow.h   |  1 +
- 3 files changed, 58 insertions(+), 1 deletion(-)
+ src/data/package_infos/generic/haiku          |  3 --
+ 4 files changed, 58 insertions(+), 4 deletions(-)
 
 diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
 index 1b6ccdfb58..ce3c41953b 100644
@@ -141,3 +142,17 @@ index 478b23b693..518814eab4 100644
  			void				_UpdateStrings();
  			void				_UpdateKeymapsMenu();
  			void				_PopulateLanguages();
+diff --git a/src/data/package_infos/generic/haiku b/src/data/package_infos/generic/haiku
+index d752230c3b..09fd851e1d 100644
+--- a/src/data/package_infos/generic/haiku
++++ b/src/data/package_infos/generic/haiku
+@@ -58,9 +58,6 @@ provides {
+ 
+ requires {
+ 	noto >= 2.7
+-#ifdef HAIKU_REGULAR_BUILD
+-	noto_sans_cjk_jp
+-#endif
+ 
+ #if defined(HAIKU_REGULAR_BUILD) && !defined(HAIKU_PACKAGING_ARCH_arm64)
+ 	# PROSE fork: x86 PCI wifi firmware; there is none of it for arm64
