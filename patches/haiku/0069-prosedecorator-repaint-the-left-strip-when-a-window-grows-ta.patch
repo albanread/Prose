@@ -1,0 +1,67 @@
+From c8d02e0f2a5a406791c07bb90aecd1bb49ffbada Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 15:54:23 +0100
+Subject: [PATCH] ProseDecorator: repaint the left strip when a window grows
+ taller
+
+_ResizeBy() marked the right and bottom strips dirty where they were and
+where they went, but nothing marked the part of the left strip a taller
+window grows into, and the desktop repaints only what a resize exposes
+of the client area. The rows between the old bottom border and the new
+one kept what was on screen before, the wallpaper, seen as gaps down the
+left edge of a StyledEdit window that had grown after it was shown.
+TabDecorator invalidates that strip; now this one does too, by the same
+rule, and the bar is included only when the width changes, which is
+when its title and buttons move.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0069-prosedecorator-repaint-the-left-strip-when-a-window-grows-ta.patch 11449710f6e889a85ccc3dd9313a5030c6c1b7b0c3c96dba5addde3afe491e84
+---
+ .../ProseDecorator/ProseDecorator.cpp         | 21 ++++++++++++-------
+ 1 file changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/src/add-ons/decorators/ProseDecorator/ProseDecorator.cpp b/src/add-ons/decorators/ProseDecorator/ProseDecorator.cpp
+index ffd618dda3..20f4a31ee1 100644
+--- a/src/add-ons/decorators/ProseDecorator/ProseDecorator.cpp
++++ b/src/add-ons/decorators/ProseDecorator/ProseDecorator.cpp
+@@ -756,17 +756,16 @@ ProseDecorator::_MoveBy(BPoint offset)
+ void
+ ProseDecorator::_ResizeBy(BPoint offset, BRegion* dirty)
+ {
+-	// The strips that move, before and after; the bar as well when the
+-	// width changes, since its buttons and title re-centre.
++	// What repaints: the right and bottom strips where they were and where
++	// they go, the knob likewise, the parts of the left and top strips the
++	// window grows into (they are never repainted otherwise), and the bar
++	// when the width changes, since its buttons and title re-centre. What
++	// the window shrinks away from is the desktop's to repaint.
+ 	if (dirty != NULL) {
+ 		dirty->Include(fRightBorder);
+ 		dirty->Include(fBottomBorder);
+ 		if (fResizeRect.IsValid())
+ 			dirty->Include(fResizeRect);
+-		if (offset.x != 0.0 && fTitleBarRect.IsValid()) {
+-			dirty->Include(fTitleBarRect);
+-			dirty->Include(fTopBorder);
+-		}
+ 	}
+ 
+ 	fFrame.right += offset.x;
+@@ -779,9 +778,15 @@ ProseDecorator::_ResizeBy(BPoint offset, BRegion* dirty)
+ 		dirty->Include(fBottomBorder);
+ 		if (fResizeRect.IsValid())
+ 			dirty->Include(fResizeRect);
+-		if (offset.x != 0.0 && fTitleBarRect.IsValid()) {
+-			dirty->Include(fTitleBarRect);
++		if (offset.y > 0.0) {
++			dirty->Include(BRect(fLeftBorder.left,
++				fLeftBorder.bottom - offset.y, fLeftBorder.right,
++				fLeftBorder.bottom));
++		}
++		if (offset.x != 0.0) {
+ 			dirty->Include(fTopBorder);
++			if (fTitleBarRect.IsValid())
++				dirty->Include(fTitleBarRect);
+ 		}
+ 	}
+ }

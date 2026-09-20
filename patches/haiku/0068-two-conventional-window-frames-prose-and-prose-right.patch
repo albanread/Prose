@@ -1,0 +1,1190 @@
+From 47fba99d27015dd74a164962b7952a0e1c8df6f2 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 15:20:50 +0100
+Subject: [PATCH] Two conventional window frames: Prose and Prose Right
+
+A full-width title bar sized from the system font, a thin frame of the same
+colour, a one-pixel outline, and the buttons at one end: round close,
+minimize and zoom at the left with the title centred (Prose), or minimize,
+zoom and close glyphs at the right with the title at the left (Prose
+Right). Every colour is a system window colour, so Appearance -- or a
+theme -- restyles them without a rebuild.
+
+Built on SATDecorator, so stack-and-tile highlighting and the standard
+window behaviour are unchanged; only the tab model is replaced by a bar.
+Stacked windows share the bar as equal slices, each with its own close
+button, which the Mac and Win decorators in the tree never did. Modal
+windows keep Haiku's frame-only look; document windows keep their knob.
+
+Haiku's own decorator add-ons live in haiku_extras, which this image has
+never shipped, so these go into the system package. Verified in a guest:
+switched to live with setdecor, the close button closes, all three looks
+draw, focus states draw.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0068-two-conventional-window-frames-prose-and-prose-right.patch 7813e1a886fc96c113e6b7cd6b1cde01b252953383bf93f8c9dfb4987d1420fe
+---
+ build/jam/packages/Haiku                      |   8 +
+ src/add-ons/decorators/Jamfile                |   2 +
+ src/add-ons/decorators/ProseDecorator/Jamfile |  22 +
+ .../decorators/ProseDecorator/ProseAddOn.cpp  |  38 +
+ .../ProseDecorator/ProseDecorator.cpp         | 810 ++++++++++++++++++
+ .../ProseDecorator/ProseDecorator.h           | 104 +++
+ .../ProseDecorator/ProseDecorator.rdef        |  13 +
+ .../ProseDecorator/ProseRightAddOn.cpp        |  39 +
+ .../decorators/ProseRightDecorator/Jamfile    |  28 +
+ .../ProseRightDecorator.rdef                  |  13 +
+ 10 files changed, 1077 insertions(+)
+ create mode 100644 src/add-ons/decorators/ProseDecorator/Jamfile
+ create mode 100644 src/add-ons/decorators/ProseDecorator/ProseAddOn.cpp
+ create mode 100644 src/add-ons/decorators/ProseDecorator/ProseDecorator.cpp
+ create mode 100644 src/add-ons/decorators/ProseDecorator/ProseDecorator.h
+ create mode 100644 src/add-ons/decorators/ProseDecorator/ProseDecorator.rdef
+ create mode 100644 src/add-ons/decorators/ProseDecorator/ProseRightAddOn.cpp
+ create mode 100644 src/add-ons/decorators/ProseRightDecorator/Jamfile
+ create mode 100644 src/add-ons/decorators/ProseRightDecorator/ProseRightDecorator.rdef
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 50bd0ca464..006cf577ec 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -423,6 +423,14 @@ AddFilesToPackage add-ons Network\ Settings :
+ 	TelnetService
+ 	;
+ 
++# PROSE fork: two conventional window frames, chosen in Appearance. Haiku
++# keeps its own decorator add-ons in haiku_extras, which this image does
++# not ship, so these go in the system package.
++AddFilesToPackage add-ons decorators :
++	ProseDecorator
++	ProseRightDecorator
++	;
++
+ AddFilesToPackage add-ons Tracker :
+ 	FileType
+ 	Label\ as…
+diff --git a/src/add-ons/decorators/Jamfile b/src/add-ons/decorators/Jamfile
+index 433718b5c5..68c921fcd6 100644
+--- a/src/add-ons/decorators/Jamfile
++++ b/src/add-ons/decorators/Jamfile
+@@ -4,3 +4,5 @@ SubInclude HAIKU_TOP src add-ons decorators BeDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators FlatDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators MacDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators WinDecorator ;
++SubInclude HAIKU_TOP src add-ons decorators ProseDecorator ;
++SubInclude HAIKU_TOP src add-ons decorators ProseRightDecorator ;
+diff --git a/src/add-ons/decorators/ProseDecorator/Jamfile b/src/add-ons/decorators/ProseDecorator/Jamfile
+new file mode 100644
+index 0000000000..efb7746757
+--- /dev/null
++++ b/src/add-ons/decorators/ProseDecorator/Jamfile
+@@ -0,0 +1,22 @@
++SubDir HAIKU_TOP src add-ons decorators ProseDecorator ;
++
++UseBuildFeatureHeaders freetype ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app stackandtile ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app decorator ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing Painter ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app font ] ;
++UsePrivateHeaders app shared interface graphics ;
++UseLibraryHeaders agg ;
++
++AddResources ProseDecorator : ProseDecorator.rdef ;
++
++Includes [ FGristFiles ProseDecorator.cpp ProseAddOn.cpp ]
++	: [ BuildFeatureAttribute freetype : headers ] ;
++
++Addon ProseDecorator :
++	ProseDecorator.cpp
++	ProseAddOn.cpp
++	: be <nogrist>app_server [ TargetLibstdc++ ] [ TargetLibsupc++ ]
++;
+diff --git a/src/add-ons/decorators/ProseDecorator/ProseAddOn.cpp b/src/add-ons/decorators/ProseDecorator/ProseAddOn.cpp
+new file mode 100644
+index 0000000000..7155ee8b7a
+--- /dev/null
++++ b/src/add-ons/decorators/ProseDecorator/ProseAddOn.cpp
+@@ -0,0 +1,38 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++/*!	The "Prose" decorator: buttons on the left, title centred. */
++
++
++#include "ProseDecorator.h"
++
++#include <new>
++
++
++class ProseDecorAddOn : public DecorAddOn {
++public:
++								ProseDecorAddOn(image_id id, const char* name)
++									:
++									DecorAddOn(id, name)
++								{
++								}
++
++protected:
++	virtual	Decorator*			_AllocateDecorator(DesktopSettings& settings,
++									BRect rect, Desktop* desktop)
++								{
++									return new (std::nothrow) ProseDecorator(
++										settings, rect, desktop,
++										ProseDecorator::BUTTONS_LEFT);
++								}
++};
++
++
++extern "C" DecorAddOn*
++instantiate_decor_addon(image_id id, const char* name)
++{
++	return new (std::nothrow) ProseDecorAddOn(id, name);
++}
+diff --git a/src/add-ons/decorators/ProseDecorator/ProseDecorator.cpp b/src/add-ons/decorators/ProseDecorator/ProseDecorator.cpp
+new file mode 100644
+index 0000000000..ffd618dda3
+--- /dev/null
++++ b/src/add-ons/decorators/ProseDecorator/ProseDecorator.cpp
+@@ -0,0 +1,810 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++/*!	A conventional window frame: a full-width title bar, buttons at one end. */
++
++
++#include "ProseDecorator.h"
++
++#include <math.h>
++#include <new>
++#include <string.h>
++
++#include <GraphicsDefs.h>
++#include <Point.h>
++#include <Rect.h>
++#include <View.h>
++#include <WindowPrivate.h>
++
++#include "DesktopSettings.h"
++#include "DrawingEngine.h"
++
++
++// Haiku's own values (TabDecorator keeps them file-static): the resize knob
++// of a document window, and how far along the bottom and right borders a
++// press counts as the resize corner.
++static const float kResizeKnobSize = 18.0f;
++static const float kBorderResizeLength = 22.0f;
++
++// The three buttons of the left-hand arrangement. These are not system
++// colours on purpose: red-closes is the convention the arrangement borrows,
++// and a theme restyles the bar around them.
++static const rgb_color kCloseColor = { 255, 95, 87, 255 };
++static const rgb_color kMinimizeColor = { 255, 189, 46, 255 };
++static const rgb_color kZoomColor = { 39, 201, 63, 255 };
++static const rgb_color kIdleButtonColor = { 206, 206, 206, 255 };
++
++
++ProseDecorator::ProseDecorator(DesktopSettings& settings, BRect frame,
++	Desktop* desktop, ButtonSide side)
++	:
++	SATDecorator(settings, frame, desktop),
++	fButtonSide(side),
++	fPad(4.0f),
++	fButtonWidth(12.0f),
++	fButtonHeight(12.0f),
++	fButtonGap(8.0f),
++	fButtonInset(9.0f)
++{
++}
++
++
++ProseDecorator::~ProseDecorator()
++{
++}
++
++
++// #pragma mark - hit testing
++
++
++Decorator::Region
++ProseDecorator::RegionAt(BPoint where, int32& tabIndex) const
++{
++	// The base class knows close, zoom and the tab itself; minimize is ours.
++	for (int32 i = 0; i < fTabList.CountItems(); i++) {
++		Decorator::Tab* tab = fTabList.ItemAt(i);
++		if (tab->minimizeRect.IsValid() && tab->minimizeRect.Contains(where)) {
++			tabIndex = i;
++			return REGION_MINIMIZE_BUTTON;
++		}
++	}
++
++	Region region = Decorator::RegionAt(where, tabIndex);
++	if (region != REGION_NONE)
++		return region;
++
++	if (fTopTab->look == B_DOCUMENT_WINDOW_LOOK && fResizeRect.Contains(where))
++		return REGION_RIGHT_BOTTOM_CORNER;
++
++	if (fLeftBorder.Contains(where))
++		return REGION_LEFT_BORDER;
++	if (fTopBorder.Contains(where))
++		return REGION_TOP_BORDER;
++
++	if (fRightBorder.Contains(where))
++		region = REGION_RIGHT_BORDER;
++	else if (fBottomBorder.Contains(where))
++		region = REGION_BOTTOM_BORDER;
++	else
++		return REGION_NONE;
++
++	// The end of the bottom and right borders is the resize corner.
++	if ((fTopTab->flags & B_NOT_RESIZABLE) == 0
++		&& (fTopTab->look == B_TITLED_WINDOW_LOOK
++			|| fTopTab->look == B_FLOATING_WINDOW_LOOK
++			|| fTopTab->look == B_MODAL_WINDOW_LOOK
++			|| fTopTab->look == kLeftTitledWindowLook)) {
++		BRect corner(BPoint(fBottomBorder.right - fBorderResizeLength,
++			fBottomBorder.bottom - fBorderResizeLength),
++			fBottomBorder.RightBottom());
++		if (corner.Contains(where))
++			return REGION_RIGHT_BOTTOM_CORNER;
++	}
++
++	return region;
++}
++
++
++// #pragma mark - layout
++
++
++float
++ProseDecorator::_Scale() const
++{
++	// Everything grows with the font; nothing shrinks below the 12-point look.
++	return max_c(fDrawState.Font().Size() / 12.0f, 1.0f);
++}
++
++
++void
++ProseDecorator::_DoLayout()
++{
++	const float scale = _Scale();
++	const float fontSize = fDrawState.Font().Size();
++	bool hasBar = false;
++	bool small = false;
++
++	switch ((int)fTopTab->look) {
++		case B_MODAL_WINDOW_LOOK:
++			fBorderWidth = 4;
++			break;
++
++		case B_TITLED_WINDOW_LOOK:
++		case B_DOCUMENT_WINDOW_LOOK:
++			hasBar = true;
++			fBorderWidth = 4;
++			break;
++
++		case B_FLOATING_WINDOW_LOOK:
++		case kLeftTitledWindowLook:
++			hasBar = true;
++			small = true;
++			fBorderWidth = 3;
++			break;
++
++		case B_BORDERED_WINDOW_LOOK:
++			fBorderWidth = 1;
++			break;
++
++		default:
++			fBorderWidth = 0;
++	}
++
++	fBorderWidth = int32(fBorderWidth * scale);
++	fResizeKnobSize = kResizeKnobSize * scale;
++	fBorderResizeLength = kBorderResizeLength * scale;
++
++	// The bar's metrics, from the font.
++	fPad = ceilf(fontSize / (small ? 4.0f : 3.0f));
++	fButtonGap = ceilf(fontSize * 0.6f);
++	fButtonInset = ceilf(fontSize * 0.7f);
++	if (fButtonSide == BUTTONS_LEFT) {
++		fButtonWidth = ceilf(fontSize * (small ? 0.85f : 1.0f));
++		fButtonHeight = fButtonWidth;
++	} else {
++		fButtonWidth = ceilf(fontSize * 1.6f);
++		fButtonHeight = ceilf(fontSize * 1.25f);
++	}
++
++	// The borders: strips beside and below the client area, none of them
++	// overlapping, the left and right ones without the corners -- the shape
++	// the base class's dirty-region bookkeeping expects.
++	if (fBorderWidth > 0) {
++		fLeftBorder.Set(fFrame.left - fBorderWidth, fFrame.top,
++			fFrame.left - 1, fFrame.bottom);
++		fRightBorder.Set(fFrame.right + 1, fFrame.top,
++			fFrame.right + fBorderWidth, fFrame.bottom);
++		fTopBorder.Set(fFrame.left - fBorderWidth, fFrame.top - fBorderWidth,
++			fFrame.right + fBorderWidth, fFrame.top - 1);
++		fBottomBorder.Set(fFrame.left - fBorderWidth, fFrame.bottom + 1,
++			fFrame.right + fBorderWidth, fFrame.bottom + fBorderWidth);
++	} else {
++		fLeftBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fRightBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fTopBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fBottomBorder.Set(0.0, 0.0, -1.0, -1.0);
++	}
++
++	if (fBorderWidth > 1) {
++		fResizeRect.Set(fBottomBorder.right - fResizeKnobSize,
++			fBottomBorder.bottom - fResizeKnobSize, fBottomBorder.right,
++			fBottomBorder.bottom);
++	} else
++		fResizeRect.Set(0, 0, -1, -1);
++
++	if (hasBar) {
++		font_height fontHeight;
++		fDrawState.Font().GetHeight(fontHeight);
++		float barHeight = ceilf(fontHeight.ascent + fontHeight.descent)
++			+ 2 * fPad;
++		if (barHeight < fButtonHeight + 4)
++			barHeight = fButtonHeight + 4;
++
++		// The bar sits on the top border, full width; the outline runs
++		// around bar and borders together.
++		fTitleBarRect.Set(fTopBorder.left, fTopBorder.top - barHeight,
++			fTopBorder.right, fTopBorder.top - 1);
++		fBorderRect = BRect(fTitleBarRect.LeftTop(),
++			fBottomBorder.RightBottom());
++		_LayoutBar();
++	} else {
++		fBorderRect = BRect(fTopBorder.LeftTop(), fBottomBorder.RightBottom());
++		for (int32 i = 0; i < fTabList.CountItems(); i++) {
++			Decorator::Tab* tab = fTabList.ItemAt(i);
++			tab->tabRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->closeRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->zoomRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->minimizeRect.Set(0.0, 0.0, -1.0, -1.0);
++		}
++		fTabsRegion.MakeEmpty();
++		fTitleBarRect.Set(0.0, 0.0, -1.0, -1.0);
++	}
++}
++
++
++/*!	One window: the bar is its tab. Stacked windows: equal slices, the
++	top one with every button, the others with close only.
++*/
++void
++ProseDecorator::_LayoutBar()
++{
++	int32 count = fTabList.CountItems();
++	if (count < 1)
++		return;
++
++	float width = fTitleBarRect.Width() + 1;
++	float slice = floorf(width / count);
++
++	for (int32 i = 0; i < count; i++) {
++		Decorator::Tab* tab = fTabList.ItemAt(i);
++		BRect& tabRect = tab->tabRect;
++		tabRect.Set(fTitleBarRect.left + i * slice, fTitleBarRect.top,
++			i == count - 1 ? fTitleBarRect.right
++				: fTitleBarRect.left + (i + 1) * slice - 1,
++			fTitleBarRect.bottom);
++		tab->tabOffset = uint32(tabRect.left - fLeftBorder.left);
++		tab->tabLocation = 0.0f;
++
++		_LayoutButtons(tab, count == 1 || tab == fTopTab);
++
++		// What a window may shrink to: the buttons and a little title.
++		float buttons = 0;
++		if ((tab->flags & B_NOT_CLOSABLE) == 0)
++			buttons += fButtonWidth + fButtonGap;
++		if ((tab->flags & B_NOT_MINIMIZABLE) == 0)
++			buttons += fButtonWidth + fButtonGap;
++		if ((tab->flags & B_NOT_ZOOMABLE) == 0)
++			buttons += fButtonWidth + fButtonGap;
++		tab->minTabSize = 2 * fButtonInset + buttons
++			+ fDrawState.Font().Size() * 3;
++		tab->maxTabSize = tab->minTabSize;
++		if (fDrawingEngine != NULL && Title(tab) != NULL) {
++			tab->maxTabSize += ceilf(fDrawingEngine->StringWidth(Title(tab),
++				strlen(Title(tab)), fDrawState.Font()));
++		}
++	}
++
++	fTabsRegion = fTitleBarRect;
++}
++
++
++void
++ProseDecorator::_LayoutButtons(Decorator::Tab* tab, bool allButtons)
++{
++	const BRect& tabRect = tab->tabRect;
++	const float w = fButtonWidth;
++	const float h = fButtonHeight;
++	// centred between the outline row and the bar's bottom
++	float y = floorf(tabRect.top + 1 + (tabRect.Height() - h) / 2);
++	BRect button(0, y, w - 1, y + h - 1);
++
++	bool close = (tab->flags & B_NOT_CLOSABLE) == 0;
++	bool minimize = allButtons && (tab->flags & B_NOT_MINIMIZABLE) == 0;
++	bool zoom = allButtons && (tab->flags & B_NOT_ZOOMABLE) == 0;
++
++	tab->closeRect.Set(0.0, 0.0, -1.0, -1.0);
++	tab->minimizeRect.Set(0.0, 0.0, -1.0, -1.0);
++	tab->zoomRect.Set(0.0, 0.0, -1.0, -1.0);
++
++	if (fButtonSide == BUTTONS_LEFT) {
++		// close, minimize, zoom -- left to right
++		float x = tabRect.left + fButtonInset;
++		if (close) {
++			tab->closeRect = button.OffsetToCopy(x, y);
++			x += w + fButtonGap;
++		}
++		if (minimize) {
++			tab->minimizeRect = button.OffsetToCopy(x, y);
++			x += w + fButtonGap;
++		}
++		if (zoom)
++			tab->zoomRect = button.OffsetToCopy(x, y);
++	} else {
++		// minimize, zoom, close -- left to right, so close is outermost
++		float x = tabRect.right - fButtonInset - w + 1;
++		if (close) {
++			tab->closeRect = button.OffsetToCopy(x, y);
++			x -= w + fButtonGap;
++		}
++		if (zoom) {
++			tab->zoomRect = button.OffsetToCopy(x, y);
++			x -= w + fButtonGap;
++		}
++		if (minimize)
++			tab->minimizeRect = button.OffsetToCopy(x, y);
++	}
++}
++
++
++/*!	The horizontal room the title may use: between the buttons and the far
++	end of the tab, inset from both.
++*/
++void
++ProseDecorator::_TitleRoom(Decorator::Tab* tab, float* left,
++	float* right) const
++{
++	const BRect& tabRect = tab->tabRect;
++	*left = tabRect.left + fButtonInset;
++	*right = tabRect.right - fButtonInset;
++
++	const BRect* rects[3] = { &tab->closeRect, &tab->minimizeRect,
++		&tab->zoomRect };
++	for (int32 i = 0; i < 3; i++) {
++		if (!rects[i]->IsValid())
++			continue;
++		if (fButtonSide == BUTTONS_LEFT)
++			*left = max_c(*left, rects[i]->right + fButtonGap);
++		else
++			*right = min_c(*right, rects[i]->left - fButtonGap);
++	}
++}
++
++
++// #pragma mark - colours
++
++
++rgb_color
++ProseDecorator::_BarColor(Decorator::Tab* tab)
++{
++	ComponentColors colors;
++	GetComponentColors(COMPONENT_TAB, RegionHighlight(REGION_TAB), colors,
++		tab);
++	return colors[COLOR_TAB];
++}
++
++
++rgb_color
++ProseDecorator::_TextColor(Decorator::Tab* tab)
++{
++	ComponentColors colors;
++	GetComponentColors(COMPONENT_TAB, RegionHighlight(REGION_TAB), colors,
++		tab);
++	return colors[COLOR_TAB_TEXT];
++}
++
++
++rgb_color
++ProseDecorator::_OutlineColor(Decorator::Tab* tab)
++{
++	ComponentColors colors;
++	GetComponentColors(COMPONENT_TAB, RegionHighlight(REGION_TAB), colors,
++		tab);
++	return colors[COLOR_TAB_FRAME_DARK];
++}
++
++
++/*!	A border strip is the bar's colour, unless it is highlighted -- the
++	resize highlight, or stack-and-tile's -- in which case the family's
++	colour for that state is used, as the other decorators do.
++*/
++rgb_color
++ProseDecorator::_SideColor(Component component, Region region,
++	const rgb_color& plain)
++{
++	uint8 highlight = RegionHighlight(region);
++	if (highlight == HIGHLIGHT_NONE)
++		return plain;
++
++	ComponentColors colors;
++	GetComponentColors(component, highlight, colors, fTopTab);
++	return colors[2];
++}
++
++
++// #pragma mark - drawing
++
++
++void
++ProseDecorator::_DrawFrame(BRect invalid)
++{
++	if (fTopTab->look == B_NO_BORDER_WINDOW_LOOK || fBorderWidth <= 0)
++		return;
++
++	rgb_color bar = _BarColor(fTopTab);
++	rgb_color outline = _OutlineColor(fTopTab);
++
++	if (fTopTab->look == B_BORDERED_WINDOW_LOOK) {
++		fDrawingEngine->StrokeRect(fBorderRect, outline);
++		return;
++	}
++
++	// The strips, inset by the outline's pixel where they touch it.
++	if (invalid.Intersects(fLeftBorder)) {
++		BRect r(fLeftBorder);
++		r.left++;
++		fDrawingEngine->FillRect(r,
++			_SideColor(COMPONENT_LEFT_BORDER, REGION_LEFT_BORDER, bar));
++	}
++	if (invalid.Intersects(fRightBorder)) {
++		BRect r(fRightBorder);
++		r.right--;
++		fDrawingEngine->FillRect(r,
++			_SideColor(COMPONENT_RIGHT_BORDER, REGION_RIGHT_BORDER, bar));
++	}
++	if (invalid.Intersects(fBottomBorder)) {
++		BRect r(fBottomBorder);
++		r.left++;
++		r.right--;
++		r.bottom--;
++		fDrawingEngine->FillRect(r,
++			_SideColor(COMPONENT_BOTTOM_BORDER, REGION_BOTTOM_BORDER, bar));
++	}
++	if (invalid.Intersects(fTopBorder)) {
++		BRect r(fTopBorder);
++		r.left++;
++		r.right--;
++		if (!fTitleBarRect.IsValid())
++			r.top++;		// no bar above: this strip carries the outline
++		fDrawingEngine->FillRect(r,
++			_SideColor(COMPONENT_TOP_BORDER, REGION_TOP_BORDER, bar));
++	}
++
++	fDrawingEngine->StrokeRect(fBorderRect, outline);
++
++	if (fTopTab->look == B_DOCUMENT_WINDOW_LOOK
++		&& (fTopTab->flags & B_NOT_RESIZABLE) == 0
++		&& invalid.Intersects(fResizeRect)) {
++		_DrawKnob(fResizeRect);
++	}
++}
++
++
++/*!	The resize knob of a document window: it reaches into the client area,
++	so it must be painted, not left to the window.
++*/
++void
++ProseDecorator::_DrawKnob(BRect rect)
++{
++	rgb_color bar = _BarColor(fTopTab);
++	rgb_color outline = _OutlineColor(fTopTab);
++
++	BRect r(rect);
++	r.right--;
++	r.bottom--;
++	fDrawingEngine->FillRect(r, bar);
++
++	// three diagonal grip lines, from the corner inwards
++	float step = max_c(3.0f, floorf(rect.Width() / 5));
++	for (int32 i = 1; i <= 3; i++) {
++		float d = i * step;
++		fDrawingEngine->StrokeLine(BPoint(r.right - d, r.bottom),
++			BPoint(r.right, r.bottom - d), outline);
++	}
++}
++
++
++void
++ProseDecorator::_DrawTab(Decorator::Tab* tab, BRect invalid)
++{
++	const BRect& tabRect = tab->tabRect;
++	if (!tabRect.IsValid() || !invalid.Intersects(tabRect))
++		return;
++
++	bool first = tab == fTabList.FirstItem();
++	bool last = tab == fTabList.LastItem();
++
++	// The fill leaves the outline row above and the outline columns at
++	// either end of the bar to the frame.
++	BRect fill(tabRect);
++	fill.top++;
++	if (first)
++		fill.left++;
++	if (last)
++		fill.right--;
++	fDrawingEngine->FillRect(fill, _BarColor(tab));
++
++	if (!last) {
++		// a rule between the slices of a stacked bar
++		fDrawingEngine->StrokeLine(BPoint(tabRect.right, tabRect.top + 1),
++			BPoint(tabRect.right, tabRect.bottom), _OutlineColor(tab));
++	}
++
++	_DrawTitle(tab, tabRect);
++	_DrawButtons(tab, invalid);
++}
++
++
++void
++ProseDecorator::_DrawTitle(Decorator::Tab* tab, BRect rect)
++{
++	const BRect& tabRect = tab->tabRect;
++	if (!tabRect.IsValid())
++		return;
++
++	float left, right;
++	_TitleRoom(tab, &left, &right);
++	float room = right - left;
++	if (room < fDrawState.Font().Size())
++		return;
++
++	tab->truncatedTitle = Title(tab);
++	fDrawState.Font().TruncateString(&tab->truncatedTitle, B_TRUNCATE_END,
++		room);
++	tab->truncatedTitleLength = tab->truncatedTitle.Length();
++	if (tab->truncatedTitleLength == 0)
++		return;
++
++	float width = ceilf(fDrawingEngine->StringWidth(
++		tab->truncatedTitle.String(), tab->truncatedTitleLength,
++		fDrawState.Font()));
++
++	// Centred in the bar when that keeps it clear of the buttons, otherwise
++	// centred in what is left; with the buttons on the right, against the
++	// left edge, as that arrangement conventionally has it.
++	float x;
++	if (fButtonSide == BUTTONS_LEFT) {
++		x = floorf((tabRect.left + tabRect.right - width) / 2);
++		if (x < left || x + width > right)
++			x = floorf(left + (room - width) / 2);
++	} else
++		x = left;
++
++	font_height fontHeight;
++	fDrawState.Font().GetHeight(fontHeight);
++	float y = floorf((tabRect.top + 2.0 + tabRect.bottom + fontHeight.ascent
++		+ fontHeight.descent) / 2.0 - fontHeight.descent + 0.5);
++
++	fDrawingEngine->SetDrawingMode(B_OP_OVER);
++	fDrawingEngine->SetHighColor(_TextColor(tab));
++	fDrawingEngine->SetFont(fDrawState.Font());
++	fDrawingEngine->DrawString(tab->truncatedTitle.String(),
++		tab->truncatedTitleLength, BPoint(x, y));
++	fDrawingEngine->SetDrawingMode(B_OP_COPY);
++}
++
++
++void
++ProseDecorator::_DrawButtons(Decorator::Tab* tab, const BRect& invalid)
++{
++	if ((tab->flags & B_NOT_CLOSABLE) == 0 && tab->closeRect.IsValid()
++		&& invalid.Intersects(tab->closeRect)) {
++		_DrawClose(tab, false, tab->closeRect);
++	}
++	if ((tab->flags & B_NOT_MINIMIZABLE) == 0 && tab->minimizeRect.IsValid()
++		&& invalid.Intersects(tab->minimizeRect)) {
++		_DrawMinimize(tab, false, tab->minimizeRect);
++	}
++	if ((tab->flags & B_NOT_ZOOMABLE) == 0 && tab->zoomRect.IsValid()
++		&& invalid.Intersects(tab->zoomRect)) {
++		_DrawZoom(tab, false, tab->zoomRect);
++	}
++}
++
++
++void
++ProseDecorator::_DrawClose(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawButton(tab, direct, rect, GLYPH_CLOSE, tab->closePressed);
++}
++
++
++void
++ProseDecorator::_DrawMinimize(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawButton(tab, direct, rect, GLYPH_MINIMIZE, tab->minimizePressed);
++}
++
++
++void
++ProseDecorator::_DrawZoom(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawButton(tab, direct, rect, GLYPH_ZOOM, tab->zoomPressed);
++}
++
++
++void
++ProseDecorator::_DrawButton(Decorator::Tab* tab, bool direct, BRect rect,
++	Glyph glyph, bool pressed)
++{
++	if (!rect.IsValid())
++		return;
++
++	// Pressed feedback is drawn straight to the front buffer; the rest of
++	// the time the window's own update copies it, as DefaultDecorator does.
++	bool copyToFrontEnabled = fDrawingEngine->CopyToFrontEnabled();
++	fDrawingEngine->SetCopyToFrontEnabled(direct);
++
++	rgb_color bar = _BarColor(tab);
++	fDrawingEngine->FillRect(rect, bar);
++
++	if (fButtonSide == BUTTONS_LEFT) {
++		rgb_color color;
++		if (!tab->buttonFocus)
++			color = kIdleButtonColor;
++		else if (glyph == GLYPH_CLOSE)
++			color = kCloseColor;
++		else if (glyph == GLYPH_MINIMIZE)
++			color = kMinimizeColor;
++		else
++			color = kZoomColor;
++		if (pressed)
++			color = tint_color(color, B_DARKEN_2_TINT);
++
++		fDrawingEngine->SetHighColor(color);
++		fDrawingEngine->DrawEllipse(rect, true);
++		fDrawingEngine->SetHighColor(tint_color(color, B_DARKEN_1_TINT));
++		fDrawingEngine->DrawEllipse(rect, false);
++
++		// No hover exists for a decorator button, so the glyph is always
++		// there, in a darker shade of its button.
++		float inset = floorf(rect.Width() * 0.3f);
++		_DrawGlyph(rect.InsetByCopy(inset, inset), glyph,
++			tint_color(color, B_DARKEN_4_TINT));
++	} else {
++		if (pressed)
++			fDrawingEngine->FillRect(rect, tint_color(bar, B_DARKEN_2_TINT));
++
++		float insetX = floorf(rect.Width() * 0.3f);
++		float insetY = floorf(rect.Height() * 0.3f);
++		BRect box = rect.InsetByCopy(insetX, insetY);
++		// keep the glyph box square
++		float side = min_c(box.Width(), box.Height());
++		box.Set(floorf(box.left + (box.Width() - side) / 2),
++			floorf(box.top + (box.Height() - side) / 2), 0, 0);
++		box.right = box.left + side;
++		box.bottom = box.top + side;
++		_DrawGlyph(box, glyph, _TextColor(tab));
++	}
++
++	fDrawingEngine->SetCopyToFrontEnabled(copyToFrontEnabled);
++}
++
++
++void
++ProseDecorator::_DrawGlyph(BRect box, Glyph glyph, const rgb_color& color)
++{
++	float pen = max_c(1.0f, floorf(fDrawState.Font().Size() / 10.0f));
++	fDrawingEngine->SetHighColor(color);
++	fDrawingEngine->SetPenSize(pen);
++
++	switch (glyph) {
++		case GLYPH_CLOSE:
++			fDrawingEngine->StrokeLine(box.LeftTop(), box.RightBottom());
++			fDrawingEngine->StrokeLine(box.RightTop(), box.LeftBottom());
++			break;
++
++		case GLYPH_MINIMIZE:
++		{
++			float y = floorf((box.top + box.bottom) / 2);
++			fDrawingEngine->StrokeLine(BPoint(box.left, y),
++				BPoint(box.right, y));
++			break;
++		}
++
++		case GLYPH_ZOOM:
++			if (fButtonSide == BUTTONS_LEFT) {
++				// a plus, as the round green button carried for years
++				float x = floorf((box.left + box.right) / 2);
++				float y = floorf((box.top + box.bottom) / 2);
++				fDrawingEngine->StrokeLine(BPoint(box.left, y),
++					BPoint(box.right, y));
++				fDrawingEngine->StrokeLine(BPoint(x, box.top),
++					BPoint(x, box.bottom));
++			} else {
++				// a window
++				fDrawingEngine->StrokeRect(box);
++			}
++			break;
++	}
++
++	fDrawingEngine->SetPenSize(1.0f);
++}
++
++
++// #pragma mark - state
++
++
++void
++ProseDecorator::_SetTitle(Decorator::Tab* tab, const char* string,
++	BRegion* updateRegion)
++{
++	_DoLayout();
++	_DoOutlineLayout();
++	if (updateRegion != NULL)
++		updateRegion->Include(fTitleBarRect);
++}
++
++
++void
++ProseDecorator::_SetFocus(Decorator::Tab* tab)
++{
++	tab->buttonFocus = IsFocus(tab)
++		|| ((tab->look == B_FLOATING_WINDOW_LOOK
++			|| tab->look == kLeftTitledWindowLook)
++			&& (tab->flags & B_AVOID_FOCUS) != 0);
++
++	// The top tab of a stacked bar is the one with every button.
++	if (fTabList.CountItems() > 1) {
++		for (int32 i = 0; i < fTabList.CountItems(); i++) {
++			Decorator::Tab* other = fTabList.ItemAt(i);
++			_LayoutButtons(other, other == fTopTab);
++		}
++	}
++}
++
++
++bool
++ProseDecorator::_SetTabLocation(Decorator::Tab* tab, float location,
++	bool isShifting, BRegion* updateRegion)
++{
++	// A bar has no sliding tab.
++	return false;
++}
++
++
++bool
++ProseDecorator::_MoveTab(int32 from, int32 to, bool isMoving,
++	BRegion* updateRegion)
++{
++	// Slices keep their order.
++	return false;
++}
++
++
++void
++ProseDecorator::_MoveBy(BPoint offset)
++{
++	TabDecorator::_MoveBy(offset);
++	for (int32 i = 0; i < fTabList.CountItems(); i++)
++		fTabList.ItemAt(i)->minimizeRect.OffsetBy(offset);
++}
++
++
++void
++ProseDecorator::_ResizeBy(BPoint offset, BRegion* dirty)
++{
++	// The strips that move, before and after; the bar as well when the
++	// width changes, since its buttons and title re-centre.
++	if (dirty != NULL) {
++		dirty->Include(fRightBorder);
++		dirty->Include(fBottomBorder);
++		if (fResizeRect.IsValid())
++			dirty->Include(fResizeRect);
++		if (offset.x != 0.0 && fTitleBarRect.IsValid()) {
++			dirty->Include(fTitleBarRect);
++			dirty->Include(fTopBorder);
++		}
++	}
++
++	fFrame.right += offset.x;
++	fFrame.bottom += offset.y;
++	_DoLayout();
++	_DoOutlineLayout();
++
++	if (dirty != NULL) {
++		dirty->Include(fRightBorder);
++		dirty->Include(fBottomBorder);
++		if (fResizeRect.IsValid())
++			dirty->Include(fResizeRect);
++		if (offset.x != 0.0 && fTitleBarRect.IsValid()) {
++			dirty->Include(fTitleBarRect);
++			dirty->Include(fTopBorder);
++		}
++	}
++}
++
++
++void
++ProseDecorator::_GetFootprint(BRegion* region)
++{
++	if (region == NULL)
++		return;
++
++	region->MakeEmpty();
++	if (fTopTab->look == B_NO_BORDER_WINDOW_LOOK || fBorderWidth <= 0)
++		return;
++
++	region->Set(fBorderRect);
++	region->Exclude(fFrame);
++
++	if (fTopTab->look == B_DOCUMENT_WINDOW_LOOK
++		&& (fTopTab->flags & B_NOT_RESIZABLE) == 0) {
++		// the knob reaches into the client area
++		float knob = fResizeKnobSize - fBorderWidth;
++		region->Include(BRect(fFrame.right - knob, fFrame.bottom - knob,
++			fFrame.right, fFrame.bottom));
++	}
++}
+diff --git a/src/add-ons/decorators/ProseDecorator/ProseDecorator.h b/src/add-ons/decorators/ProseDecorator/ProseDecorator.h
+new file mode 100644
+index 0000000000..a779dbfcc0
+--- /dev/null
++++ b/src/add-ons/decorators/ProseDecorator/ProseDecorator.h
+@@ -0,0 +1,104 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ *
++ * A conventional window frame for Prose: one full-width title bar with the
++ * buttons at one end and the title beside them, a thin border of the same
++ * colour, and a one-pixel outline. Everything is sized from the system font,
++ * and every colour comes from the system colours, so the Appearance
++ * preferences (and a Prose theme) restyle it without a rebuild.
++ *
++ * Built on SATDecorator, not on TabDecorator's tab model, so stack-and-tile
++ * highlighting and the standard window behaviour come unchanged; the tab
++ * layout is replaced by a bar. Several stacked windows share the bar as
++ * equal slices, each with its own close button.
++ */
++#ifndef PROSE_DECORATOR_H
++#define PROSE_DECORATOR_H
++
++
++#include "DecorManager.h"
++#include "SATDecorator.h"
++
++
++class ProseDecorator : public SATDecorator {
++public:
++			enum ButtonSide {
++				BUTTONS_LEFT,
++				BUTTONS_RIGHT
++			};
++
++								ProseDecorator(DesktopSettings& settings,
++									BRect frame, Desktop* desktop,
++									ButtonSide side);
++	virtual						~ProseDecorator();
++
++	virtual	Region				RegionAt(BPoint where, int32& tab) const;
++
++protected:
++	virtual	void				_DoLayout();
++
++	virtual	void				_DrawFrame(BRect invalid);
++	virtual	void				_DrawTab(Decorator::Tab* tab, BRect invalid);
++	virtual	void				_DrawTitle(Decorator::Tab* tab, BRect rect);
++	virtual	void				_DrawButtons(Decorator::Tab* tab,
++									const BRect& invalid);
++	virtual	void				_DrawClose(Decorator::Tab* tab, bool direct,
++									BRect rect);
++	virtual	void				_DrawZoom(Decorator::Tab* tab, bool direct,
++									BRect rect);
++	virtual	void				_DrawMinimize(Decorator::Tab* tab, bool direct,
++									BRect rect);
++
++	virtual	void				_SetTitle(Decorator::Tab* tab,
++									const char* string,
++									BRegion* updateRegion = NULL);
++	virtual	void				_SetFocus(Decorator::Tab* tab);
++	virtual	bool				_SetTabLocation(Decorator::Tab* tab,
++									float location, bool isShifting,
++									BRegion* updateRegion = NULL);
++	virtual	bool				_MoveTab(int32 from, int32 to, bool isMoving,
++									BRegion* updateRegion = NULL);
++
++	virtual	void				_MoveBy(BPoint offset);
++	virtual	void				_ResizeBy(BPoint offset, BRegion* dirty);
++
++	virtual	void				_GetFootprint(BRegion* region);
++
++private:
++			enum Glyph {
++				GLYPH_CLOSE,
++				GLYPH_MINIMIZE,
++				GLYPH_ZOOM
++			};
++
++			void				_LayoutBar();
++			void				_LayoutButtons(Decorator::Tab* tab,
++									bool allButtons);
++			void				_TitleRoom(Decorator::Tab* tab, float* left,
++									float* right) const;
++
++			void				_DrawButton(Decorator::Tab* tab, bool direct,
++									BRect rect, Glyph glyph, bool pressed);
++			void				_DrawGlyph(BRect box, Glyph glyph,
++									const rgb_color& color);
++			void				_DrawKnob(BRect rect);
++
++			rgb_color			_BarColor(Decorator::Tab* tab);
++			rgb_color			_TextColor(Decorator::Tab* tab);
++			rgb_color			_OutlineColor(Decorator::Tab* tab);
++			rgb_color			_SideColor(Component component,
++									Region region, const rgb_color& plain);
++
++			float				_Scale() const;
++
++			ButtonSide			fButtonSide;
++			float				fPad;			// above and below the title
++			float				fButtonWidth;
++			float				fButtonHeight;
++			float				fButtonGap;
++			float				fButtonInset;	// from the bar's end
++};
++
++
++#endif	// PROSE_DECORATOR_H
+diff --git a/src/add-ons/decorators/ProseDecorator/ProseDecorator.rdef b/src/add-ons/decorators/ProseDecorator/ProseDecorator.rdef
+new file mode 100644
+index 0000000000..533e049102
+--- /dev/null
++++ b/src/add-ons/decorators/ProseDecorator/ProseDecorator.rdef
+@@ -0,0 +1,13 @@
++resource("be:decor:info") message('deco') {
++	"name"				= "Prose",
++	"authors"			= "The Prose project",
++	"short_descr"		= "A conventional title bar, buttons on the left",
++	"long_descr"		= "One full-width title bar sized from the system font, "
++		"round close, minimize and zoom buttons at the left, the title "
++		"centred. The colours are the system's window colours, so a theme "
++		"restyles it. Stacked windows share the bar as slices.",
++	"lic_url"			= "https://opensource.org/license/mit",
++	"lic_name"			= "MIT",
++	"support_url"		= "https://github.com/albanread/Prose",
++	float "version"		= 1.0
++};
+diff --git a/src/add-ons/decorators/ProseDecorator/ProseRightAddOn.cpp b/src/add-ons/decorators/ProseDecorator/ProseRightAddOn.cpp
+new file mode 100644
+index 0000000000..9c826e23f1
+--- /dev/null
++++ b/src/add-ons/decorators/ProseDecorator/ProseRightAddOn.cpp
+@@ -0,0 +1,39 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++/*!	The "Prose Right" decorator: buttons on the right, title at the left. */
++
++
++#include "ProseDecorator.h"
++
++#include <new>
++
++
++class ProseRightDecorAddOn : public DecorAddOn {
++public:
++								ProseRightDecorAddOn(image_id id,
++									const char* name)
++									:
++									DecorAddOn(id, name)
++								{
++								}
++
++protected:
++	virtual	Decorator*			_AllocateDecorator(DesktopSettings& settings,
++									BRect rect, Desktop* desktop)
++								{
++									return new (std::nothrow) ProseDecorator(
++										settings, rect, desktop,
++										ProseDecorator::BUTTONS_RIGHT);
++								}
++};
++
++
++extern "C" DecorAddOn*
++instantiate_decor_addon(image_id id, const char* name)
++{
++	return new (std::nothrow) ProseRightDecorAddOn(id, name);
++}
+diff --git a/src/add-ons/decorators/ProseRightDecorator/Jamfile b/src/add-ons/decorators/ProseRightDecorator/Jamfile
+new file mode 100644
+index 0000000000..59a927e6c0
+--- /dev/null
++++ b/src/add-ons/decorators/ProseRightDecorator/Jamfile
+@@ -0,0 +1,28 @@
++SubDir HAIKU_TOP src add-ons decorators ProseRightDecorator ;
++
++# The same class as ProseDecorator, with the buttons at the other end; the
++# sources live there and are compiled again here under this directory's
++# grist, so the two add-ons never share an object.
++SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src add-ons decorators ProseDecorator ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src add-ons decorators ProseDecorator ] ;
++
++UseBuildFeatureHeaders freetype ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app stackandtile ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app decorator ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing Painter ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app font ] ;
++UsePrivateHeaders app shared interface graphics ;
++UseLibraryHeaders agg ;
++
++AddResources ProseRightDecorator : ProseRightDecorator.rdef ;
++
++Includes [ FGristFiles ProseDecorator.cpp ProseRightAddOn.cpp ]
++	: [ BuildFeatureAttribute freetype : headers ] ;
++
++Addon ProseRightDecorator :
++	ProseDecorator.cpp
++	ProseRightAddOn.cpp
++	: be <nogrist>app_server [ TargetLibstdc++ ] [ TargetLibsupc++ ]
++;
+diff --git a/src/add-ons/decorators/ProseRightDecorator/ProseRightDecorator.rdef b/src/add-ons/decorators/ProseRightDecorator/ProseRightDecorator.rdef
+new file mode 100644
+index 0000000000..571e06de1a
+--- /dev/null
++++ b/src/add-ons/decorators/ProseRightDecorator/ProseRightDecorator.rdef
+@@ -0,0 +1,13 @@
++resource("be:decor:info") message('deco') {
++	"name"				= "Prose Right",
++	"authors"			= "The Prose project",
++	"short_descr"		= "A conventional title bar, buttons on the right",
++	"long_descr"		= "One full-width title bar sized from the system font, "
++		"minimize, zoom and close glyphs at the right, the title at the "
++		"left. The colours are the system's window colours, so a theme "
++		"restyles it. Stacked windows share the bar as slices.",
++	"lic_url"			= "https://opensource.org/license/mit",
++	"lic_name"			= "MIT",
++	"support_url"		= "https://github.com/albanread/Prose",
++	float "version"		= 1.0
++};
