@@ -1206,8 +1206,19 @@ class Builder:
 		if archs == 'broken' and not self.args.force_arch:
 			raise BuildError('%s is marked broken for %s (ARCHITECTURES)' % (port.name, ARCH))
 		work = WORK / port.name
-		rmtree(work)
-		work.mkdir(parents=True)
+		# --resume: keep the sources and whatever the last build compiled, and
+		# run BUILD and INSTALL again. For a port that takes an hour to
+		# compile, a change to what its package should hold must not mean
+		# compiling it afresh; cmake and make do nothing for a build that is
+		# already done.
+		resume = getattr(self.args, 'resume', False) and (work / 'sources').is_dir()
+		if resume:
+			say('resuming in %s: sources and objects kept' % work)
+			rmtree(work / 'destdir')
+			rmtree(work / 'sub')
+		else:
+			rmtree(work)
+			work.mkdir(parents=True)
 		LOGS.mkdir(exist_ok=True)
 		log_path = LOGS / ('%s.log' % port.name)
 		started = time.time()
@@ -1215,10 +1226,13 @@ class Builder:
 			'arch_status': archs, 'log': str(log_path)}
 		with open(log_path, 'w') as log:
 			try:
-				self._prepare_sysroot(port, work, log)
-				sources = self._fetch_and_unpack(port, work, log)
-				self._build_host_tools(port, work, sources, log)
-				self._run_phase(port, work, sources, 'PATCH', log)
+				if resume:
+					sources = self._resumed_sources(port, work, log)
+				else:
+					self._prepare_sysroot(port, work, log)
+					sources = self._fetch_and_unpack(port, work, log)
+					self._build_host_tools(port, work, sources, log)
+					self._run_phase(port, work, sources, 'PATCH', log)
 				self._run_phase(port, work, sources, 'BUILD', log)
 				self._run_phase(port, work, sources, 'INSTALL', log)
 				hpkgs = self._package(port, work, log)
@@ -1233,6 +1247,23 @@ class Builder:
 		if not self.args.keep_work and not getattr(self.args, 'resume', False):
 			rmtree(work)
 		say('built %s: %s' % (port.name, ', '.join(hpkgs)))
+
+	def _resumed_sources(self, port, work, log):
+		"""The source directories a resumed build works in: the ones
+		_fetch_and_unpack() made, without fetching or patching again."""
+		sources = {}
+		for base in sorted(work.glob('sources*')):
+			index = base.name.split('-')[1] if '-' in base.name else '1'
+			sfx = '' if index == '1' else '_' + index
+			source_dir = port.keys.get('SOURCE_DIR' + sfx, '')
+			sdir = base / source_dir if source_dir else base
+			if not sdir.is_dir():
+				raise BuildError('cannot resume: %s is not there' % sdir)
+			sources[index] = sdir
+		if not sources:
+			raise BuildError('cannot resume: no sources under %s' % work)
+		log.write('resuming with %s\n' % ', '.join(str(p) for p in sources.values()))
+		return sources
 
 	def _prepare_sysroot(self, port, work, log):
 		"""Clone the base sysroot, then activate the build requirements."""
