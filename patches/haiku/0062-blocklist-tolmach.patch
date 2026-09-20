@@ -1,0 +1,26 @@
+From 1cb1bb14e92902ac3b263dc867e7c28817288828 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 07:34:39 +0100
+Subject: [PATCH] Blocklist: Tolmach
+
+Another of the owner's picks for build/jam/ProseBlocklist (patch 0060).
+A commit of its own because that one is no longer the branch's tip.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0062-blocklist-tolmach.patch a5d1cec5b7d0f6c98f9a9a652d14898fbf71083a99b498def37e91d6837ec050
+---
+ build/jam/ProseBlocklist | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/build/jam/ProseBlocklist b/build/jam/ProseBlocklist
+index 3c9862d639..3a8756dd51 100644
+--- a/build/jam/ProseBlocklist
++++ b/build/jam/ProseBlocklist
+@@ -39,6 +39,7 @@ PROSE_BLOCKED_PACKAGES =
+ 	taskmanager			# TaskManager
+ 	fairtrade			# fairtrade, a point of sale system
+ 	usbdeskbar			# USBDeskbar, a Deskbar applet for USB devices
++	tolmach				# Tolmach, a dictionary
+ 	;
+ 
+ PROSE_BLOCKED_APPS =
