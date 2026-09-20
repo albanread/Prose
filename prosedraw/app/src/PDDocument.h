@@ -75,6 +75,7 @@ public:
 	PDShape*	ShapeAt(int32 index) { return &fShapes[index]; }
 	const PDShape* ShapeAt(int32 index) const { return &fShapes[index]; }
 	PDShape*	ShapeById(int32 id);
+	const PDShape* ShapeById(int32 id) const;
 	int32		IndexOf(int32 id) const;
 
 	// Geometry goes through SnapRect: whatever created it — mouse,

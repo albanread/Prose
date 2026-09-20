@@ -70,6 +70,15 @@ PDDocument::ShapeById(int32 id)
 	return NULL;
 }
 
+const PDShape*
+PDDocument::ShapeById(int32 id) const
+{
+	for (const PDShape& s : fShapes)
+		if (s.id == id)
+			return &s;
+	return NULL;
+}
+
 int32
 PDDocument::IndexOf(int32 id) const
 {

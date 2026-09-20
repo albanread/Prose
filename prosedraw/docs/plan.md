@@ -87,6 +87,38 @@ Helvetica base-14 for labels; MediaBox = the paper): File ▸ Print to
 PDF…, `PDF` scripting property; BPrintJob for real printers; recent
 files; duplicate/group; zoom.
 
+**Delivered — 2026-09-20 (PDF + recent files).**
+
+- `PDPDF`: true vector output — path operators per shape (rect /
+  Bézier ellipse / Bézier rounded-rect / diamond), connectors with
+  arrowhead triangles (same geometry as the canvas), Helvetica
+  base-14 labels with the real AFM width table for centring,
+  UTF-8→WinAnsi with octal escaping, dash patterns, MediaBox from
+  the paper table (A4/Letter/Legal/A5/A3, portrait and landscape).
+  Selftest grew 35 → 61 checks; smoke gained the PDF step (8) and
+  the recent-files step (10) — 10/10. The exported PDF was fetched
+  to the host and eyeballed: A4 portrait, three labelled shapes,
+  arrowhead connector (the P5-style check, but vector).
+- File ▸ Print to PDF… (save panel, suggests name.pdf) and the
+  `PDF` scripting property; exports stamp `BEOS:TYPE
+  application/pdf` and never touch document state.
+- Arrowhead flags: the model always had `arrowEnd`/`arrowStart`;
+  the canvas ignored them (always drew the end head). Canvas and
+  PDF now both respect the flags.
+- Open Recent: `PDRecent` (most-recent-first, deduped, capped at 8,
+  persisted in `~/config/settings/ProseDraw/recent_files`) — the
+  ordering and round trip are selftested, the persistence verified
+  in-guest by the smoke. Every path adoption — open, save, save-as,
+  scripted save — funnels through `NoteSavedTo`, so title, recent
+  list and status can't drift apart again.
+- **Deferred, honestly:** BPrintJob (no printer exists on this
+  guest to verify against — the PDF is the printable path); zoom
+  (a canvas-wide coordinate change, next with the polish pass);
+  duplicate/group refinements beyond Sprint 1's Duplicate.
+
+**Still human-owed:** the Print to PDF and Open Recent menu items by
+mouse, palette drags, inspector edits by mouse.
+
 ### Sprint 3 — beyond
 
 Arrowheads per end, connector routing (orthogonal), image shapes,
@@ -96,8 +128,10 @@ multi-page documents, layers.
 
 | ID | Test | Method | Pass |
 |---|---|---|---|
-| D01 | selftest | `--selftest` | PASS 35/35 |
+| D01 | selftest | `--selftest` | PASS 61/61 |
 | D02 | launch + render | launch, screenshot | PASS |
 | D03 | scripted shapes | `AddShape` ×3 + connector, screenshot | PASS |
 | D04 | round trip | Save → relaunch with file → screenshot + ShapeCount | PASS |
-| D05 | smoke | `prosedraw/tests/guest-smoke.sh` | PASS 8/8 |
+| D05 | smoke | `prosedraw/tests/guest-smoke.sh` | PASS 10/10 |
+| D06 | PDF export | `PDF do` → magic/MediaBox/vector ops in guest; fetched PDF eyeballed on host | PASS |
+| D07 | recent files | settings file lists opened docs, most recent first | PASS |

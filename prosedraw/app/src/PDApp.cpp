@@ -7,8 +7,10 @@
 #include <CheckBox.h>
 #include <Clipboard.h>
 #include <Entry.h>
+#include <Directory.h>
 #include <File.h>
 #include <FilePanel.h>
+#include <FindDirectory.h>
 #include <Font.h>
 #include <Menu.h>
 #include <MenuBar.h>
@@ -34,6 +36,8 @@
 
 #include "PDCanvas.h"
 #include "PDDocument.h"
+#include "PDPDF.h"
+#include "PDRecent.h"
 
 // ---------------------------------------------------------------- helpers --
 static bool
@@ -89,14 +93,18 @@ public:
 	// UI sync for out-of-window mutations (scripting): title, `*`,
 	// status bar all live here
 	void	UpdateStatus();
-	void	NoteSavedTo(const BString& path)
+	void	NoteSavedTo(const BString& path);
+	void	RememberRecent(const BString& path)
 	{
-		fFilePath = path;
-		UpdateStatus();
+		fRecent.Remember(path);
+		RebuildRecentMenu();
+		if (fRecentPath.Length() > 0)
+			fRecent.Save(fRecentPath.String());
 	}
 
 	enum {
 		OPEN_PANEL_MSG = 'pdOf', SAVE_PANEL_MSG = 'pdSf',
+		PDF_PANEL_MSG = 'pdFf',
 		TOOL_MSG = 'pdTl', INSPECTOR_MSG = 'pdIn',
 		PAPER_MSG = 'pdPp', ORIENT_MSG = 'pdOr',
 		GRID_SHOW_MSG = 'pdGs', GRID_SNAP_MSG = 'pdGn',
@@ -107,10 +115,12 @@ public:
 private:
 	void	BuildMenus();
 	void	LayoutChildren();
+	void	RebuildRecentMenu();
 	void	BuildInspector();
 	void	RefreshInspector();
 	void	ApplyInspector(int32 field);
 	void	DoSave(const BString& path);
+	void	DoExportPDF(const BString& path);
 	status_t	OpenFile(const entry_ref& ref);
 	void	SetPaper(int32 index, bool landscape);
 	void	RegisterDocumentType();
@@ -134,6 +144,10 @@ private:
 	BString		fFilePath;
 	BFilePanel*	fOpenPanel = NULL;
 	BFilePanel*	fSavePanel = NULL;
+	BFilePanel*	fPDFPanel = NULL;
+	PDRecent	fRecent;
+	BMenu*		fRecentMenu = NULL;
+	BString		fRecentPath;
 	bool		fRefreshingInspector = false;
 
 	struct ColourEntry { const char* name; rgb_color c; };
@@ -162,6 +176,18 @@ PDWindow::PDWindow(BRect frame, const char* title)
 	fCanvas(new PDCanvas(&fDoc))
 {
 	RegisterDocumentType();
+	// the Open Recent list lives in the user settings directory
+	{
+		BPath settings;
+		if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings) == B_OK) {
+			settings.Append("ProseDraw/recent_files");
+			fRecentPath = settings.Path();
+			BPath parent(settings);
+			parent.GetParent(&parent);
+			create_directory(parent.Path(), 0755);
+			fRecent.Load(fRecentPath.String());
+		}
+	}
 	fMenuBar = new BMenuBar(Bounds(), "menubar");
 	BuildMenus();
 	AddChild(fMenuBar);
@@ -229,10 +255,16 @@ PDWindow::BuildMenus()
 	menu->AddSeparatorItem();
 	menu->AddItem(new BMenuItem("Open" B_UTF8_ELLIPSIS,
 		new BMessage(OPEN_PANEL_MSG), 'O', B_COMMAND_KEY));
+	fRecentMenu = new BMenu("Open Recent");
+	menu->AddItem(fRecentMenu);
+	RebuildRecentMenu();
 	menu->AddItem(fSaveItem = new BMenuItem("Save",
 		new BMessage('pdSv'), 'S', B_COMMAND_KEY));
 	menu->AddItem(new BMenuItem("Save as" B_UTF8_ELLIPSIS,
 		new BMessage(SAVE_PANEL_MSG), 'S', B_COMMAND_KEY | B_SHIFT_KEY));
+	menu->AddSeparatorItem();
+	menu->AddItem(new BMenuItem("Print to PDF" B_UTF8_ELLIPSIS,
+		new BMessage(PDF_PANEL_MSG), 'P', B_COMMAND_KEY));
 	menu->AddSeparatorItem();
 	BMenuItem* quit = new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED),
 		'Q', B_COMMAND_KEY);
@@ -425,6 +457,38 @@ PDWindow::MenusBeginning()
 	fSaveItem->SetEnabled(fDoc.IsModified());
 }
 
+// Every path the document takes on — open, save, save-as, scripted
+// save — funnels through here: one place sets the title, the recent
+// list and the status line.
+void
+PDWindow::NoteSavedTo(const BString& path)
+{
+	fFilePath = path;
+	RememberRecent(path);
+	UpdateStatus();
+}
+
+void
+PDWindow::RebuildRecentMenu()
+{
+	if (fRecentMenu == NULL)
+		return;
+	while (fRecentMenu->CountItems() > 0)
+		delete fRecentMenu->RemoveItem((int32)0);
+	if (fRecent.Items().empty()) {
+		BMenuItem* none = new BMenuItem("(no recent files)", NULL);
+		none->SetEnabled(false);
+		fRecentMenu->AddItem(none);
+		return;
+	}
+	for (const BString& path : fRecent.Items()) {
+		BMessage* m = new BMessage('pdRc');
+		m->AddString("path", path);
+		fRecentMenu->AddItem(
+			new BMenuItem(BPath(path.String()).Leaf(), m));
+	}
+}
+
 void
 PDWindow::UpdateStatus()
 {
@@ -570,17 +634,33 @@ PDWindow::DoSave(const BString& pathStr)
 {
 	status_t err = fDoc.SaveToFile(pathStr.String());
 	if (err == B_OK) {
-		fFilePath = pathStr;
 		fDoc.SavedClean();
 		// typed saves: Tracker can find us without anyone running mimeset
 		WriteAttrOn(pathStr.String(), "BEOS:TYPE", PDDocument::kDocType);
+		NoteSavedTo(pathStr);
+		return;
+	}
+	BString msg;
+	msg.SetToFormat("Could not save %s: %s", pathStr.String(),
+		strerror(err));
+	(new BAlert("ProseDraw", msg.String(), "OK"))->Go(NULL);
+	UpdateStatus();
+}
+
+void
+PDWindow::DoExportPDF(const BString& pathStr)
+{
+	// exports never touch document state — no undo, no modified flag
+	status_t err = PD_WritePDF(fDoc, pathStr.String());
+	if (err == B_OK) {
+		WriteAttrOn(pathStr.String(), "BEOS:TYPE", "application/pdf");
+		UpdateStatus();
 	} else {
 		BString msg;
-		msg.SetToFormat("Could not save %s: %s", pathStr.String(),
+		msg.SetToFormat("Could not write %s: %s", pathStr.String(),
 			strerror(err));
 		(new BAlert("ProseDraw", msg.String(), "OK"))->Go(NULL);
 	}
-	UpdateStatus();
 }
 
 status_t
@@ -619,10 +699,9 @@ PDWindow::OpenFile(const entry_ref& ref)
 		(new BAlert("ProseDraw", msg.String(), "OK"))->Go(NULL);
 		return err;
 	}
-	fFilePath = path.Path();
 	fCanvas->Select(std::vector<int32>());
 	fCanvas->DocumentChangedSize();
-	UpdateStatus();
+	NoteSavedTo(path.Path());
 	return B_OK;
 }
 
@@ -773,6 +852,17 @@ PDWindow::MessageReceived(BMessage* message)
 				OpenFile(ref);
 			break;
 		}
+		case 'pdRc':
+		{
+			// Open Recent selection
+			BString path;
+			if (message->FindString("path", &path) == B_OK) {
+				entry_ref ref;
+				if (get_ref_for_path(path.String(), &ref) == B_OK)
+					OpenFile(ref);
+			}
+			break;
+		}
 		case 'pdSv':
 		{
 			// save panel selection, or a scripted save
@@ -804,6 +894,33 @@ PDWindow::MessageReceived(BMessage* message)
 			}
 			fSavePanel->Show();
 			break;
+		case PDF_PANEL_MSG:
+			if (fPDFPanel == NULL)
+				fPDFPanel = new BFilePanel(B_SAVE_PANEL,
+					new BMessenger(this), NULL, B_FILE_NODE, false,
+					new BMessage('pdPf'));
+			{
+				BString suggested = fFilePath.Length()
+					? BString(BPath(fFilePath.String()).Leaf())
+					: BString("Untitled");
+				fPDFPanel->SetSaveText(
+					WithExtension(suggested, ".pdf").String());
+			}
+			fPDFPanel->Show();
+			break;
+		case 'pdPf':
+		{
+			// panel selection: export the diagram as vector PDF
+			entry_ref ref;
+			if (message->FindRef("directory", &ref) == B_OK) {
+				BPath path(&ref);
+				BString name;
+				message->FindString("name", &name);
+				path.Append(WithExtension(name, ".pdf").String());
+				DoExportPDF(BString(path.Path()));
+			}
+			break;
+		}
 		default:
 			BWindow::MessageReceived(message);
 	}
@@ -831,6 +948,11 @@ static property_info sPDProperties[] = {
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"save the diagram (data: path)", 0, { B_STRING_TYPE } },
+	{ "PDF",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"export the diagram as vector PDF (data: path)", 0,
+		{ B_STRING_TYPE } },
 	{ "Open",
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
@@ -938,6 +1060,21 @@ HandleScriptingForWindow(PDWindow* window, BMessage* message,
 					PDDocument::kDocType);
 				window->NoteSavedTo(path);
 			}
+			if (err == B_OK)
+				ReplyString(message, "");
+			else
+				ReplyError(message, strerror(err));
+		} else
+			ReplyError(message, "data: path required");
+		return true;
+	}
+	if (prop == "PDF" && isExec) {
+		BString path;
+		if (message->FindString("data", &path) == B_OK && path.Length()) {
+			// quiet, and pure output: no document state changes
+			status_t err = PD_WritePDF(doc, path.String());
+			if (err == B_OK)
+				WriteAttrOn(path.String(), "BEOS:TYPE", "application/pdf");
 			if (err == B_OK)
 				ReplyString(message, "");
 			else
@@ -1257,6 +1394,127 @@ SelfTest()
 			== "diagram.draw");
 		CHECK("extension not doubled", WithExtension("a.DRAW", ".draw")
 			== "a.DRAW");
+	}
+
+	printf("block: pdf\n"); fflush(stdout);
+	{
+		PDDocument doc;
+		PDShape* box = doc.AddShape(PD_RECT, BRect(64, 64, 200, 140), "Box");
+		PDShape* ell = doc.AddShape(PD_ELLIPSE, BRect(256, 64, 384, 140),
+			"a(b)c");
+		ell->style.dashed = true;
+		ell->style.strokeWidth = 2;
+		doc.AddShape(PD_RRECT, BRect(64, 200, 200, 280), "round");
+		doc.AddShape(PD_DIAMOND, BRect(256, 200, 384, 280), "why");
+		doc.AddShape(PD_TEXT, BRect(64, 320, 300, 360), "Note");
+		PDShape* cn = doc.AddShape(PD_CONNECTOR, BRect(0, 0, 0, 0));
+		cn->fromId = box->id;
+		cn->toId = ell->id;
+
+		CHECK("bad path rejected", PD_WritePDF(doc, "") == B_BAD_VALUE);
+
+		const char* pdfPath = "/tmp/pd-selftest.pdf";
+		CHECK("pdf write", PD_WritePDF(doc, pdfPath) == B_OK);
+		std::string pdf;
+		{
+			BFile f;
+			if (f.SetTo(pdfPath, B_READ_ONLY) == B_OK) {
+				char buf[4096];
+				ssize_t n;
+				while ((n = f.Read(buf, sizeof(buf))) > 0)
+					pdf.append(buf, n);
+			}
+		}
+		CHECK("pdf read back", pdf.size() > 100);
+		CHECK("pdf magic", pdf.compare(0, 8, "%PDF-1.4") == 0);
+		CHECK("pdf a4 mediabox",
+			pdf.find("/MediaBox [0 0 595 842]") != std::string::npos);
+		CHECK("pdf one page", pdf.find("/Type /Page /Parent")
+			!= std::string::npos && pdf.find("/Count 1") != std::string::npos);
+		CHECK("pdf helvetica",
+			pdf.find("/BaseFont /Helvetica") != std::string::npos);
+		CHECK("pdf rect op", pdf.find(" re\n") != std::string::npos);
+		CHECK("pdf bezier op", pdf.find(" c\n") != std::string::npos);
+		CHECK("pdf label", pdf.find("(Box) Tj") != std::string::npos);
+		CHECK("pdf label escapes parens",
+			pdf.find("(a\\(b\\)c) Tj") != std::string::npos);
+		CHECK("pdf dash pattern", pdf.find("[2 2] 0 d") != std::string::npos);
+		CHECK("pdf arrowhead", pdf.find(" l h f Q") != std::string::npos);
+		{
+			// xref offsets must point at real objects: the byte at
+			// startxref must be the 'x' of "xref"
+			size_t at = pdf.rfind("startxref\n");
+			bool ok = at != std::string::npos;
+			if (ok) {
+				long long off = atoll(pdf.c_str() + at + 10);
+				ok = off > 0 && off < (long long)pdf.size()
+					&& pdf[off] == 'x';
+			}
+			CHECK("pdf xref offset", ok);
+		}
+
+		doc.SetPage(PDPageSetup { 612.0f, 792.0f });		// US Letter
+		CHECK("pdf letter rewrite", PD_WritePDF(doc, pdfPath) == B_OK);
+		{
+			std::string letter;
+			BFile f;
+			if (f.SetTo(pdfPath, B_READ_ONLY) == B_OK) {
+				char buf[4096];
+				ssize_t n;
+				while ((n = f.Read(buf, sizeof(buf))) > 0)
+					letter.append(buf, n);
+			}
+			CHECK("pdf letter mediabox",
+				letter.find("/MediaBox [0 0 612 792]") != std::string::npos);
+		}
+		doc.SetPage(PDPageSetup { 842.0f, 595.0f });	// A4 landscape
+		CHECK("pdf landscape rewrite", PD_WritePDF(doc, pdfPath) == B_OK);
+		{
+			std::string land;
+			BFile f;
+			if (f.SetTo(pdfPath, B_READ_ONLY) == B_OK) {
+				char buf[4096];
+				ssize_t n;
+				while ((n = f.Read(buf, sizeof(buf))) > 0)
+					land.append(buf, n);
+			}
+			CHECK("pdf landscape mediabox",
+				land.find("/MediaBox [0 0 842 595]") != std::string::npos);
+		}
+		remove(pdfPath);
+	}
+
+	printf("block: recent\n"); fflush(stdout);
+	{
+		PDRecent r;
+		r.Remember("/tmp/a.draw");
+		r.Remember("/tmp/b.draw");
+		r.Remember("/tmp/c.draw");
+		CHECK("recent order", r.Items().size() == 3
+			&& r.Items()[0] == "/tmp/c.draw");
+		r.Remember("/tmp/a.draw");
+		CHECK("recent dedupe to front", r.Items().size() == 3
+			&& r.Items()[0] == "/tmp/a.draw"
+			&& r.Items()[1] == "/tmp/c.draw");
+		for (int i = 0; i < 12; i++) {
+			BString p;
+			p.SetToFormat("/tmp/many%d.draw", i);
+			r.Remember(p);
+		}
+		CHECK("recent capped", (int32)r.Items().size() == PDRecent::kMax);
+		CHECK("recent oldest dropped", r.Items().back() == "/tmp/many4.draw");
+
+		const char* rp = "/tmp/pd-recent-test";
+		CHECK("recent save", r.Save(rp) == B_OK);
+		PDRecent q;
+		CHECK("recent load", q.Load(rp) == B_OK);
+		CHECK("recent round trip", q.Items().size() == r.Items().size()
+			&& q.Items()[0] == r.Items()[0]
+			&& q.Items().back() == r.Items().back());
+		PDRecent none;
+		CHECK("recent missing file", none.Load("/tmp/pd-none-recent")
+			!= B_OK && none.Items().empty());
+		remove(rp);
 	}
 
 	#undef CHECK

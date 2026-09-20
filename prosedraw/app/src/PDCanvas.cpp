@@ -162,15 +162,22 @@ PDCanvas::DrawShape(const PDShape& s)
 		SetPenSize(s.style.strokeWidth);
 		SetDrawingMode(B_OP_COPY);
 		StrokeLine(a, b, s.style.dashed ? kDash : B_SOLID_HIGH);
-		// arrowhead at the end, along the line
+		// arrowheads along the line, per the shape's flags
 		float ang = atan2f(b.y - a.y, b.x - a.x);
 		const float head = 8.0f + s.style.strokeWidth * 2;
-		BPoint tip = b;
-		BPoint back(tip.x - head * cosf(ang), tip.y - head * sinf(ang));
-		BPoint n(head * 0.4f * sinf(ang), -head * 0.4f * cosf(ang));
-		BPoint tri[3] = { tip, BPoint(back.x + n.x, back.y + n.y),
-			BPoint(back.x - n.x, back.y - n.y) };
-		FillPolygon(tri, 3);
+		auto drawHead = [&](BPoint tip, float dirAng) {
+			BPoint back(tip.x - head * cosf(dirAng),
+				tip.y - head * sinf(dirAng));
+			BPoint n(head * 0.4f * sinf(dirAng),
+				-head * 0.4f * cosf(dirAng));
+			BPoint tri[3] = { tip, BPoint(back.x + n.x, back.y + n.y),
+				BPoint(back.x - n.x, back.y - n.y) };
+			FillPolygon(tri, 3);
+		};
+		if (s.arrowEnd)
+			drawHead(b, ang);
+		if (s.arrowStart)
+			drawHead(a, ang + 3.14159265f);
 		SetPenSize(1.0f);
 		return;
 	}

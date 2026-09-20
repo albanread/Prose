@@ -33,25 +33,36 @@ prosedraw/
   drive the canvas page (and Sprint 2's PDF MediaBox).
 - **Files:** atomic saves, `BEOS:TYPE` stamped on write, content-sniffed
   loads (`HMF1` + `&dDp` — extensionless files open fine), save panel
-  appends `.draw`; launch-with-file and Tracker-style refs both open.
+  appends `.draw`; launch-with-file and Tracker-style refs both open;
+  Open Recent (8 entries, persisted in user settings).
+- **Print to PDF (Sprint 2):** true vector export — path operators per
+  shape, Bézier ellipses and rounded rects, dashed strokes,
+  arrowheaded connectors, Helvetica-set labels, MediaBox = the paper
+  (A4/Letter/Legal/A5/A3, portrait/landscape). Via File ▸ Print to
+  PDF… or the `PDF` scripting property; exported files are typed
+  `application/pdf`.
 - **Scripting:** `Activate`, `ShapeCount` (get), `AddShape` (do, data
-  `"kind x y w h|label"` or `"connect"`), `Save`, `Open`, `Quit` — this
-  is the smoke-test surface.
-- **Selftest:** `ProseDraw --selftest` — 35 checks (paper metrics,
-  snapping, connector anchor math, align, undo, persistence, sniffing).
+  `"kind x y w h|label"` or `"connect"`), `Save`, `Open`, `PDF`,
+  `Quit` — this is the smoke-test surface.
+- **Selftest:** `ProseDraw --selftest` — 61 checks (paper metrics,
+  snapping, connector anchor math, align, undo, persistence, sniffing,
+  PDF structure, recent list).
 
 ## Test status
 
 | ID | Test | Result |
 |---|---|---|
-| D01 | selftest | PASS 35/35 |
+| D01 | selftest | PASS 61/61 |
 | D02 | launch + render (screenshot) | PASS |
 | D03 | scripted shapes + connector (screenshot) | PASS |
 | D04 | save → relaunch-with-file round trip | PASS |
-| D05 | `tests/guest-smoke.sh` | PASS 8/8 |
+| D05 | `tests/guest-smoke.sh` | PASS 10/10 |
+| D06 | PDF export (guest checks + host eyeball) | PASS |
+| D07 | recent files persisted | PASS |
 
 ## Not yet (planned — see docs/plan.md)
 
-Vector PDF export and BPrintJob (Sprint 2); orthogonal connector
-routing, arrowheads per end, image shapes, multi-page, layers
-(Sprint 3). Zoom is not implemented; the canvas is 1:1.
+BPrintJob for real printers (no printer on the test guest to verify
+against — PDF is the printable path); zoom (canvas is 1:1); Sprint 3:
+orthogonal connector routing, arrowheads per end (modelled, exposed
+next), image shapes, multi-page, layers.

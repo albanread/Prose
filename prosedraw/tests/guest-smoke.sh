@@ -8,7 +8,8 @@
 # the 2026-09-20 session lost an hour to testing a guest copy that
 # predated the fix), launch+activate, scripted diagram, save (typed
 # HMF1&dDp), relaunch-with-file, Open property, extensionless round
-# trip, clean quit. TAP-style output, end-state screenshot in vm/run/.
+# trip, vector PDF export, clean quit. TAP-style output, end-state
+# screenshot in vm/run/.
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 GUEST="$ROOT/prosewriter/vm/guest.sh"
@@ -124,12 +125,41 @@ c=$(count); t=$(title)
 [ "$c" = "4" ] && echo "$t" | grep -aq "pd-noext" \
 	&& ok "extensionless round trip" || bad "noext (count=$c title=$t)"
 
-# 8 - clean quit (unmodified document) exits the app
+# 8 - vector PDF export via scripting: magic, A4 MediaBox (the paper),
+#     the shape ops and the escaped label text
 n=8
+"$GUEST" run "$PWQ $SIG PDF X do /tmp/pd-smoke.pdf" >/dev/null 2>&1
+sleep 1
+magic=$("$GUEST" run 'head -c 8 /tmp/pd-smoke.pdf; echo' 2>/dev/null \
+	| head -1 | tr -d '\0\r\n')
+box=$("$GUEST" run 'grep -a MediaBox /tmp/pd-smoke.pdf' 2>/dev/null \
+	| head -1 | tr -d '\0\r')
+# n.b. this diagram is rrect + diamond + ellipse + connector — the
+# vector proof is in the Bézier curve ops (" c"), not " re"
+ops=$("$GUEST" run 'grep -ac " c$" /tmp/pd-smoke.pdf' 2>/dev/null \
+	| head -1 | tr -d '\0\r\n')
+label=$("$GUEST" run 'grep -ac "Tj" /tmp/pd-smoke.pdf' 2>/dev/null \
+	| head -1 | tr -d '\0\r\n')
+[ "$magic" = "%PDF-1.4" ] && echo "$box" | grep -aq "\[0 0 595 842\]" \
+	&& [ "$ops" -ge 4 ] && [ "$label" -ge 1 ] \
+	&& ok "pdf export (A4, vector, labelled)" \
+	|| bad "pdf ($magic/$box/ops=$ops labels=$label)"
+
+# 9 - clean quit (unmodified document) exits the app
+n=9
 "$GUEST" run "$PWQ $SIG Quit X do" >/dev/null 2>&1
 sleep 2
 left=$("$GUEST" run 'ps' 2>/dev/null | grep -ac "apps/ProseDraw")
 [ "$left" = "0" ] && ok "clean quit exits" || bad "quit (teams left: $left)"
+
+# 10 - Open Recent persisted: the settings file exists, lists the
+#      documents this run opened, most recent first
+n=10
+recent=$("$GUEST" run 'cat /boot/home/config/settings/ProseDraw/recent_files' \
+	2>/dev/null | tr -d '\r')
+first=$(echo "$recent" | head -1 | tr -d '\0')
+echo "$recent" | grep -aq "pd-smoke.draw" && echo "$first" | grep -aq "pd-noext" \
+	&& ok "recent files persisted" || bad "recent ($first)"
 
 "$QMP" shot "$OUT/pd-smoke-desk.png" >/dev/null 2>&1
 echo "final screenshot: $OUT/pd-smoke-desk.png"
