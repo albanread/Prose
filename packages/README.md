@@ -78,7 +78,10 @@ The probes are `tests/codecs.sh` (codec_check), `tests/openssl.sh`,
 while it plays and by its own song hook, and stopped at once; midikit_check,
 also on the guarded heap) and `tests/deskbar.sh` (patches 0053, 0055: the
 Applications menu folder by folder, every entry leading to its application,
-every folder with its icon). `BOOT_TEST_SOUND=1` gives the target a sound card,
+every folder with its icon) and `tests/sisong.sh` (the Sisong editor from
+ProseApps' ports: opens a file named on the command line, types and saves
+through `hey`, compares the file byte for byte, a second launch's file lands
+in the running window, clean exit). `BOOT_TEST_SOUND=1` gives the target a sound card,
 recorded to `<work>/out.wav` -- the built-in synthesizer only keeps time with
 one. Packages can be `.hpkg` files too, installed as they are: midikit.sh
 needs `haiku_devel.hpkg` of the image's own build for `libroot_debug.so`.
