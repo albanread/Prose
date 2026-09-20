@@ -1,0 +1,63 @@
+SUMMARY="A programmer's editor and small IDE"
+DESCRIPTION="Sisong is a text editor for programmers, written for BeOS and \
+Haiku by Caitlin Shaw. Documents open in tabs, source is coloured as it is \
+typed, matching braces light up, and a list beside the text shows the \
+functions of the file and jumps to them. It indents and outdents blocks, \
+finds and replaces in the document, in all open documents or in files, and \
+saves what is being typed to the temporary folder now and then.
+
+A project is a folder with a build script: Run executes it in a pane under \
+the text, colours the compiler's output, and jumps to the first error. \
+Colour schemes, the font size and the function keys are set in the \
+preferences.
+
+This is the port to Prose from github.com/albanread/ProseApps (ports/Sisong), \
+where PORT.md lists what was changed: it runs on arm64, draws in a font that \
+really is of one width, reads lines of any length, opens files named on the \
+command line, and no longer asks a web server about updates when it starts."
+HOMEPAGE="https://github.com/albanread/ProseApps"
+COPYRIGHT="2009 Caitlin Shaw"
+LICENSE="GNU GPL v3"
+REVISION="1"
+srcGitRev="16b61fc2f3596e0db2e86b8b99c69ed3ce1177ff"
+SOURCE_URI="$HOMEPAGE/archive/$srcGitRev.tar.gz"
+CHECKSUM_SHA256=""
+SOURCE_FILENAME="ProseApps-$srcGitRev.tar.gz"
+SOURCE_DIR="ProseApps-$srcGitRev/ports/Sisong"
+
+ARCHITECTURES="arm64 ?x86_64"
+
+USER_SETTINGS_FILES="
+	settings/Sisong directory
+	"
+
+PROVIDES="
+	sisong = $portVersion
+	app:Sisong = $portVersion
+	"
+REQUIRES="
+	haiku
+	cmd:bash
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	"
+BUILD_PREREQUIRES="
+	cmd:g++
+	cmd:make
+	"
+
+BUILD()
+{
+	# DEBUG=: no debug information in the package. The flags the code needs
+	# (-fsigned-char above all) are the Makefile's own and stay.
+	make $jobArgs OBJ_DIR=objects DEBUG=
+}
+
+INSTALL()
+{
+	mkdir -p $appsDir
+	cp -a objects/Sisong $appsDir/Sisong
+	addAppDeskbarSymlink $appsDir/Sisong
+}
