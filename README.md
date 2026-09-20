@@ -176,7 +176,8 @@ every application in the guest is scriptable without being modified, and a
 | MIDI | The guest's MIDI played by the Mac's synthesizer and published to CoreMIDI |
 | Storage | NVMe, virtio-block, and a Mac folder mounted in the guest |
 | Automation | A portal device the guest answers on — run a command, get its exit status — and an AppleScript dictionary |
-| Software | ~120 applications, a web browser, codecs, OpenSSL |
+| Look | Two conventional window frames of its own, and themes — wallpaper, colours and frame together — chosen from the host's View menu ([docs/decorators.md](docs/decorators.md)) |
+| Software | ~120 applications, a web browser, codecs, OpenSSL; ProseWriter, a word processor, and Sisong, a programmer's editor, ported and built here |
 
 ## Requirements
 
