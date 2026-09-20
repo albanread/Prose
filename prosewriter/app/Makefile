@@ -20,7 +20,7 @@ LIBS   := -L$(SYS)/develop/lib
 
 CXXFLAGS ?= -O2 -g -Wall -Wno-multichar -std=c++17
 LDFLAGS  ?=
-LDLIBS   := -lbe -lroot -ltracker -lnetwork -lstdc++ -lgcc_s
+LDLIBS   := -lbe -lroot -ltracker -ltranslation -lnetwork -lstdc++ -lgcc_s
 
 BINS := ProseWriter proseagent
 

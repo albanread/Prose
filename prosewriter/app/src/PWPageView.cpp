@@ -215,6 +215,21 @@ PWPageView::DrawPages(BRect updateRect)
 			}
 			DrawSquiggles(line, segs);
 			for (const PWLayout::Segment& s : segs) {
+				if (s.isImage) {
+					PWDocument::PWImage* img = fDoc->ImageAt(
+						fDoc->ParaStart(line.para) + s.startPara);
+					if (img && img->bitmap) {
+						BPoint base = fPrinting
+							? BPoint(s.x * fZoom, (s.baseline - s.imageH)
+								* fZoom)
+							: DocToView(BPoint(s.x,
+								s.baseline - s.imageH));
+						BRect dest(base.x, base.y, base.x + s.imageW * fZoom,
+							base.y + s.imageH * fZoom);
+						DrawBitmap(img->bitmap, dest);
+					}
+					continue;
+				}
 				BFont font(be_plain_font);
 				font.SetFamilyAndFace(s.run->format.family,
 					(uint16)((s.run->format.bold ? B_BOLD_FACE : 0)

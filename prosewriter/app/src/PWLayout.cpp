@@ -60,6 +60,20 @@ IsBreakChar(char c)
 // longer than the column is broken byte-wise at the column edge.
 // Width of one byte at `at`, with tabs advancing to the paragraph's next
 // tab stop (absolute from the left text edge) or a default 36 pt step.
+void
+PWLayout::ImageSizeAt(int32 para, int32 byteOffset, float* w, float* h) const
+{
+	*w = *h = 0;
+	if (fDoc == NULL || para >= fDoc->CountParagraphs())
+		return;
+	PWDocument::PWImage* img = const_cast<PWDocument*>(fDoc)->ImageAt(
+		fDoc->ParaStart(para) + byteOffset);
+	if (img) {
+		*w = img->widthPt;
+		*h = img->heightPt;
+	}
+}
+
 float
 PWLayout::ByteWidth(int32 para, const std::vector<PWRun>& runs,
 	const int32* runOf, const char* text, int32 at, int32 paraLen,
@@ -75,6 +89,10 @@ PWLayout::ByteWidth(int32 para, const std::vector<PWRun>& runs,
 	}
 	if (runOf == NULL)
 		return 0;
+	float w = 0, h = 0;
+	ImageSizeAt(para, at, &w, &h);
+	if (w > 0)
+		return w;
 	BFont f = FontForRun(runs[runOf[at]]);
 	return f.StringWidth(text + at, 1);
 }
@@ -130,8 +148,14 @@ PWLayout::LayoutParagraph(int32 para)
 				i = UTF8Next(text, i, paraLen);
 			}
 			while (i < paraLen && !IsBreakChar(text[i])) {
-				BFont f = FontForRun(runs[runOf[i]]);
-				wordWidth += f.StringWidth(text + i, 1);
+				float iw = 0, ih = 0;
+				ImageSizeAt(para, i, &iw, &ih);
+				if (iw > 0)
+					wordWidth += iw;	// the whole marker at once
+				else {
+					BFont f = FontForRun(runs[runOf[i]]);
+					wordWidth += f.StringWidth(text + i, 1);
+				}
 				i = UTF8Next(text, i, paraLen);
 			}
 			if (width + wordWidth <= column || lastGood == lineStart) {
@@ -151,6 +175,13 @@ PWLayout::LayoutParagraph(int32 para)
 
 		float ascent = 0, descent = 0;
 		for (int32 b = lineStart; b < lineEnd;) {
+			float iw = 0, ih = 0;
+			ImageSizeAt(para, b, &iw, &ih);
+			if (iw > 0) {
+				ascent = std::max(ascent, ih);	// sits on the baseline
+				b = UTF8Next(text, b, paraLen);
+				continue;
+			}
 			const PWRun& r = runs[runOf[b]];
 			font_height fh;
 			FontForRun(r).GetHeight(&fh);
@@ -172,6 +203,13 @@ PWLayout::LayoutParagraph(int32 para)
 		line.length = lineEnd - lineStart;
 		float lineW = 0;
 		for (int32 b = lineStart; b < lineEnd;) {
+			float iw = 0, ih = 0;
+			ImageSizeAt(para, b, &iw, &ih);
+			if (iw > 0) {
+				lineW += iw;
+				b = UTF8Next(text, b, paraLen);
+				continue;
+			}
 			const PWRun& r = runs[runOf[b]];
 			BFont f = FontForRun(r);
 			int32 segEnd = std::min(r.start + r.length, lineEnd);
@@ -263,13 +301,120 @@ PWLayout::AssignLinesToPages()
 void
 PWLayout::Layout()
 {
-	fLines.clear();
-	if (fDoc != NULL) {
-		for (int32 p = 0; p < fDoc->CountParagraphs(); p++)
-			LayoutParagraph(p);
-		CacheAbsoluteStarts();
+	if (fDoc == NULL) {
+		fLines.clear();
+		fPrevValid = false;
+		AssignLinesToPages();
+		return;
 	}
+	if (!fIncremental || !fPrevValid) {
+		LayoutFull();
+		return;
+	}
+
+	// Incremental: reuse every paragraph whose text and format are
+	// unchanged (matched by fingerprint, index shifts tolerated), and
+	// re-measure the rest. Y positions and page breaks are recomputed
+	// afterwards in bulk — they are a walk, not a measurement.
+	std::vector<Line> oldLines;
+	oldLines.swap(fLines);
+	std::vector<bool> used(fPrevSummaries.size(), false);
+	fMeasuredParas = 0;
+
+	for (int32 para = 0; para < fDoc->CountParagraphs(); para++) {
+		const char* text = fDoc->ParagraphText(para);
+		int32 len = fDoc->ParagraphLength(para);
+		int32 match = -1;
+		for (size_t s = 0; s < fPrevSummaries.size(); s++) {
+			if (used[s])
+				continue;
+			if (FingerprintMatch(fPrevSummaries[s], para) && match < 0) {
+				// verify length too (fingerprint stores it)
+				if (fPrevSummaries[s].textLen == len) {
+					match = (int32)s;
+					break;
+				}
+			}
+		}
+		(void)text;
+		if (match >= 0) {
+			const ParaSummary& s = fPrevSummaries[match];
+			used[match] = true;
+			for (int32 i = 0; i < s.lineCount; i++) {
+				Line line = oldLines[s.firstLine + i];
+				line.para = para;
+				fLines.push_back(line);
+			}
+		} else {
+			fMeasuredParas++;
+			LayoutParagraph(para);
+		}
+	}
+	CacheAbsoluteStarts();
 	AssignLinesToPages();
+	BuildSummaries();
+}
+
+void
+PWLayout::LayoutFull()
+{
+	fLines.clear();
+	fMeasuredParas = 0;
+	for (int32 p = 0; p < fDoc->CountParagraphs(); p++)
+		LayoutParagraph(p);
+	CacheAbsoluteStarts();
+	AssignLinesToPages();
+	BuildSummaries();
+	fPrevValid = true;
+}
+
+bool
+PWLayout::FingerprintMatch(const ParaSummary& s, int32 para) const
+{
+	if (s.textLen != fDoc->ParagraphLength(para))
+		return false;
+	if (!(s.fmt == fDoc->ParagraphFormat(para)))
+		return false;
+	const char* text = fDoc->ParagraphText(para);
+	int32 n = s.textLen < 32 ? s.textLen : 32;
+	if (n > 0 && memcmp(s.head, text, n) != 0)
+		return false;
+	if (s.textLen > 32) {
+		int32 tailN = s.textLen - 32 < 32 ? s.textLen - 32 : 32;
+		if (memcmp(s.tail, text + s.textLen - tailN, tailN) != 0)
+			return false;
+	}
+	return true;
+}
+
+void
+PWLayout::BuildSummaries()
+{
+	fPrevSummaries.clear();
+	int32 i = 0;
+	while (i < (int32)fLines.size()) {
+		ParaSummary s;
+		s.para = fLines[i].para;
+		s.firstLine = i;
+		float height = 0;
+		while (i < (int32)fLines.size() && fLines[i].para == s.para) {
+			height += fLines[i].height;
+			i++;
+		}
+		s.lineCount = i - s.firstLine;
+		s.height = height;
+		const char* text = fDoc->ParagraphText(s.para);
+		s.textLen = fDoc->ParagraphLength(s.para);
+		int32 n = s.textLen < 32 ? s.textLen : 32;
+		if (n > 0)
+			memcpy(s.head, text, n);
+		if (s.textLen > 32) {
+			int32 tailN = s.textLen - 32 < 32 ? s.textLen - 32 : 32;
+			memcpy(s.tail, text + s.textLen - tailN, tailN);
+		}
+		s.fmt = fDoc->ParagraphFormat(s.para);
+		fPrevSummaries.push_back(s);
+	}
 }
 
 void
@@ -526,6 +671,16 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 		s.length = to - from;
 		s.x = at;
 		s.baseline = l.y + l.baseline;
+		float iw = 0, ih = 0;
+		ImageSizeAt(l.para, from, &iw, &ih);
+		if (iw > 0) {
+			s.isImage = true;
+			s.imageW = iw;
+			s.imageH = ih;
+			at += iw;
+			out->push_back(s);
+			return;
+		}
 		if (to - from == 1 && text[from] == '\t') {
 			// tabs advance to the paragraph's next stop, not their glyph
 			at += ByteWidth(l.para, runs, NULL, text, from, paraLen, at, edge);
@@ -547,13 +702,23 @@ PWLayout::FillSegments(int32 lineIndex, std::vector<Segment>* out) const
 			segEnd = b + 1;
 		if (!justify) {
 			while (b < segEnd) {
-				if (text[b] == '\t') {
+				float iw = 0, ih = 0;
+				ImageSizeAt(l.para, b, &iw, &ih);
+				if (iw > 0) {
+					pushSeg(r, b, b + 3, x);	// the marker is 3 bytes
+					b += 3;
+				} else if (text[b] == '\t') {
 					pushSeg(r, b, b + 1, x);
 					b++;
 				} else {
 					int32 word = b;
-					while (word < segEnd && text[word] != '\t')
+					while (word < segEnd && text[word] != '\t') {
+						float w2 = 0, h2 = 0;
+						ImageSizeAt(l.para, word, &w2, &h2);
+						if (w2 > 0)
+							break;
 						word++;
+					}
 					pushSeg(r, b, word, x);
 					b = word;
 				}

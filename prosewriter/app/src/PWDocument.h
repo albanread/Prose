@@ -7,6 +7,8 @@
 #ifndef PW_DOCUMENT_H
 #define PW_DOCUMENT_H
 
+class BBitmap;
+
 #include <Font.h>
 #include <Message.h>
 #include <Point.h>
@@ -15,6 +17,7 @@
 
 #include <cstring>
 #include <string>
+#include <map>
 #include <vector>
 
 // Character format. The family is kept; bold/italic are face flags resolved
@@ -85,6 +88,7 @@ struct PWRun {
 class PWDocument {
 public:
 			PWDocument();
+			~PWDocument();
 
 	// ---- content
 	int32		CountParagraphs() const { return (int32)fParas.size(); }
@@ -142,6 +146,21 @@ public:
 
 	const PWCharFormat& DefaultFormat() const { return fDefault; }
 
+	// ---- inline images: a U+FFFC object-replacement character in the
+	// text marks the spot; the bitmap lives in a per-paragraph table
+	// keyed by the character's byte offset.
+	struct PWImage {
+		BBitmap*	bitmap = NULL;	// owned by the document
+		float		widthPt = 0;
+		float		heightPt = 0;
+	};
+	static const char* kObjectChar;		// "\357\277\274", 3 bytes
+	status_t	InsertImage(int32 offset, BBitmap* bitmap, float widthPt,
+				float heightPt);
+	// The image covering a byte offset, or NULL.
+	PWImage*		ImageAt(int32 offset);
+	int32		CountImages() const;
+
 	// ---- named styles: a remembered (character, paragraph) format pair
 	struct PWStyle {
 		BString		name;
@@ -176,6 +195,7 @@ private:
 		std::vector<PWRun> runs;
 		std::string		text;
 		PWParaFormat	format;
+		std::map<int32, PWImage> images;	// byte offset -> image
 	};
 
 	struct UndoStep {

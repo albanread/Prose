@@ -66,7 +66,13 @@ public:
 	// The lines of one page, for per-page drawing (see PWPageView).
 	void	PageLines(int32 page, int32* firstLine, int32* lineCount) const;
 
+	// Width and height of the image at a byte offset, or 0/0.
+	void	ImageSizeAt(int32 para, int32 byteOffset, float* w,
+			float* h) const;
+
 	struct Segment {			// one styled piece of one line
+		bool		isImage = false;
+		float		imageW = 0, imageH = 0;
 		const PWRun* run = NULL;
 		int32	startPara = 0;	// paragraph-relative byte offset
 		int32	length = 0;
@@ -85,6 +91,15 @@ public:
 	int32	PrevLineStart(int32 offset) const;
 
 	int32	TotalHeight() const;	// document space, pages + gaps
+
+	// Incremental relayout: paragraphs whose text and format are
+	// unchanged keep their measured lines; only changed paragraphs
+	// re-measure, then y and page assignment are recomputed wholesale
+	// (a walk, not a measurement). Typing costs micro-seconds, not
+	// the full-document 183 ms.
+	void	SetIncremental(bool on) { fIncremental = on; }
+	int32	LastMeasuredParagraphs() const { return fMeasuredParas; }
+	void	LayoutFull();
 
 	// The document may be null-sized; Layout() must still produce one page.
 	void	SetDocument(const PWDocument* doc) { fDoc = doc; }
@@ -112,6 +127,23 @@ private:
 	std::vector<PageSpan>	fPages;
 
 	static const float kPageGap;	// grey gap between pages, points
+
+	struct ParaSummary {
+		int32	para = 0;
+		int32	firstLine = 0;
+		int32	lineCount = 0;
+		float	height = 0;
+		int32	textLen = -1;
+		char	head[32] = { 0 };
+		char	tail[32] = { 0 };
+		PWParaFormat fmt;
+	};
+	bool	FingerprintMatch(const ParaSummary& s, int32 para) const;
+	void	BuildSummaries();
+	std::vector<ParaSummary> fPrevSummaries;
+	bool	fPrevValid = false;
+	bool	fIncremental = true;
+	int32	fMeasuredParas = 0;
 public:
 	static float Gap() { return kPageGap; }
 private:

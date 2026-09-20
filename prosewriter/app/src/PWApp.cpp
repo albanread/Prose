@@ -26,6 +26,7 @@
 #include <StringItem.h>
 #include <StringView.h>
 #include <TextControl.h>
+#include <TranslationUtils.h>
 #include <UTF8.h>
 
 #include <algorithm>
@@ -377,6 +378,7 @@ static const char* gHeader = NULL;
 static const char* gFooter = NULL;
 static const char* gPaper = NULL;
 static const char* gSeed = NULL;
+static const char* gSeedImage = NULL;
 static bool gLandscape = false;
 static bool gPrint = false;
 
@@ -392,6 +394,8 @@ ParseArgs(int argc, char** argv)
 			gPaper = argv[++i];
 		else if (!strcmp(argv[i], "--seed") && i + 1 < argc)
 			gSeed = argv[++i];
+		else if (!strcmp(argv[i], "--seed-image") && i + 1 < argc)
+			gSeedImage = argv[++i];
 		else if (!strcmp(argv[i], "--landscape"))
 			gLandscape = true;
 		else if (!strcmp(argv[i], "--print"))
@@ -509,6 +513,8 @@ ApplyWindowArgs(PWWindow* window)
 		args.AddBool("landscape", true);
 	if (gSeed)
 		args.AddString("seed", gSeed);
+	if (gSeedImage)
+		args.AddString("seedImage", gSeedImage);
 	if (gPrint)
 		args.AddBool("print", true);
 	window->PostMessage(&args);
@@ -596,6 +602,7 @@ PWWindow::BuildMenus()
 	menu->AddItem(fRecentMenu);
 	BuildRecentMenu();
 	menu->AddSeparatorItem();
+	menu->AddItem(item("Insert image" B_UTF8_ELLIPSIS, 'pWim'));
 	menu->AddItem(item("Page setup" B_UTF8_ELLIPSIS, PAGE_SETUP_MSG));
 	menu->AddItem(item("Print" B_UTF8_ELLIPSIS, PRINT_MSG, 'P',
 		B_COMMAND_KEY));
@@ -1337,6 +1344,44 @@ PWWindow::MessageReceived(BMessage* message)
 		case 'pWyC':
 			fStylesWin = NULL;
 			break;
+		case 'pWim': {
+			// one-shot image panel; images land scaled to the column
+			BMessage* pick = new BMessage('pWif');
+			BFilePanel* panel = new BFilePanel(B_OPEN_PANEL,
+				new BMessenger(this), NULL, B_FILE_NODE, false, pick);
+			panel->Show();
+			break;
+		}
+		case 'pWif': {
+			entry_ref ref;
+			if (message->FindRef("refs", &ref) == B_OK) {
+				BBitmap* bmp = BTranslationUtils::GetBitmap(&ref);
+				if (bmp) {
+					float column = fLayout.PageSetup().TextWidth();
+					float w = bmp->Bounds().Width() + 1;
+					float h = bmp->Bounds().Height() + 1;
+					if (w > column) {
+						h = h * column / w;
+						w = column;
+					}
+					int32 at = fView->CaretOffset();
+					if (fView->HasSelection()) {
+						int32 sFrom, sTo;
+						fView->GetSelection(&sFrom, &sTo);
+						fDoc.Remove(sFrom, sTo - sFrom);
+						at = sFrom;
+					}
+					fDoc.InsertImage(at, bmp, w, h);
+					fView->SetCaret(at + 3, false);
+					fView->Relayout();
+					UpdateStatusText();
+				} else
+					(new BAlert("ProseWriter",
+						"That file could not be read as an image.",
+						"OK"))->Go(NULL);
+			}
+			break;
+		}
 		case 'pWsc':
 			fView->SetSpellEnabled(fSpellItem->IsMarked()
 				&& fSpell && fSpell->Loaded());
@@ -1386,6 +1431,21 @@ PWWindow::MessageReceived(BMessage* message)
 			}
 			if (args->FindString("seed", &text) == B_OK)
 				fDoc.Insert(0, text.String(), NULL);
+			BString imagePath;
+			if (args->FindString("seedImage", &imagePath) == B_OK) {
+				BBitmap* bmp = BTranslationUtils::GetBitmap(imagePath);
+				if (bmp) {
+					float column = fLayout.PageSetup().TextWidth();
+					float w = bmp->Bounds().Width() + 1;
+					float h = bmp->Bounds().Height() + 1;
+					if (w > column) {
+						h = h * column / w;
+						w = column;
+					}
+					fDoc.InsertImage(0, bmp, w, h);
+					fDoc.Insert(3, " The ProseWriter logo, inline.", NULL);
+				}
+			}
 			fView->SetCaret(0, false);
 			fView->Relayout();
 			UpdateStatusText();
@@ -1566,7 +1626,8 @@ public:
 		BRect frame(avail.left, avail.top, avail.left + w, avail.top + h);
 		fWindow = new PWWindow(frame, "Untitled");
 		fWindow->Show();
-		if (gHeader || gFooter || gPaper || gLandscape || gSeed)
+		if (gHeader || gFooter || gPaper || gLandscape || gSeed
+			|| gSeedImage)
 			ApplyWindowArgs(fWindow);
 		// Without a preferred handler the looper answers scripting itself.
 		SetPreferredHandler(this);
@@ -2045,6 +2106,57 @@ SelfTest()
 	}
 
 	{
+		// Inline images.
+		printf("block: images\n"); fflush(stdout);
+		BBitmap* bmp = new BBitmap(BRect(0, 0, 19, 9), B_RGB32, true);
+		CHECK("bitmap for test", bmp && bmp->IsValid());
+		if (bmp) {
+			uint8* bits = (uint8*)bmp->Bits();
+			for (int32 y = 0; y < 10; y++)
+				for (int32 x = 0; x < 20; x++) {
+					uint8* px = bits + y * bmp->BytesPerRow() + x * 4;
+					px[0] = x * 12; px[1] = y * 25; px[2] = 200;
+					px[3] = 255;
+				}
+		}
+		PWDocument doc;
+		doc.Insert(0, "before  after", NULL);
+		status_t err = doc.InsertImage(7, bmp, 40, 20);
+		CHECK("image inserted", err == B_OK && doc.CountImages() == 1);
+		CHECK("marker in text", doc.Length() == 13 + 3);
+		CHECK("image found at offset", doc.ImageAt(7) != NULL);
+		doc.Remove(3, 2);
+		CHECK("image survives unrelated delete",
+			doc.CountImages() == 1 && doc.ImageAt(5) != NULL);
+		doc.Remove(4, 3);
+		CHECK("image deleted with marker", doc.CountImages() == 0);
+		doc.InsertImage(2, new BBitmap(BRect(0, 0, 19, 9), B_RGB32, true),
+			40, 20);
+		BMessage msg;
+		doc.SaveToMessage(&msg);
+		PWDocument doc2;
+		doc2.LoadFromMessage(&msg);
+		CHECK("image persists", doc2.CountImages() == 1
+			&& doc2.ImageAt(2) != NULL && doc2.ImageAt(2)->widthPt == 40);
+		// layout: the image line grows to the image height
+		PWLayout layout(&doc);
+		layout.SetPageSetup(PWPageSetup());
+		layout.Layout();
+		bool tallLine = false;
+		for (const PWLayout::Line& l : layout.Lines())
+			if (l.height >= 20)
+				tallLine = true;
+		CHECK("image grows its line", tallLine);
+		std::vector<PWLayout::Segment> segs;
+		layout.FillSegments(layout.LineOfOffset(2), &segs);
+		bool imageSeg = false;
+		for (const PWLayout::Segment& s : segs)
+			if (s.isImage && s.imageW == 40)
+				imageSeg = true;
+		CHECK("image segment emitted", imageSeg);
+	}
+
+	{
 		// Performance: ~100 pages.
 		PWDocument doc;
 		doc.Insert(0,
@@ -2066,6 +2178,22 @@ SelfTest()
 		layout.Layout();
 		bigtime_t ms2 = (system_time() - t0) / 1000;
 		printf("measure: single-key relayout %lld ms\n", (long long)ms2);
+		// incremental: one changed paragraph, everything else reused
+		t0 = system_time();
+		layout.Layout();
+		bigtime_t ms3 = (system_time() - t0) / 1000;
+		printf("measure: incremental keystroke relayout %lld ms "
+			"(%d paragraphs re-measured)\n", (long long)ms3,
+			(int)layout.LastMeasuredParagraphs());
+		CHECK("incremental beats full", ms3 < 25);
+		CHECK("incremental reuses", layout.LastMeasuredParagraphs() <= 2);
+		// and produces the identical line structure as a cold layout
+		int32 lineCount = (int32)layout.Lines().size();
+		layout.SetIncremental(false);
+		layout.Layout();
+		CHECK("incremental equals full",
+			(int32)layout.Lines().size() == lineCount);
+		layout.SetIncremental(true);
 		t0 = system_time();
 		PWSpellChecker big;
 		big.Load("/boot/home/config/settings/ProseWriter/words");

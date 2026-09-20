@@ -150,11 +150,25 @@ selftest output ("measure:" lines).*
 
 ### Sprint 6 — content, and the typing optimization
 
-1. Images anchored in text with wrap (BTranslationUtils → BBitmap in the
-   paragraph model as an anchored object; wrap = column shaping).
-2. Tables (paragraph-embedded grid, tab-stop rendering generalised).
-3. Incremental relayout: reuse line runs before the damage point; the
-   183 ms single-key figure on 96 pages is the number to beat.
+*Sprint 6 status: incremental relayout and images landed (part 1);
+tables deferred to a focused sprint of their own.*
+
+1. **Incremental relayout — done.** Paragraphs are fingerprinted (length,
+   head/tail bytes, paragraph format); unchanged ones keep their measured
+   lines verbatim and only y/page assignment is recomputed. 96-page
+   keystroke: 183 ms → 9 ms (the fingerprint even dedupes identical
+   filler paragraphs). Selftested for identity with a cold layout.
+2. **Images in text — done, v1.** A U+FFFC object-replacement character
+   in the text marks the spot; the bitmap lives in a per-paragraph table
+   keyed by byte offset, so caret, selection, deletion and undo all treat
+   it as one character (deleting the marker deletes the image).
+   Insertion via File ▸ Insert image… (BTranslationUtils, scaled to the
+   column); persistence carries raw BGRA pixels in .prose; images raise
+   their line's height and share the line with following text. v2 (wrap
+   around anchored images) waits until there's a use for it.
+3. **Tables — moved to their own sprint.** A grid model, cell layout and
+   editing is the largest single feature left; doing it justice needs a
+   fresh session, not the tail of this one.
 
 **Sprint 4 hardening ledger** (all root-caused, all fixed): the selftest
 case array overflowed its fixed size (now a vector); the agent died on

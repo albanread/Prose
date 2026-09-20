@@ -1,5 +1,6 @@
 #include "PWDocument.h"
 
+#include <Bitmap.h>
 #include <File.h>
 #include <String.h>
 
@@ -394,6 +395,17 @@ PWDocument::Remove(int32 offset, int32 length)
 							rEnd - inPara - take, r.format });
 				}
 			}
+			// drop images inside the removed range; shift those after
+			std::map<int32, PWImage> kept;
+			for (auto& kv : p.images) {
+				if (kv.first < inPara)
+					kept.insert(kv);
+				else if (kv.first >= inPara + take)
+					kept[kv.first - take] = kv.second;
+				else
+					delete kv.second.bitmap;
+			}
+			p.images.swap(kept);
 			p.text.erase(inPara, take);
 			p.runs.swap(runs);
 			NormalizeRuns(p);
@@ -506,6 +518,17 @@ PWDocument::SplitPara(int32 offset)
 			next.runs.push_back(PWRun{ 0, rEnd - inPara, r.format });
 		}
 	}
+	next.images.clear();
+	for (auto& kv : p.images) {
+		if (kv.first >= inPara)
+			next.images[kv.first - inPara] = kv.second;
+	}
+	for (auto it = p.images.begin(); it != p.images.end();) {
+		if (it->first >= inPara)
+			it = p.images.erase(it);
+		else
+			++it;
+	}
 	p.text.resize(inPara);
 	p.runs.erase(std::remove_if(p.runs.begin(), p.runs.end(),
 		[inPara](const PWRun& r) { return r.start >= inPara; }),
@@ -534,6 +557,9 @@ PWDocument::MergeWithNext(int32 para)
 	Para& p = fParas[para];
 	Para& next = fParas[para + 1];
 	int32 boundary = (int32)p.text.size();
+	for (auto& kv : next.images)
+		p.images[kv.first + boundary] = kv.second;
+	next.images.clear();
 	for (PWRun& r : next.runs)
 		r.start += boundary;
 	p.text += next.text;
@@ -651,6 +677,22 @@ PWDocument::SaveToMessage(BMessage* msg) const
 		BMessage paraMsg('pWp&');
 		paraMsg.AddString("text", p.text.c_str());
 		p.format.Archive(&paraMsg);
+		for (auto& kv : p.images) {
+			BMessage imgMsg('pWi&');
+			imgMsg.AddInt32("offset", kv.first);
+			imgMsg.AddFloat("w", kv.second.widthPt);
+			imgMsg.AddFloat("h", kv.second.heightPt);
+			if (kv.second.bitmap) {
+				BRect bounds = kv.second.bitmap->Bounds();
+				imgMsg.AddFloat("bw", bounds.Width() + 1);
+				imgMsg.AddFloat("bh", bounds.Height() + 1);
+				uint32 size = (uint32)(bounds.IntegerWidth() + 1)
+					* (uint32)(bounds.IntegerHeight() + 1) * 4;
+				uint8* bits = (uint8*)kv.second.bitmap->Bits();
+				imgMsg.AddData("bits", B_RAW_TYPE, bits, size);
+			}
+			paraMsg.AddMessage("image", &imgMsg);
+		}
 		for (const PWRun& r : p.runs) {
 			BMessage runMsg('pWr&');
 			runMsg.AddInt32("start", r.start);
@@ -692,6 +734,31 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 		if (p.runs.empty())
 			p.runs.push_back(PWRun{ 0, (int32)p.text.size(), def });
 		NormalizeRuns(p);
+		BMessage imgMsg;
+		for (int32 k = 0; paraMsg.FindMessage("image", k, &imgMsg) == B_OK;
+				k++) {
+			int32 offset = 0;
+			imgMsg.FindInt32("offset", &offset);
+			PWImage img;
+			imgMsg.FindFloat("w", &img.widthPt);
+			imgMsg.FindFloat("h", &img.heightPt);
+			float bw = 1, bh = 1;
+			imgMsg.FindFloat("bw", &bw);
+			imgMsg.FindFloat("bh", &bh);
+			const void* bits = NULL;
+			ssize_t size = 0;
+			if (imgMsg.FindData("bits", B_RAW_TYPE, &bits, &size) == B_OK) {
+				BBitmap* bmp = new BBitmap(BRect(0, 0, bw - 1, bh - 1),
+					B_RGB32);
+				if (bmp && bmp->IsValid()
+					&& bmp->ImportBits(bits, (int32)size,
+						(int32)(bw * 4), 0, B_RGB32) == B_OK)
+					img.bitmap = bmp;
+				else
+					delete bmp;
+			}
+			p.images[offset] = img;
+		}
 		fParas.push_back(p);
 	}
 	if (fParas.empty())
@@ -711,6 +778,46 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 	fModified = false;
 	fPlainTextValid = false;
 	return B_OK;
+}
+
+const char* PWDocument::kObjectChar = "\357\277\274";
+
+status_t
+PWDocument::InsertImage(int32 offset, BBitmap* bitmap, float widthPt,
+	float heightPt)
+{
+	if (!bitmap)
+		return B_BAD_VALUE;
+	int32 para, inPara;
+	Locate(offset, &para, &inPara);
+	// register first, then insert the marker so the map key stays valid
+	PWImage image;
+	image.bitmap = bitmap;
+	image.widthPt = widthPt;
+	image.heightPt = heightPt;
+	fParas[para].images[inPara] = image;
+	Insert(offset, kObjectChar, NULL);
+	fModified = true;
+	fPlainTextValid = false;
+	return B_OK;
+}
+
+PWDocument::PWImage*
+PWDocument::ImageAt(int32 offset)
+{
+	int32 para, inPara;
+	Locate(offset, &para, &inPara);
+	auto it = fParas[para].images.find(inPara);
+	return it == fParas[para].images.end() ? NULL : &it->second;
+}
+
+int32
+PWDocument::CountImages() const
+{
+	int32 n = 0;
+	for (const Para& p : fParas)
+		n += (int32)p.images.size();
+	return n;
 }
 
 const PWDocument::PWStyle*
@@ -911,4 +1018,11 @@ PWDocument::ReplaceAll(const char* find, const char* replace,
 		count++;
 	}
 	return count;
+}
+
+PWDocument::~PWDocument()
+{
+	for (Para& p : fParas)
+		for (auto& kv : p.images)
+			delete kv.second.bitmap;
 }
