@@ -48,6 +48,7 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
     func bootVM() {
         let settingsChanged = cpus != Settings.cpuCount || memoryGiB != UInt64(Settings.memoryGiB)
             || networkingOn != Settings.networking || soundOn != Settings.sound
+            || (appliedShares.map { $0 != hostShares() } ?? false)
         if vm == nil || !vm.canStart || settingsChanged {
             do {
                 try makeVM()
@@ -321,7 +322,8 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
     /// on the Mac. What the guest mounts as HostFS is one of these, or all of
     /// them as subfolders when there are several.
     @objc func revealHostFiles(_ sender: Any?) {
-        let shares = hostShares()
+        // What the guest has mounted, not what has been chosen since.
+        let shares = appliedShares ?? hostShares()
         guard !shares.isEmpty else { return }         // the item is disabled; belt and braces
         for share in shares {
             // the folder may not exist yet on a machine that has not started
@@ -553,10 +555,9 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
             item.title = windowed || presenter.window == nil ? "Enter Full Screen" : "Exit Full Screen"
             return presenter.window != nil
         case #selector(revealHostFiles(_:)):
-            let shares = hostShares()
+            let shares = appliedShares ?? hostShares()
             item.toolTip = shares.isEmpty
-                ? "No folder is shared with this machine. An installed copy shares ~/Documents/HostFS; "
-                  + "otherwise pass --share."
+                ? "No folder is shared with this machine. Choose one in Settings, or pass --share."
                 : "Open " + shares.map {
                     $0.url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
                   }.joined(separator: ", ") + " in the Finder."

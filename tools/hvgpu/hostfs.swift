@@ -11,17 +11,26 @@
 //   --share-ro PATH    share PATH read-only (repeatable)
 //   --share-tag TAG    virtio-fs tag, which is also the Haiku volume name (default HostFS)
 //
+// With no --share at all, an installed copy shares the folder chosen in
+// Settings, which starts as ~/Documents/HostFS.
+//
 // One share: the volume is that directory. Several: the volume holds one folder per
 // share, named after the directory (VZMultipleDirectoryShare).
 import Foundation
 import Virtualization
 
-struct HostShare {
+struct HostShare: Equatable {
     let url: URL
     let readOnly: Bool
 }
 
-/// Every --share / --share-ro on the command line, in order.
+/// What the machine in memory was actually given. Settings can be changed under a
+/// running guest; the menu that opens the shared folder in the Finder should open
+/// the folder the guest has mounted, not the one chosen since.
+var appliedShares: [HostShare]?
+
+/// What the machine should be given: the command line if it said anything, else
+/// the window's choice. Pure — the caller creates the directory and logs.
 func hostShares() -> [HostShare] {
     var shares: [HostShare] = []
     var i = 1
@@ -35,32 +44,32 @@ func hostShares() -> [HostShare] {
             i += 1
         }
     }
+    if !shares.isEmpty { return shares }
+
     // An installed copy shares a folder without being asked to: a machine with no
     // way to exchange a file with the Mac it runs on is much less useful, and there
-    // is no command line to put a --share on. A script that passes none gets none.
-    if shares.isEmpty, usingInstalledMachine {
-        let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("HostFS", isDirectory: true)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: folder.path) {
-            shares.append(HostShare(url: folder.standardizedFileURL, readOnly: false))
-            log("hostfs: sharing \(folder.path)")
-        }
-    }
-    return shares
+    // is no command line to put a --share on. A script that passes a disk and no
+    // --share still gets none, so what a test sees does not depend on what somebody
+    // last chose in a window.
+    guard usingInstalledMachine, Settings.shareEnabled else { return [] }
+    return [HostShare(url: Settings.shareFolder, readOnly: Settings.shareReadOnly)]
 }
 
 func makeHostFSDevice() throws -> VZVirtioFileSystemDeviceConfiguration? {
     let shares = hostShares()
+    appliedShares = shares
     guard !shares.isEmpty else { return nil }
     let tag = option("--share-tag") ?? "HostFS"
     try VZVirtioFileSystemDeviceConfiguration.validateTag(tag)
     for share in shares {
+        // A folder chosen in the window, or the default one, may not exist yet.
+        try? FileManager.default.createDirectory(at: share.url, withIntermediateDirectories: true)
+        log("hostfs: sharing \(share.url.path)\(share.readOnly ? " read-only" : "")")
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: share.url.path, isDirectory: &isDirectory),
               isDirectory.boolValue else {
             throw NSError(domain: "hvgpu", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "--share: not a directory: \(share.url.path)"])
+                NSLocalizedDescriptionKey: "shared folder is not a directory: \(share.url.path)"])
         }
     }
 
