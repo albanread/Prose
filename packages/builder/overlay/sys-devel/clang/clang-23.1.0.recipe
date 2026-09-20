@@ -1,0 +1,199 @@
+SUMMARY="The clang C and C++ compiler, with the lld linker"
+DESCRIPTION="clang compiles C, C++ and Objective-C, and lld links what it \
+compiles. Together they are a whole toolchain in two programs: clang \
+assembles the code it generates itself, so there is no separate assembler, \
+and lld needs no help from anything else. The headers and libraries they \
+compile against are Haiku's own (haiku_devel), and the C++ runtime is the \
+one the system already carries (gcc_syslibs).
+
+This is Prose's own recipe. The community's llvm recipe builds the whole \
+LLVM project natively on Haiku, which cannot be done here: there is no \
+compiler on the machine yet to build it with. This one is cross-compiled on \
+the build host and holds what a person needs to compile a program on Prose \
+-- clang, clang++, lld, and the LLVM tools that go with them -- and not the \
+libraries, bindings and runtimes that a compiler of LLVM itself wants."
+HOMEPAGE="https://llvm.org/"
+COPYRIGHT="2003-2026 LLVM contributors"
+LICENSE="Apache v2 with LLVM Exception"
+REVISION="1"
+SOURCE_URI="https://github.com/llvm/llvm-project/releases/download/llvmorg-$portVersion/llvm-project-$portVersion.src.tar.xz"
+CHECKSUM_SHA256="ab1f0e3ec52448c33e8782eaf0422504b87c7b016b22514653ee0d8fcee479ff"
+SOURCE_DIR="llvm-project-$portVersion.src"
+
+# Haiku's own changes to LLVM, as the community's llvm23 recipe carries them
+# (haikuports, sys-devel/llvm/patches/llvm23-23.1.0.patchset).
+PATCHES="clang-23.1.0.patchset"
+
+ARCHITECTURES="arm64"
+
+PROVIDES="
+	clang = $portVersion
+	cmd:clang = $portVersion
+	cmd:clang++ = $portVersion
+	cmd:ld.lld = $portVersion
+	cmd:llvm_ar = $portVersion
+	"
+REQUIRES="
+	haiku
+	gcc_syslibs
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	"
+BUILD_PREREQUIRES="
+	cmd:cmake
+	cmd:ninja
+	cmd:python3
+	"
+
+BUILD()
+{
+	# LLVM runs programs of its own while it builds -- the tablegen tools
+	# that turn its .td descriptions into C++, and clang and opt themselves --
+	# so those have to be built for the machine doing the building, not for
+	# the machine the compiler is being built for. This is the plain cmake and
+	# the build host's own compiler, not the cross one the recipe environment
+	# provides. Anything missing here makes LLVM configure a second native
+	# build of its own inside the cross build, which then inherits the cross
+	# compiler and fails.
+	local hostCMake=$(type -Pp cmake)
+	local hostTools="llvm-tblgen llvm-min-tblgen clang-tblgen clang llvm-as \
+		llvm-config llvm-link llvm-nm llvm-readobj opt"
+
+	"$hostCMake" -S llvm -B build-native -G Ninja \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_COMPILER=/usr/bin/clang \
+		-DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+		-DLLVM_TARGETS_TO_BUILD=AArch64 \
+		-DLLVM_ENABLE_PROJECTS="clang" \
+		-DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
+		-DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
+		-DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
+		-DLLVM_INCLUDE_EXAMPLES=OFF
+
+	"$hostCMake" --build build-native $jobArgs --target $hostTools
+
+	# Now the compiler itself, for Prose. cmake here is the recipe
+	# environment's, which adds the cross toolchain file.
+	#   LLVM_NATIVE_TOOL_DIR  where the tools just built are
+	#   LLVM_HOST_TRIPLE      the machine clang will run on
+	#   LLVM_DEFAULT_TARGET_TRIPLE  what it compiles for when not told otherwise
+	# The system's own C++ runtime and unwinder are used (gcc_syslibs), so
+	# none of LLVM's runtime libraries are built.
+	cmake -S llvm -B build -G Ninja \
+		$cmakeDirArgs \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_BINDIR=bin \
+		-DCMAKE_SKIP_RPATH=YES \
+		-DLLVM_NATIVE_TOOL_DIR="$sourceDir/build-native/bin" \
+		-DLLVM_HOST_TRIPLE="$effectiveTargetMachineTriple" \
+		-DLLVM_DEFAULT_TARGET_TRIPLE="$effectiveTargetMachineTriple" \
+		-DLLVM_TARGETS_TO_BUILD=AArch64 \
+		-DLLVM_ENABLE_PROJECTS="clang;lld" \
+		-DLLVM_ENABLE_RUNTIMES="" \
+		-DLLVM_ENABLE_RTTI=ON \
+		-DLLVM_LINK_LLVM_DYLIB=ON \
+		-DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
+		-DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
+		-DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
+		-DLLVM_INCLUDE_EXAMPLES=OFF \
+		-DCLANG_DEFAULT_LINKER=lld \
+		-DCLANG_DEFAULT_CXX_STDLIB=libstdc++ \
+		-DCLANG_DEFAULT_RTLIB=libgcc \
+		-DCLANG_INCLUDE_TESTS=OFF \
+		-DCLANG_CONFIG_FILE_SYSTEM_DIR=$prefix/develop/etc/clang
+
+	cmake --build build $jobArgs
+}
+
+INSTALL()
+{
+	cmake --install build
+
+	# What ships is what a person needs to compile and link a program on
+	# Prose. What goes is what one needs to build LLVM-based tools with
+	# (LLVM's own headers, its static libraries, the C API library) and the
+	# programs that belong to platforms this machine is not: Windows
+	# resources, Darwin archives, GPU offload, WebAssembly.
+	rm -f $libDir/*.a
+	rm -rf $libDir/cmake
+	rm -rf $developDir/headers
+	rm -f $libDir/libclang.so*
+
+	local keep="cc c++ clang clang++ clang-23 clang-cpp clang-format
+		clang-scan-deps ld.lld lld
+		llvm-addr2line llvm-ar llvm-as llvm-config llvm-cov llvm-cxxfilt
+		llvm-dis llvm-dwarfdump llvm-link llvm-mc llvm-nm llvm-objcopy
+		llvm-objdump llvm-profdata llvm-ranlib llvm-readelf llvm-readobj llvm-size
+		llvm-strings llvm-strip llvm-symbolizer llc opt"
+
+	# one line, however it was written above: a name at the end of a line
+	# would otherwise not match the pattern below, and be deleted (lld was)
+	keep=$(echo $keep)
+
+	# one line, however it was written above: a name at the end of a line
+	# would otherwise not match the pattern below and be deleted (lld was,
+	# which left ld.lld pointing at nothing)
+	keep=$(echo $keep)
+
+	local file name
+	for file in $binDir/*; do
+		name=$(basename $file)
+		case " $keep " in
+		*" $name "*) ;;
+		*) rm -rf $file ;;
+		esac
+	done
+
+	# the names a Makefile expects to find
+	ln -sf clang $binDir/cc
+	ln -sf clang++ $binDir/c++
+	ln -sf ld.lld $binDir/ld
+
+	# gcc's crtbegin and crtend. clang names them on every link line it
+	# makes for Haiku, and no package here has them: they belong to gcc,
+	# which Prose does not carry. These come from the cross toolchain that
+	# built this, and are the right objects for the machine.
+	mkdir -p $developLibDir
+
+	local crt
+	for crt in crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o; do
+		local from=$(gcc -print-file-name=$crt)
+		if [ -f "$from" ]; then
+			cp "$from" $developLibDir/
+		fi
+	done
+
+	# What clang has to be told about this machine, in a config file per
+	# driver name (clang reads the one named after the program it was
+	# started as).
+	#
+	# The linker options are what makes a program Haiku can load. lld lays
+	# an executable out for 64 KB pages and puts code, rodata and data in
+	# separate segments of their own; Haiku's pages are 4 KB, and its
+	# runtime loader would not map what came out ("Could not map image: Bad
+	# data"). These give it the layout its own linker produces.
+	mkdir -p $developDir/etc/clang
+
+	local link=$developDir/etc/clang/prose-link.cfg
+	echo "# How a program is laid out for Haiku: 4 KB pages, and code and" > $link
+	echo "# data in one segment, as the system's own linker does it." >> $link
+	echo "-Wl,-z,max-page-size=4096" >> $link
+	echo "-Wl,-z,common-page-size=4096" >> $link
+	echo "-Wl,-z,noseparate-code" >> $link
+
+	local cxx=$developDir/etc/clang/prose-c++.cfg
+	echo "# The C++ standard library Prose carries (gcc_syslibs_devel)." > $cxx
+	echo "-isystem $prefix/develop/headers/c++" >> $cxx
+	echo "-isystem $prefix/develop/headers/c++/$effectiveTargetMachineTriple" >> $cxx
+	echo "-isystem $prefix/develop/headers/c++/backward" >> $cxx
+
+	local name
+	for name in clang cc; do
+		cp $link $developDir/etc/clang/$name.cfg
+	done
+	for name in clang++ c++ clang-cpp; do
+		cat $link $cxx > $developDir/etc/clang/$name.cfg
+	done
+}

@@ -57,6 +57,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | cdrtools | 3.02~a09-2 | failed | BUILD phase failed (exit 2) |
 | check | 0.15.2-1 | built | check-0.15.2-1-arm64.hpkg, check_devel-0.15.2-1-arm64.hpkg |
 | cherry_blossom | 1.0-4 | built | cherry_blossom-1.0-4-arm64.hpkg |
+| clang | 23.1.0-1 | built | clang-23.1.0-1-arm64.hpkg |
 | clipdinger | 1.2.4-2 | built | clipdinger-1.2.4-2-arm64.hpkg |
 | clucene | 2.3.3.4-4 | failed | boost1.83 failed: INSTALL phase failed (exit 126) (log: /Volumes/HaikuSrc/prose-packages/logs/boost1.83.log) |
 | codec_check | 1.0-4 | built | codec_check-1.0-4-arm64.hpkg |
@@ -178,6 +179,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | lnlauncher | 1.1.2-7 | failed | checksum mismatch for ddd60a641c31.zip |
 | lockworkstation | 0.99-1 | built | lockworkstation-0.99-1-arm64.hpkg |
 | lz4 | 1.9.4-2 | built | lz4-1.9.4-2-arm64.hpkg, lz4_devel-1.9.4-2-arm64.hpkg |
+| make | 4.4.1-1 | built | make-4.4.1-1-arm64.hpkg |
 | masterpiece | r742-2 | failed | python3.10 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.10.log) |
 | memochip | 1.3~git-1 | failed | command failed (1): /Volumes/HaikuSrc/prose-packages/hosttools/bin/package create /Volumes/HaikuSrc/prose-packages/repo/memochip-1.3~git-1-arm64.hpkg |
 | mesa | 22.0.5-3 | failed | llvm12 failed: setuptools failed: INSTALL phase failed (exit 127) (log: /Volumes/HaikuSrc/prose-packages/logs/setuptools.log) (log: /Volumes/HaikuSrc/prose-pack |
@@ -187,7 +189,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | midikit_check | 1.0-3 | built | midikit_check-1.0-3-arm64.hpkg |
 | midisynth | 1.8.1-1 | failed | BUILD phase failed (exit 2) |
 | minesweeper | 20150109-5 | built | minesweeper-20150109-5-arm64.hpkg |
-| mkdepend | 1.7-5 | failed | command failed (128): git add -A -f . |
+| mkdepend | 1.7-5 | built | mkdepend-1.7-5-arm64.hpkg |
 | moe | 1.1.2-7 | built | moe-1.1.2-7-arm64.hpkg |
 | mpc | 1.2.1-2 | built | mpc-1.2.1-2-arm64.hpkg, mpc_devel-1.2.1-2-arm64.hpkg |
 | mpfr | 4.2.0-3 | built | mpfr-4.2.0-3-arm64.hpkg, mpfr_devel-4.2.0-3-arm64.hpkg |
@@ -222,7 +224,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | ponyexpress | 0.2-1 | built | ponyexpress-0.2-1-arm64.hpkg |
 | ppviewer | 1.0.0-2 | built | ppviewer-1.0.0-2-arm64.hpkg |
 | projectconceptor | 0.1.1-1 | failed | INSTALL phase failed (exit 1) |
-| prosewriter | 0.1-1 | built | prosewriter-0.1-1-arm64.hpkg |
+| prosewriter | 0.1-2 | built | prosewriter-0.1-2-arm64.hpkg |
 | puri | 0.3.9.2-1 | failed | lib3ds failed: cannot download d477b7dc451ec88a739cc28e6d9a7564123569d0.tar.gz (log: /Volumes/HaikuSrc/prose-packages/logs/lib3ds.log) |
 | python3.10 | 3.10.21-1 | failed | BUILD phase failed (exit 1) |
 | python3.14 | 3.14.7-1 | failed | BUILD phase failed (exit 1) |

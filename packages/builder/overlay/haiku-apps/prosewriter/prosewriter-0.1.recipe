@@ -7,7 +7,7 @@ SOURCE_STATE in the source says which state of the tree this is."
 HOMEPAGE="https://github.com/albanread/Prose"
 COPYRIGHT="2026 The Prose project"
 LICENSE="MIT"
-REVISION="1"
+REVISION="2"
 # The source is not fetched: make-source.sh beside this recipe packs it from
 # the repository's working tree, and prosepkg reads a file:// source from the
 # recipe's own directory. Run it before building.

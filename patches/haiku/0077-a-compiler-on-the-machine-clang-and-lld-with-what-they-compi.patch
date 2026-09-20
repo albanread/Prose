@@ -1,0 +1,98 @@
+From 4a74ed5adda43076c3e923179d1a57d8b34d8755 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 20:51:42 +0100
+Subject: [PATCH] A compiler on the machine: clang and lld, with what they
+ compile against
+
+clang 23 and lld, cross-built for Prose by prosepkg (our own recipe:
+the community's llvm recipe builds the whole project natively on Haiku,
+which cannot be done on a machine that has no compiler yet). With them,
+gcc_syslibs_devel for the C++ library to link against, and the
+DevelopmentMin optional package for Haiku's own headers, link libraries
+and startup files (haiku_devel).
+
+Also prosewriter-0.1-2, built from the current tree.
+
+Prose can compile and link a program on itself now: clang assembles
+what it generates and lld links it, so no other toolchain is needed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0077-a-compiler-on-the-machine-clang-and-lld-with-what-they-compi.patch 786155c755525fd5c20ac9d63ab483509201a50eee180d4b31dbb1d73a8033aa
+---
+ build/jam/DefaultBuildProfiles          | 13 +++++++++++++
+ build/jam/images/HaikuImage             | 12 +++++++++---
+ build/jam/repositories/HaikuPorts/arm64 |  5 ++++-
+ 3 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index ece47fd74a..9026bc216c 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -344,6 +344,19 @@ rule DefineDefaultBuildProfiles
+ 				xrs
+ 				zookeeper
+ 			;
++
++			# A compiler on the machine: clang and lld (LLVM 23), and what
++			# they compile against -- gcc_syslibs_devel for the C++ library
++			# to link with; Haiku's own headers, link libraries and startup
++			# files come from haiku_devel, which images/HaikuImage activates
++			# for this profile. make and mkdepend are what makefile_engine
++			# needs, and what a person building anything larger will want.
++			AddHaikuImageSystemPackages
++				clang
++				gcc_syslibs_devel
++				make
++				mkdepend
++			;
+ 		}
+ 
+ 		case "minimum-*" : {
+diff --git a/build/jam/images/HaikuImage b/build/jam/images/HaikuImage
+index 59a07d975d..fbfc930f47 100644
+--- a/build/jam/images/HaikuImage
++++ b/build/jam/images/HaikuImage
+@@ -34,11 +34,17 @@ AddPackageFilesToHaikuImage system packages :
+ 	nameFromMetaInfo
+ 	;
+ 
+-if $(HAIKU_BUILD_TYPE) = bootstrap {
+-	# activate the development package, so haikuporter can resolve haiku_devel
+-	# when building ports on the bootstrap system
++if $(HAIKU_BUILD_TYPE) = bootstrap || $(HAIKU_BUILD_PROFILE) in prose-mmc prose-image prose-vmware {
++	# Activate the development package, so that haikuporter can resolve
++	# haiku_devel when building ports on the bootstrap system -- and, on
++	# Prose, so that the compiler the image carries has Haiku's headers,
++	# link libraries and startup files to compile against. The optional
++	# package DevelopmentMin puts them in _packages_, where only the
++	# Installer would find them; a machine that ships installed needs them
++	# activated.
+ 	AddPackageFilesToHaikuImage system packages :
+ 		haiku_devel.hpkg
++		makefile_engine.hpkg
+ 		:
+ 		nameFromMetaInfo
+ 		;
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 7d8e626076..4bcc15992a 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -17,6 +17,9 @@ RemotePackageRepository HaikuPorts
+ 	bash-5.3_bootstrap-1
+ 	binutils-2.41_2026_03_10_bootstrap-1
+ 	bison-3.8.2_bootstrap-1
++	clang-23.1.0-1
++	make-4.4.1-1
++	mkdepend-1.7-5
+ 	coreutils-9.9_bootstrap-1
+ 	curl-8.19.0_bootstrap-1
+ 	curl_devel-8.19.0_bootstrap-1
+@@ -186,7 +189,7 @@ RemotePackageRepository HaikuPorts
+ 	romannumbers-1.0~git-2
+ 	samedi-1.2-1
+ 	shredder-1.0.0-3
+-	prosewriter-0.1-1
++	prosewriter-0.1-2
+ 	sisong-2.16-3
+ 	slayer-1.0-2
+ 	speex-1.2.1-2
