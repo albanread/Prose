@@ -1,0 +1,30 @@
+From 092470479f0473b097ebe31864424611583208fe Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 18:31:42 +0100
+Subject: [PATCH] Sisong 2.16-2: paper and dark blue colour schemes
+
+The package list names sisong-2.16-2. The owner asked for the editor's
+background to be a light yellow like paper, or a darker blue for a dark
+desktop: Paper and Midnight Blue are its default schemes now, the panes
+under the text follow the scheme, and the gutter strip is no longer a
+black and white dither (ProseApps 0837994).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0074-sisong-2-16-2-paper-and-dark-blue-colour-schemes.patch e20c9a40a96c6d16647a39e907f3c824fe373d92301bb4c7de7c06a4702aa020
+---
+ build/jam/repositories/HaikuPorts/arm64 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index b024b9bbd4..1227d88b69 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -185,7 +185,7 @@ RemotePackageRepository HaikuPorts
+ 	samedi-1.2-1
+ 	shredder-1.0.0-3
+ 	prosewriter-0.1-1
+-	sisong-2.16-1
++	sisong-2.16-2
+ 	slayer-1.0-2
+ 	speex-1.2.1-2
+ 	speex_devel-1.2.1-2

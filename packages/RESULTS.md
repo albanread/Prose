@@ -244,7 +244,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | sequitur | 2.2.0-4 | failed | BUILD phase failed (exit 2) |
 | setuptools | 82.0.1-1 | failed | INSTALL phase failed (exit 127) |
 | shredder | 1.0.0-3 | built | shredder-1.0.0-3-arm64.hpkg |
-| sisong | 2.16-1 | built | sisong-2.16-1-arm64.hpkg |
+| sisong | 2.16-2 | built | sisong-2.16-2-arm64.hpkg |
 | slayer | 1.0-2 | built | slayer-1.0-2-arm64.hpkg |
 | speex | 1.2.1-2 | built | speex-1.2.1-2-arm64.hpkg, speex_devel-1.2.1-2-arm64.hpkg |
 | speexdsp | 1.2.1-1 | built | speexdsp-1.2.1-1-arm64.hpkg, speexdsp_devel-1.2.1-1-arm64.hpkg |
