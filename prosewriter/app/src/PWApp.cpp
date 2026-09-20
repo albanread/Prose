@@ -97,7 +97,6 @@ public:
 		BView(frame, "findbar", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_BOTTOM,
 			B_WILL_DRAW)
 	{
-		SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 		BRect r(6, 3, 206, 20);
 		fFind = new BTextControl(r, "find", "Find:", "",
 			new BMessage(PWWindow::FIND_FIELD_MSG), B_FOLLOW_LEFT);
@@ -329,6 +328,7 @@ private:
 };
 
 static void LoadSpellDictionary(PWWindow* window);
+static BPath FrameSettingsPath();
 
 // ----------------------------------------------------------------- window --
 PWWindow::PWWindow(BRect frame, const char* title)
@@ -405,6 +405,73 @@ ParseArgs(int argc, char** argv)
 			gPrint = true;
 	}
 }
+
+// The product identity, in one place.
+static const char* kPWVersion = "1.0";
+static const char* kPWReleaseDate = __DATE__;	// build day = release day
+
+// About ProseWriter: a real about window — name, version, team, licence,
+// and the credit that matters.
+class PWAboutWindow : public BWindow {
+public:
+	explicit PWAboutWindow(PWWindow* owner, BApplication* app)
+		:
+		BWindow(BRect(0, 0, 360, 240), "About ProseWriter",
+			B_TITLED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
+			B_ASYNCHRONOUS_CONTROLS | B_QUIT_ON_WINDOW_CLOSE),
+		fOwnerApp(app)
+	{
+		BStringView* name = new BStringView(BRect(10, 12, 350, 36),
+			"name", "ProseWriter");
+		name->SetFont(be_bold_font);
+		name->SetFontSize(20);
+		name->SetAlignment(B_ALIGN_CENTER);
+		AddChild(name);
+
+		BString line;
+		BStringView* version = new BStringView(BRect(10, 40, 350, 56),
+			"version", (line << "Version " << kPWVersion
+				<< "  \302\267  released " << kPWReleaseDate).String());
+		version->SetAlignment(B_ALIGN_CENTER);
+		AddChild(version);
+
+		BStringView* team = new BStringView(BRect(10, 62, 350, 78),
+			"team", "by the Prose team");
+		team->SetFontSize(12);
+		team->SetAlignment(B_ALIGN_CENTER);
+		AddChild(team);
+
+		BStringView* licence = new BStringView(BRect(10, 100, 350, 116),
+			"licence", "MIT licence \302\267 fork freely, attribution kept");
+		licence->SetFontSize(10);
+		licence->SetAlignment(B_ALIGN_CENTER);
+		AddChild(licence);
+
+		BStringView* haiku = new BStringView(BRect(16, 140, 344, 172),
+			"haiku", "Built on Haiku, which carries the spirit of BeOS.\n"
+			"Thank you to everyone who has worked on it.\n"
+			"haiku-os.org");
+		haiku->SetFontSize(10);
+		haiku->SetAlignment(B_ALIGN_CENTER);
+		AddChild(haiku);
+
+		AddChild(new BButton(BRect(140, 196, 220, 216), "close", "Close",
+			new BMessage(B_QUIT_REQUESTED)));
+
+		AddToSubset(owner);
+		MoveTo(owner->Frame().left + 120, owner->Frame().top + 140);
+	}
+
+	bool QuitRequested() override
+	{
+		if (fOwnerApp != NULL)
+			fOwnerApp->PostMessage('pWaq');
+		return true;
+	}
+
+private:
+	BApplication* fOwnerApp;
+};
 
 // Insert table: rows, columns, and a header row — asked, not assumed.
 class PWInsertTableWindow : public BWindow {
@@ -802,11 +869,23 @@ PWWindow::BuildMenus()
 	menu = new BMenu("View");
 	menu->AddItem(fZoomMenu);
 	menu->AddItem(item("Fit width", FIT_WIDTH_MSG));
+	menu->AddSeparatorItem();
+	menu->AddItem(item("Zoom in", 'pWzi', '=', B_COMMAND_KEY));
+	menu->AddItem(item("Zoom out", 'pWzo', '-', B_COMMAND_KEY));
 	fMenuBar->AddItem(menu);
 
 	menu = new BMenu("Help");
 	menu->AddItem(item("About ProseWriter", B_ABOUT_REQUESTED));
 	fMenuBar->AddItem(menu);
+
+	// trigger letters (menu-bar focus, then the letter)
+	fMenuBar->FindItem("File")->SetTrigger('F');
+	fMenuBar->FindItem("Edit")->SetTrigger('E');
+	fMenuBar->FindItem("Text")->SetTrigger('T');
+	fMenuBar->FindItem("Search")->SetTrigger('S');
+	fMenuBar->FindItem("Document")->SetTrigger('D');
+	fMenuBar->FindItem("View")->SetTrigger('V');
+	fMenuBar->FindItem("Help")->SetTrigger('H');
 }
 
 void
@@ -1198,6 +1277,34 @@ HandleScriptingForWindow(PWWindow* window, BMessage* message,
 			ReplyError(message, "read-only property");
 		return true;
 	}
+	if (prop == "Frame") {
+		BString frame;
+		if (isGet) {
+			BRect f = window->Frame();
+			frame.SetToFormat("%g %g %g %g", f.left, f.top, f.right,
+				f.bottom);
+			ReplyString(message, frame.String());
+		} else if (message->FindString("data", &frame) == B_OK) {
+			float l, t2, r, b;
+			if (sscanf(frame.String(), "%g %g %g %g", &l, &t2, &r, &b) == 4) {
+				window->MoveTo(l, t2);
+				window->ResizeTo(r - l, b - t2);
+				ReplyString(message, "");
+			} else
+				ReplyError(message, "frame is \"l t r b\"");
+		} else
+			ReplyError(message, "no data");
+		return true;
+	}
+	if (prop == "Version" && isGet) {
+		ReplyString(message, "1.0");
+		return true;
+	}
+	if (prop == "Quit" && message->what == B_EXECUTE_PROPERTY) {
+		window->PostMessage(B_QUIT_REQUESTED);
+		ReplyString(message, "");
+		return true;
+	}
 	if (prop == "WordCount" && isGet) {
 		int32 words = 0;
 		const char* plain = doc.PlainText();
@@ -1323,6 +1430,43 @@ PWWindow::MessageReceived(BMessage* message)
 		case B_SELECT_ALL:
 			fView->Select(0, fDoc.Length());
 			break;
+		case B_REFS_RECEIVED: {
+			// dropped from Tracker: text documents open, images insert
+			entry_ref ref;
+			for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK;
+					i++) {
+				BPath path(&ref);
+				BString lower = path.Path();
+				lower.ToLower();
+				bool isImage = lower.IFindLast(".png") != NULL
+					|| lower.IFindLast(".jpg") != NULL
+					|| lower.IFindLast(".jpeg") != NULL
+					|| lower.IFindLast(".bmp") != NULL
+					|| lower.IFindLast(".gif") != NULL
+					|| lower.IFindLast(".tiff") != NULL
+					|| lower.IFindLast(".webp") != NULL;
+				if (isImage && i == 0) {
+					BBitmap* bmp = BTranslationUtils::GetBitmap(&ref);
+					if (bmp) {
+						float column = fLayout.PageSetup().TextWidth();
+						float w = bmp->Bounds().Width() + 1;
+						float h = bmp->Bounds().Height() + 1;
+						if (w > column) {
+							h = h * column / w;
+							w = column;
+						}
+						int32 at = fView->CaretOffset();
+						fDoc.InsertImage(at, bmp, w, h);
+						fView->SetCaret(at + 3, false);
+						fView->Relayout();
+						continue;
+					}
+				}
+				if (i == 0)
+					OpenFile(ref);
+			}
+			break;
+		}
 		case TEXT_APPLY_MSG: {
 			int32 kind = 0;
 			message->FindInt32("what-kind", &kind);
@@ -1373,6 +1517,22 @@ PWWindow::MessageReceived(BMessage* message)
 			float zoom = 1.0f;
 			message->FindFloat("zoom", &zoom);
 			SetZoom(zoom);
+			break;
+		}
+		case 'pWzi':
+		case 'pWzo': {
+			static const float kZooms[] = { 0.5f, 0.75f, 1.0f, 1.5f,
+				2.0f };
+			float current = fView->Zoom();
+			int32 index = 2;
+			for (int32 i = 0; i < 5; i++)
+				if (fabs(kZooms[i] - current) < 0.01f)
+					index = i;
+			if (message->what == 'pWzi')
+				index = index < 4 ? index + 1 : 4;
+			else
+				index = index > 0 ? index - 1 : 0;
+			SetZoom(kZooms[index]);
 			break;
 		}
 		case FIT_WIDTH_MSG: {
@@ -1654,6 +1814,17 @@ PWWindow::QuitRequested()
 			}
 		}
 	}
+	// remember where we were; the next window opens here
+	{
+		BFile out;
+		if (out.SetTo(FrameSettingsPath().Path(),
+				B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE) == B_OK) {
+			BString rect;
+			rect.SetToFormat("%g %g %g %g\n", Frame().left, Frame().top,
+				Frame().right, Frame().bottom);
+			out.Write(rect.String(), rect.Length());
+		}
+	}
 	be_app_messenger.SendMessage('pWwc');	// window closed
 	return true;
 }
@@ -1690,10 +1861,34 @@ static property_info sPWProperties[] = {
 		{ B_GET_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"number of words in the document", 0, { B_INT32_TYPE } },
+	{ "Frame",
+		{ B_GET_PROPERTY, B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, B_DIRECT_SPECIFIER, 0 },
+		"get or set the window frame as \"l t r b\"", 0, { B_STRING_TYPE } },
+	{ "Version",
+		{ B_GET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"version and release date", 0, { B_STRING_TYPE } },
+	{ "Quit",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"close every window and quit", 0, { 0 } },
 	{ 0 }
 };
 
 const BPropertyInfo kPWScriptingProperties(sPWProperties);
+
+static BPath
+FrameSettingsPath()
+{
+	BPath path;
+	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+		path.Append("ProseWriter");
+		create_directory(path.Path(), 0755);
+		path.Append("frame");
+	}
+	return path;
+}
 
 class PWApp : public BApplication {
 public:
@@ -1727,6 +1922,33 @@ public:
 		float w = std::min(avail.Width(), 900.0f);
 		float h = std::min(avail.Height(), 760.0f);
 		BRect frame(avail.left, avail.top, avail.left + w, avail.top + h);
+		// remember where the last window was, if it fits this screen
+		BString saved;
+		BFile file;
+		if (file.SetTo(FrameSettingsPath().Path(), B_READ_ONLY) == B_OK) {
+			char buffer[128];
+			ssize_t n = file.Read(buffer, sizeof(buffer) - 1);
+			if (n > 0) {
+				buffer[n] = 0;
+				saved = buffer;
+			}
+		}
+		float l, t2, r, b;
+		if (sscanf(saved.String(), "%f %f %f %f", &l, &t2, &r, &b) == 4) {
+			BRect remember(l, t2, r, b);
+			if (remember.Width() > 380 && remember.Height() > 300
+				&& remember.Intersects(screen.Frame())) {
+				if (remember.right > screen.Frame().right - 20)
+					remember.OffsetBy(screen.Frame().right - 20
+						- remember.right, 0);
+				if (remember.bottom > screen.Frame().bottom - 20)
+					remember.OffsetBy(0, screen.Frame().bottom - 20
+						- remember.bottom);
+				if (remember.left >= screen.Frame().left - 5
+					&& remember.top >= screen.Frame().top - 5)
+					frame = remember;
+			}
+		}
 		fWindow = new PWWindow(frame, "Untitled");
 		fWindow->Show();
 		if (gHeader || gFooter || gPaper || gLandscape || gSeed
@@ -1784,14 +2006,21 @@ public:
 				if (CountWindows() <= 1)
 					Quit();	// last document window gone
 				break;
-			case B_ABOUT_REQUESTED: {
-				BAlert* alert = new BAlert("About ProseWriter",
-					"ProseWriter\na word processor for Prose\n\n"
-					"Built on Haiku; thank you to everyone\n"
-					"who has worked on it.", "OK");
-				alert->Go();
+			case B_ABOUT_REQUESTED:
+				PostMessage('pWab');
+				break;
+			case 'pWab': {
+				if (fAbout != NULL)
+					fAbout->Activate();
+				else if (fWindow != NULL) {
+					fAbout = new PWAboutWindow(fWindow, be_app);
+					fAbout->Show();
+				}
 				break;
 			}
+			case 'pWaq':
+				fAbout = NULL;
+				break;
 			default:
 				BApplication::MessageReceived(message);
 		}
@@ -1799,6 +2028,7 @@ public:
 
 private:
 	PWWindow*	fWindow = NULL;
+	PWAboutWindow* fAbout = NULL;
 };
 
 // --------------------------------------------------------------- selftest --
