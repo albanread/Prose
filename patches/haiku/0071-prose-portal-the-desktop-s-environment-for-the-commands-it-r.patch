@@ -1,0 +1,40 @@
+From ff2a108e10f71e637b8a247fe1a7832f6791c772 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 16:08:11 +0100
+Subject: [PATCH] prose_portal: the desktop's environment for the commands it
+ runs
+
+A system job gets no environment from launch_daemon, which only sets
+SAFEMODE; the desktop's PATH comes from SetupEnvironment, sourced by the
+user session's jobs, and the portal is not one of them. A command run
+through the portal therefore had no PATH at all (env showed none), so
+`StyledEdit` was "command not found" while /boot/system/apps/StyledEdit
+ran; it happened to resolve on the very first boot, where the package
+was activated late. The job now sources SetupEnvironment the way
+app_server's does, with HOME set to the home the desktop has.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0071-prose-portal-the-desktop-s-environment-for-the-commands-it-r.patch c79ea6f8ff86ed57b34472fd8485412b4ea338c1524cae0e474d5edce0908a7d
+---
+ data/launch/prose_portal | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/data/launch/prose_portal b/data/launch/prose_portal
+index ba2cd3f20b..1f2033d27b 100644
+--- a/data/launch/prose_portal
++++ b/data/launch/prose_portal
+@@ -2,6 +2,14 @@
+ # launch script, so the portal can be replaced on its own: a newer Prose drops
+ # in a newer prose_portal.hpkg and need not bring a whole new system with it.
+ service x-vnd.Haiku-prose_portal {
++	# A system job gets no environment from launch_daemon: the user session
++	# sources SetupEnvironment and this job never sees it, so a command run
++	# through the portal had no PATH and could not find /boot/system/apps.
++	# The desktop's environment, and the home the desktop has.
++	env {
++		from_script /system/boot/SetupEnvironment
++		HOME /boot/home
++	}
+ 	launch /system/servers/prose_portal
+ 	no_safemode
+ 	legacy
