@@ -1,0 +1,26 @@
+From b8497a0946cfac5009e30b827a3d215b24546804 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 07:41:05 +0100
+Subject: [PATCH] Blocklist: BeTeX, LockWorkstation
+
+More of the owner's picks for build/jam/ProseBlocklist (patch 0060).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0064-blocklist-betex-lockworkstation.patch 0eb0391226c28b998768e876af3763e439e210835540562436f174155fea2bce
+---
+ build/jam/ProseBlocklist | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/build/jam/ProseBlocklist b/build/jam/ProseBlocklist
+index 3a8756dd51..b9cb15fbe2 100644
+--- a/build/jam/ProseBlocklist
++++ b/build/jam/ProseBlocklist
+@@ -40,6 +40,8 @@ PROSE_BLOCKED_PACKAGES =
+ 	fairtrade			# fairtrade, a point of sale system
+ 	usbdeskbar			# USBDeskbar, a Deskbar applet for USB devices
+ 	tolmach				# Tolmach, a dictionary
++	betex				# BeTeX, a TeX editor
++	lockworkstation		# LockWorkstation
+ 	;
+ 
+ PROSE_BLOCKED_APPS =
