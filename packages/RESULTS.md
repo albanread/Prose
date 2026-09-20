@@ -216,6 +216,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | ponyexpress | 0.2-1 | built | ponyexpress-0.2-1-arm64.hpkg |
 | ppviewer | 1.0.0-2 | built | ppviewer-1.0.0-2-arm64.hpkg |
 | projectconceptor | 0.1.1-1 | failed | INSTALL phase failed (exit 1) |
+| prosewriter | 0.1-1 | built | prosewriter-0.1-1-arm64.hpkg |
 | puri | 0.3.9.2-1 | failed | lib3ds failed: cannot download d477b7dc451ec88a739cc28e6d9a7564123569d0.tar.gz (log: /Volumes/HaikuSrc/prose-packages/logs/lib3ds.log) |
 | python3.10 | 3.10.21-1 | failed | BUILD phase failed (exit 1) |
 | python3.14 | 3.14.7-1 | failed | BUILD phase failed (exit 1) |
