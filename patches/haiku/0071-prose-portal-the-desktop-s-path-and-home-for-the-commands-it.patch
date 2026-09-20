@@ -1,0 +1,47 @@
+From eb2da65d64d509ef396f79112e03116e61bde220 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 16:08:11 +0100
+Subject: [PATCH] prose_portal: the desktop's PATH and HOME for the commands it
+ runs
+
+A system job gets no environment from launch_daemon, which only sets
+SAFEMODE; the desktop's PATH comes from SetupEnvironment, sourced by the
+user session's jobs, and the portal is not one of them. A command run
+through the portal therefore had no PATH at all (env showed none), so
+`StyledEdit` was "command not found" while /boot/system/apps/StyledEdit
+ran; it happened to resolve on the very first boot, where the package
+was activated late. Sourcing SetupEnvironment from the launch job was
+tried first and is worse: the script asks `locale` and `finddir`, which
+want servers that are not up when a system job starts, Job::Launch()
+waited on it, and one boot in three had no portal daemon at all. The
+daemon now sets PATH and HOME itself where nothing did.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0071-prose-portal-the-desktop-s-path-and-home-for-the-commands-it.patch e09677325edeeefacc75ac10db37d0501bb35701d21e5d7753fdca9bb92b1201
+---
+ src/servers/prose_portal/prose_portal.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/servers/prose_portal/prose_portal.cpp b/src/servers/prose_portal/prose_portal.cpp
+index 9a38a47812..8ff85ee47f 100644
+--- a/src/servers/prose_portal/prose_portal.cpp
++++ b/src/servers/prose_portal/prose_portal.cpp
+@@ -290,6 +290,18 @@ main()
+ {
+ 	openlog("prose_portal", 0, LOG_DAEMON);
+ 
++	// launch_daemon gives a system job no environment: the desktop's PATH
++	// comes from SetupEnvironment, which the user session's jobs source and
++	// this one is not among them. Sourcing it from the launch file is no
++	// good either: the script asks locale and finddir, which want servers
++	// that are not up when this starts, and the job then never launched.
++	// So a command run here had no PATH and could not find
++	// /boot/system/apps. The desktop's values, where nothing set them.
++	setenv("HOME", "/boot/home", 0);
++	setenv("PATH", "/boot/home/config/non-packaged/bin:/boot/home/config/bin:"
++		"/boot/home/config/apps:/boot/system/non-packaged/bin:/boot/system/bin:"
++		"/bin:/boot/system/apps:/boot/system/preferences", 0);
++
+ 	struct stat stopFile;
+ 	if (stat(kStopFile, &stopFile) == 0) {
+ 		syslog(LOG_INFO, "prose_portal: %s is there; not answering\n", kStopFile);
