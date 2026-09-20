@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -1229,7 +1230,7 @@ class Builder:
 				raise BuildError('%s failed: %s (log: %s)' % (port.name, e, log_path))
 		result.update(status='built', packages=hpkgs, seconds=round(time.time() - started))
 		self._record(port.name, result)
-		if not self.args.keep_work:
+		if not self.args.keep_work and not getattr(self.args, 'resume', False):
 			rmtree(work)
 		say('built %s: %s' % (port.name, ', '.join(hpkgs)))
 
@@ -1445,6 +1446,18 @@ class Builder:
 			GIT_AUTHOR_EMAIL='packages@prose.local')
 		implicit = not (sdir / '.git').exists()
 		if implicit:
+			# a source archive can hold a file the owner cannot read
+			# (mkdepend ships test/Makefile1.s with no permissions at all),
+			# and git refuses to index one
+			for root, dirs, files in os.walk(sdir):
+				for name in dirs + files:
+					path = Path(root) / name
+					try:
+						mode = path.lstat().st_mode
+						if not path.is_symlink() and not (mode & stat.S_IRUSR):
+							path.chmod(mode | stat.S_IRUSR | stat.S_IWUSR)
+					except OSError:
+						pass
 			run(['git', 'init', '-q'], cwd=sdir, log=log)
 			run(['git', 'add', '-A', '-f', '.'], cwd=sdir, log=log)
 			run(['git', 'commit', '-q', '--no-verify', '-m', 'import'], cwd=sdir, env=env, log=log)
@@ -2389,6 +2402,9 @@ def main():
 	b.add_argument('--force-arch', action='store_true', help='ignore ARCHITECTURES')
 	b.add_argument('--keep-going', '-k', action='store_true')
 	b.add_argument('--keep-work', action='store_true', help='keep the work dir of successful builds')
+	b.add_argument('--resume', action='store_true',
+		help='reuse the work dir: run BUILD and INSTALL again without fetching, '
+			'patching or compiling what is already compiled (implies --keep-work)')
 	b.set_defaults(func=cmd_build)
 	b = sub.add_parser('info', help='show how a port resolves')
 	b.add_argument('ports', nargs='+')
