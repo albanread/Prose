@@ -1,0 +1,50 @@
+From d3378e57fb4849bab01104766c0966e3a284f3ac Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 13:00:08 +0100
+Subject: [PATCH] The wallpaper appears on the first boot, not the second
+
+A new machine's first desktop came up bare, and the Prose wallpaper only
+showed from the second boot onwards -- the first thing anyone sees of a
+fresh install was the wrong background.
+
+The Desktop window is built in TTracker's constructor and reads its
+background attribute there. InstallTemporaryBackgroundImages() runs later,
+from ReadyToRun(), so by the time the attribute exists nothing has asked
+the window to look again. It now asks for the same refresh the Backgrounds
+preflet asks for; posting to ourselves runs it once ReadyToRun has
+returned, by which time the window is there to receive it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0067-the-wallpaper-appears-on-the-first-boot-not-the-second.patch 5033b22a072077847083b51ef418230944bbd4a6d4a6efae01eae03cef1fe3b5
+---
+ src/kits/tracker/TrackerInitialState.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/kits/tracker/TrackerInitialState.cpp b/src/kits/tracker/TrackerInitialState.cpp
+index 5b4a055a72..18bcffc23e 100644
+--- a/src/kits/tracker/TrackerInitialState.cpp
++++ b/src/kits/tracker/TrackerInitialState.cpp
+@@ -55,6 +55,7 @@ All rights reserved.
+ 
+ #include "Attributes.h"
+ #include "AttributeStream.h"
++#include "Background.h"
+ #include "BackgroundImage.h"
+ #include "Bitmaps.h"
+ #include "ContainerWindow.h"
+@@ -774,6 +775,15 @@ TTracker::InstallTemporaryBackgroundImages()
+ 				(BString(path.Path()) << defaultBackgroundImage).String(),
+ 				BackgroundImage::kScaledToFit, BPoint(0, 0), 0xffffffff, false);
+ 			::InstallTemporaryBackgroundImages(&dir, &message);
++
++			// PROSE fork: the Desktop window is built in the constructor and
++			// reads this attribute there; this runs later, in ReadyToRun, so
++			// nothing had told it to look again and a new machine's first
++			// desktop came up bare -- the wallpaper only appeared on the
++			// second boot. Ask for the refresh the Backgrounds preflet asks
++			// for. Posting to ourselves runs it after ReadyToRun returns, by
++			// which time the window is there to receive it.
++			PostMessage(B_RESTORE_BACKGROUND_IMAGE);
+ 		}
+ 	}
+ }

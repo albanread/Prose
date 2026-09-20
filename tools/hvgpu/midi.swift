@@ -108,7 +108,11 @@ final class HostSynth {
 // MARK: - The device
 
 final class ProseMIDIDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate, VZCustomVirtioDeviceDelegate {
-    static let queue = DispatchQueue(label: "hvgpu.midi")
+    // Every MIDI byte from the guest is delivered on this queue and handed
+    // straight to the synth. At the default service class it queues behind
+    // whatever else the machine is doing, and a note that arrives late is a
+    // note played late: the timing is the whole point of MIDI.
+    static let queue = DispatchQueue(label: "hvgpu.midi", qos: .userInteractive)
     static let deviceID: UInt16 = 62      // 63 is the display; 64+ would map past virtio-pci's modern ID range
     static let endpointName = "Prose"     // the CoreMIDI source and destination, as Mac apps list them
     /// Messages from the guest, for the status bar's MIDI light (read on the main thread).
