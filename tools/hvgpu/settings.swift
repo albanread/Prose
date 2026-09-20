@@ -180,6 +180,10 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 468, height: 300),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "Prose Settings"
+        // A window made this way is released when it closes, which leaves the
+        // property above pointing at freed memory and crashes the second time
+        // Settings is opened. The property is the owner; closing only hides it.
+        w.isReleasedWhenClosed = false
         w.delegate = self
         window = w
 
