@@ -1,0 +1,54 @@
+From 554e4873b4c96a2cf017bf6802083dfed07cbe8d Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Sun, 20 Sep 2026 15:55:26 +0100
+Subject: [PATCH] Prose profile: Sisong, the programmer's editor
+
+Sisong 2.16 (Caitlin Shaw, GPL 3), ported in ProseApps' ports section
+and built by prosepkg from there: tabs, syntax colouring, a function
+list, brace matching, find in files, projects with build scripts and a
+build pane. In the Deskbar's Development folder, beside Pe.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Prose-Patch: 0070-prose-profile-sisong-the-programmer-s-editor.patch c40dcbe58484b197cd128d260e95b557a572f748fe712f1bd47b64fd9aefa86a
+---
+ build/jam/DefaultBuildProfiles          | 1 +
+ build/jam/DeskbarCategories             | 1 +
+ build/jam/repositories/HaikuPorts/arm64 | 1 +
+ 3 files changed, 3 insertions(+)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index ce3c41953b..dd6e40f2d7 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -312,6 +312,7 @@ rule DefineDefaultBuildProfiles
+ 				romannumbers
+ 				samedi
+ 				shredder
++				sisong
+ 				slayer
+ 				superprefs
+ 				systeminfo
+diff --git a/build/jam/DeskbarCategories b/build/jam/DeskbarCategories
+index 2ceb197fe9..24967d1ad7 100644
+--- a/build/jam/DeskbarCategories
++++ b/build/jam/DeskbarCategories
+@@ -51,6 +51,7 @@ DESKBAR_CATEGORY_Development =
+ 	Pe
+ 	PonpokoDiff
+ 	SerialConnect
++	Sisong
+ 	;
+ 
+ DESKBAR_CATEGORY_Files =
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 87f35d8d26..ca93eebaeb 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -184,6 +184,7 @@ RemotePackageRepository HaikuPorts
+ 	romannumbers-1.0~git-2
+ 	samedi-1.2-1
+ 	shredder-1.0.0-3
++	sisong-2.16-1
+ 	slayer-1.0-2
+ 	speex-1.2.1-2
+ 	speex_devel-1.2.1-2
