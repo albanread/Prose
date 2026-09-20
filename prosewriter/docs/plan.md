@@ -278,3 +278,44 @@ in-guest kill patterns never worked; parse `ps` output on the host.
 do Save to a path, relaunch with the file as the launch argument —
 the page renders the saved content. The file panels were correct all
 along; what failed was testing against dead instances.
+
+
+### Sprint 8 — files (defined retroactively; the work ran without one)
+
+Scope: a document's whole life — new, open, save, save-as, export,
+close, quit, and the window title that reflects it.
+
+**Delivered and verified (headless round trip + selftest):**
+
+| | |
+|---|---|
+| Save to path / Save (no path → save panel) / Save as… | panels wired since S2; `Save` scripting property verified by round trip |
+| Open (.prose / RTF / text by extension) | `Open…` panel; launch-with-file argument; `B_REFS_RECEIVED` on the app (drop on icon / Tracker open) |
+| Title = file name + `•` when modified | UpdateTitle on edit, open, save |
+| Export as RTF | panel, own message |
+| Recent documents | menu, persisted in settings |
+| Quit with unsaved changes | Save changes? alert (Save / Don't save / Cancel) |
+| Modified guard | document flags every mutation |
+
+**Delivered, NOT yet verified — the exit criteria still owed:**
+
+| ID | Test | Method |
+|---|---|---|
+| F1 | Save via the panel in the windowed VM writes the file; title updates | human, one document |
+| F2 | Open via the panel loads; title = name; caret at start | human |
+| F3 | Save as… writes a second file; recent menu shows both | human |
+| F4 | `.prose` double-click in Tracker opens ProseWriter (needs MIME type `application/x-vnd.prose.ProseWriter-doc` registered + document suffix attr) | human; MIME registration is open work |
+| F5 | Drag a .prose from Tracker onto the window → opens | human |
+| F6 | Quit-with-modifications alert: each of the three buttons does the right thing | human |
+| F7 | New window per New; close last = quit | human |
+
+**Open work the sprint would have surfaced earlier:**
+- MIME registration for `.prose` (sniffer rule, preferred app, document
+  icon) — currently only the app signature is stamped, so F4 fails.
+- The title after `hey set Text` shows no dot (scripted wholesale
+  replace reads as clean) — acceptable, documented.
+- Save panel's "name" pre-filled with the current file name.
+
+Lesson recorded: requests that arrive mid-session still get a sprint
+block — scope, test matrix, exit criteria — BEFORE code, even a small
+one. The discipline is cheapest exactly when it feels skippable.
