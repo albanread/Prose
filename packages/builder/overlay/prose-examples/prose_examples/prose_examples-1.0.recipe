@@ -1,0 +1,35 @@
+SUMMARY="Small programs to read, build and change"
+DESCRIPTION="Six short programs for a machine that can compile them: a C \
+program and how to compile one, C++ with the standard library, a window on \
+screen, a view that paints itself, the named values a file carries beside \
+its contents, and threads with the lock that keeps them honest. Each is \
+short enough to take in at a sitting and shows one thing, with a Makefile \
+beside it and the command to type in its first lines.
+
+They are installed read-only, so take a copy to work on:
+
+    cp -r /boot/system/data/prose-examples ~/examples
+    cd ~/examples && make"
+HOMEPAGE="https://github.com/albanread/Prose"
+COPYRIGHT="2026 Prose"
+LICENSE="MIT"
+REVISION="1"
+ARCHITECTURES="any"
+
+PROVIDES="
+	prose_examples = $portVersion
+	"
+REQUIRES="
+	haiku
+	"
+
+BUILD()
+{
+	:	# sources only: they are built on the machine, by the person reading them
+}
+
+INSTALL()
+{
+	mkdir -p $dataDir
+	cp -a $portDir/additional-files/examples $dataDir/prose-examples
+}
