@@ -1426,6 +1426,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     var needNewMachine = false
     var runningSince: Date?
     var failure: String?               // why the machine couldn't start
+    var headlessVsync: DispatchSourceTimer?   // --headless: the vsync a window's display link would give
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -1449,6 +1450,17 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
                 }
             }
             presenter.window.delegate = self     // windowShouldClose, full screen (MODE_HINT: onDisplayResize)
+        } else {
+            // No window, so no display link, so no vsync: the guest paces its
+            // front-buffer copies on it and froze after its first frames, and
+            // a capture showed a desktop nothing moved on. Tick it ourselves.
+            let vsync = DispatchSource.makeTimerSource(queue: .main)
+            vsync.schedule(deadline: .now(), repeating: .milliseconds(16), leeway: .milliseconds(2))
+            vsync.setEventHandler { [weak self] in
+                self?.displaySource.displayTick(timestamp: CACurrentMediaTime())
+            }
+            vsync.resume()
+            headlessVsync = vsync
         }
         presenterGPU = displaySource
         monitor = VMMonitor(diskImage: diskURL, guestMAC: args.contains("--no-net") ? nil : macAddress.string)
