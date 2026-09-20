@@ -19,11 +19,13 @@ One setting per virtual machine, in the Machine menu and in the VM's settings:
 
 Three things follow from it, and the order matters:
 
-1. **The channel is hardware.** With the setting off, the Prose Portal
-   virtio device is not added to the VM's configuration at all. The guest has no
-   device, its driver finds nothing, and there is no path in — not a disabled
-   API, an absent one. Turning it on takes effect at the next start, like any
-   other device.
+1. **The setting gates callers, not the machine's own menus.** The Prose
+   Portal virtio device is always attached: View ▸ Theme goes through it, and
+   the owner choosing from their own machine's menu is not "another
+   application". With the setting off, every surface below — AppleScript,
+   `--script`, `prose(1)` — is refused before it reaches the device.
+   (`--no-portal` leaves the device out altogether, for tests of a machine
+   that has none.)
 2. **macOS gates the callers.** Every surface below is reached by Apple Events,
    so the first time any application tries, macOS asks the owner — *"Terminal
    wants to control Prose"* — and records the answer per calling application in
@@ -124,6 +126,7 @@ Host side, no guest cooperation needed:
 | `display size`, `presenter mode`, `full screen` | read and write |
 | `share` *folder* [`read only`] | add a HostFS share |
 | `guest address` | the VM's address on the NAT bridge |
+| `theme` [*name*] | the machine's themes and which is current; with a name, apply it (`prosetheme` in the guest, docs/decorators.md) |
 
 Guest side, over the automation device:
 

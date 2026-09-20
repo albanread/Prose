@@ -1426,6 +1426,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     var needNewMachine = false
     var runningSince: Date?
     var failure: String?               // why the machine couldn't start
+    // View ▸ Theme (themes.swift): what the guest answered, and the menu it fills
+    let themeMenu = NSMenu(title: "Theme")
+    var themes: [String] = []
+    var currentTheme: String?
     var headlessVsync: DispatchSourceTimer?   // --headless: the vsync a window's display link would give
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1463,6 +1467,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
             headlessVsync = vsync
         }
         presenterGPU = displaySource
+        portal.onHello = { [weak self] in DispatchQueue.main.async { self?.refreshThemes() } }
         monitor = VMMonitor(diskImage: diskURL, guestMAC: args.contains("--no-net") ? nil : macAddress.string)
 
         bootVM()
@@ -1576,10 +1581,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         } else if !args.contains("--no-custom-gpu") {   // --no-custom-gpu: VZ's GPU only
             config.customVirtioDevices = [displaySource.configuration]
         }
-        // The Prose Portal (portal.swift) is attached only when the owner allowed
-        // automation: absent, the guest has no device and its daemon exits. A
-        // change to the setting takes effect at the next start, like any device.
-        if Automation.enabled && !args.contains("--no-portal") {
+        // The Prose Portal (portal.swift) is always attached: View ▸ Theme goes
+        // through it. What "Allow Automation and Testing" gates is other
+        // applications driving the machine, not the machine's own menus.
+        if !args.contains("--no-portal") {
             config.customVirtioDevices += [portal.configuration]
         }
         if !args.contains("--no-midi") {
@@ -1670,6 +1675,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
 
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         log("guest powered off")
+        forgetThemes()          // View ▸ Theme says so until the next hello
         let restarting = restartPending && !stopping
         if !restarting && (stopping || exitOnStop) { exit(0) }
         vmStopped()                        // the window stays, with a Start button

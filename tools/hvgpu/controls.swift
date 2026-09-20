@@ -565,6 +565,7 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
             item.title = state == .paused ? "Resume" : "Pause"
             return live
         case #selector(takeScreenshot(_:)): return displaySize != nil
+        case #selector(chooseTheme(_:)): return state == .running && portal.alive.withLock { $0 }
         case #selector(sendControlAltDelete(_:)), #selector(sendPrintScreen(_:)):
             return state == .running && inputRouter != nil
         case #selector(openGuestLog(_:)):

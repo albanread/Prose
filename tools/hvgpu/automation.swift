@@ -120,9 +120,9 @@ private let modifierCodes: [String: UInt16] = [
 final class Automation {
     static let defaultsKey = "prose.automationEnabled"
 
-    /// Off until the owner of the machine says otherwise. The guest-side channel
-    /// is not added to the VM's configuration while this is false, so turning it
-    /// off removes the path rather than refusing to use it.
+    /// Off until the owner of the machine says otherwise. This gates other
+    /// applications (AppleScript, --script, prose(1)); the portal device itself
+    /// is always there, for the machine's own menus (View ▸ Theme).
     static var enabled: Bool {
         get { args.contains("--automation") || UserDefaults.standard.bool(forKey: defaultsKey) }
         set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
@@ -132,7 +132,7 @@ final class Automation {
     static let commands: Set<String> = [
         "state", "start", "shut-down", "shutdown", "restart", "force-stop", "run", "info", "ping",
         "pause", "resume", "type", "key", "click", "move", "capture",
-        "display-size", "presenter", "full-screen", "wait", "stats",
+        "display-size", "presenter", "full-screen", "wait", "stats", "theme",
     ]
 
     /// A --script step as a command line for the core, or nil when it is one of
@@ -328,6 +328,25 @@ final class Automation {
                                              "bytes": reply.out.utf8.count + reply.error.utf8.count]
                 if reply.truncated { values["truncated"] = true }
                 return .done(values, reply.status == 0 ? "" : "exit \(reply.status)")
+            }
+            return nil
+
+        case "theme":
+            // themes.swift: the same path View ▸ Theme takes
+            if let name = args["name"], !name.isEmpty {
+                c.applyTheme(name) { result in
+                    switch result {
+                    case .ok(let out): completion(.done(["theme": name, "applied": out.trimmingCharacters(in: .whitespacesAndNewlines)]))
+                    case .failed(let why): completion(.failed(.failed, why))
+                    }
+                }
+            } else {
+                c.refreshThemes { [weak c] result in
+                    switch result {
+                    case .ok: completion(.done(["themes": c?.themes ?? [], "current": c?.currentTheme ?? ""]))
+                    case .failed(let why): completion(.failed(.guestNotAnswering, why))
+                    }
+                }
             }
             return nil
 

@@ -242,39 +242,58 @@ setdecor ProseRightDecorator
 setdecor Default
 ```
 
-## 4. Themes — the direction, and what it needs
+## 4. Themes
 
-A theme, as the owner has set it out, is a wallpaper, a set of window
-colours, and a decorator, chosen from the host's View menu and applied to the
-guest through the portal. Every part of that already has a guest-side lever;
-what is missing is one tool that pulls all three and a menu that calls it.
+A theme is a wallpaper, a set of system colours and a decorator, chosen from
+the host's View ▸ Theme menu and applied to the guest through the portal.
+Patch `0072`; host side in `tools/hvgpu/themes.swift`.
 
-| part | lever in the guest | persists across reboot? |
-|---|---|---|
-| decorator | `setdecor <name>` | yes — `decorator_settings` |
-| window and UI colours | `set_ui_color(which, rgb_color)` (`InterfaceDefs.h`); no CLI exists, so the tool calls it | yes — app_server's settings |
-| wallpaper | Tracker reads the `be:bgndimginfo` attribute on `~/Desktop` and repaints on `B_RESTORE_BACKGROUND_IMAGE` (the Backgrounds preferences do exactly this: `src/preferences/backgrounds/BackgroundsView.cpp:681`; `TrackerInitialState.cpp:743` shows the attribute's layout) | yes — it is an attribute on the folder |
+**In the guest: `prosetheme`.** A theme is `NAME.theme` in
+`/boot/system/data/prose/themes` (shipped, in the `prose_portal` package) or
+`~/config/settings/prose/themes` (the user's, which win), lines of
+`key = value`:
 
-Proposed shape:
+```
+decorator = ProseDecorator                  a decorator's name as setdecor knows it
+wallpaper = /boot/system/data/artwork/PROSE wallpaper - paper light.png
+window_tab = 236,236,236                    a colour, r,g,b
+```
 
-- A guest tool, **`prosetheme`** (`src/bin/prosetheme.cpp` in the fork,
-  ~150 lines): `prosetheme --list`, `prosetheme <name>`. A theme is a text
-  file in `/boot/system/data/prose/themes/<name>.theme`: `decorator=`,
-  `wallpaper=`, and one line per colour (`window_tab=235,235,235` …). It
-  applies the colours with `set_ui_color`, the decorator with
-  `set_decorator`, and the wallpaper by writing the attribute and messaging
-  Tracker. Colours not named keep their current values, so a theme can be
-  partial.
-- Three shipped themes: **Prose Light** (neutral greys, `ProseDecorator`,
-  the paper-light wallpaper), **Prose Dark** (Haiku's dark table,
-  `ProseDecorator`, the ink-dark wallpaper), **BeOS** (the default table,
-  `Default`, and the wallpaper it has now).
-- On the host, **View ▸ Theme** lists what `prosetheme --list` returns over
-  the portal and runs `prosetheme <name>` on selection; the portal already
-  runs commands and returns their output. The menu is greyed until the guest
-  answers, as the automation items are.
+The colour keys are the system's: `panel_background`, `panel_text`,
+`document_background`, `document_text`, `control_*`, `menu_*`, `list_*`,
+`link_*`, `tooltip_*`, `scroll_bar_thumb`, `status_bar`, `success`,
+`failure`, the six `window_*` colours, and `desktop` (which also decides
+whether Tracker draws the icons' labels light or dark). A key a theme leaves
+out keeps its current value, so a theme may be partial.
 
-Because app_server and Tracker persist all three, a theme applied once is
-the machine's state until another is applied — the host menu is a
-convenience, not a source of truth, and the guest is never left half-styled
-across a restart.
+| | |
+|---|---|
+| `prosetheme --list` | the themes there are; `* ` marks the current one |
+| `prosetheme --current` | the current theme's name |
+| `prosetheme --show NAME` | what a theme sets |
+| `prosetheme NAME` | apply it |
+
+Each part goes to the server that owns it — colours through `set_ui_color()`,
+the decorator as `setdecor` sets it, the wallpaper as the Backgrounds
+preferences write it (the `be:bgndimginfo` attribute on the Desktop folder,
+then `B_RESTORE_BACKGROUND_IMAGE` to Tracker) — and each of those persists
+it, so a theme applied once is the machine's state across restarts. The name
+is kept in `~/config/settings/prose/theme`.
+
+**Three ship.** *Prose Light*: the paper wallpaper, a light grey frame with
+the round buttons at the left, the system's own colours otherwise. *Prose
+Dark*: the ink wallpaper, a charcoal frame, and Haiku's dark palette for
+panels, menus, documents and lists. *Classic*: the yellow tab and the default
+colours a new machine has. All three list every colour, so switching back
+restores everything.
+
+**On the host: View ▸ Theme.** The submenu is filled from `prosetheme --list`
+when the guest's portal daemon says hello (a couple of seconds into a boot),
+the current theme carries the check mark, and choosing one runs
+`prosetheme NAME` and moves the mark when the guest confirms. The portal is
+attached to every machine now — the automation switch gates other
+applications, not the machine's own menus. The same path is the `theme`
+automation command (`docs/automation.md`), which is how it is tested.
+
+A fourth theme is a text file: drop `Mine.theme` in
+`~/config/settings/prose/themes` and it is in the menu at the next boot.

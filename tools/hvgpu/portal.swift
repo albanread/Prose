@@ -38,7 +38,7 @@ struct PortalReply {
 }
 
 enum PortalFailure: Error, CustomStringConvertible {
-    case noDevice               // automation was off when the machine started
+    case noDevice               // --no-portal: the machine has no portal device
     case notAnswering           // the guest has not said hello since it started
     case timedOut(TimeInterval)
     case busy                   // eight requests outstanding and none coming back
@@ -85,6 +85,8 @@ final class ProsePortalDevice: NSObject, VZCustomVirtioDeviceConfigurationDelega
     private(set) var sent = 0, received = 0
 
     var attached: Bool { device != nil }
+    /// Called on the device queue when the guest says hello (each boot).
+    var onHello: (() -> Void)?
 
     var configuration: VZCustomVirtioDeviceConfiguration {
         let cfg = VZCustomVirtioDeviceConfiguration()
@@ -164,6 +166,7 @@ final class ProsePortalDevice: NSObject, VZCustomVirtioDeviceConfigurationDelega
         if type == Portal.hello {
             alive.withLock { $0 = true }
             log("portal: the guest is answering")
+            onHello?()
             return
         }
         guard let p = pending[id] else { return }       // a reply to a request that timed out

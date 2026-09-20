@@ -127,6 +127,12 @@ func makeMainMenu(_ controller: Controller) -> NSMenu {
         item.state = mode == PresenterMode.current ? .on : .off
     }
     view.addItem(presenter)
+    // the machine's themes, applied through the portal (themes.swift)
+    let theme = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+    theme.submenu = controller.themeMenu
+    theme.toolTip = "A decorator, the system's colours and the wallpaper, kept by the machine."
+    controller.rebuildThemeMenu()
+    view.addItem(theme)
     view.addItem(.separator())
     // the Mac side of HostFS: what the machine sees as its HostFS volume
     add(view, "Host Files in Finder", #selector(Controller.revealHostFiles(_:)))
