@@ -1,26 +1,28 @@
-From b8497a0946cfac5009e30b827a3d215b24546804 Mon Sep 17 00:00:00 2001
+From 9cd00fa053a0c6bbf3c8cbbdfa43fd38a3bad74e Mon Sep 17 00:00:00 2001
 From: albanread <albanread@googlemail.com>
 Date: Sun, 20 Sep 2026 07:41:05 +0100
-Subject: [PATCH] Blocklist: BeTeX, LockWorkstation
+Subject: [PATCH] Blocklist: BeTeX, LockWorkstation, Lingua
 
-More of the owner's picks for build/jam/ProseBlocklist (patch 0060).
+More of the owner's picks for build/jam/ProseBlocklist (patch 0060):
+about 18 MiB of the image's packages, most of it Lingua's word lists.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-Prose-Patch: 0064-blocklist-betex-lockworkstation.patch 0eb0391226c28b998768e876af3763e439e210835540562436f174155fea2bce
+Prose-Patch: 0064-blocklist-betex-lockworkstation.patch 328ddc5d66bc5a3b7b33e8f6b61c435dea054a760af17e1383711d07b89420e0
 ---
- build/jam/ProseBlocklist | 2 ++
- 1 file changed, 2 insertions(+)
+ build/jam/ProseBlocklist | 3 +++
+ 1 file changed, 3 insertions(+)
 
 diff --git a/build/jam/ProseBlocklist b/build/jam/ProseBlocklist
-index 3a8756dd51..b9cb15fbe2 100644
+index 3a8756dd51..39035fc78c 100644
 --- a/build/jam/ProseBlocklist
 +++ b/build/jam/ProseBlocklist
-@@ -40,6 +40,8 @@ PROSE_BLOCKED_PACKAGES =
+@@ -40,6 +40,9 @@ PROSE_BLOCKED_PACKAGES =
  	fairtrade			# fairtrade, a point of sale system
  	usbdeskbar			# USBDeskbar, a Deskbar applet for USB devices
  	tolmach				# Tolmach, a dictionary
 +	betex				# BeTeX, a TeX editor
 +	lockworkstation		# LockWorkstation
++	lingua				# Lingua, word lists in several languages
  	;
  
  PROSE_BLOCKED_APPS =
