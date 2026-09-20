@@ -2039,6 +2039,18 @@ public:
 			what, property);
 	}
 
+	void	AboutRequested() override
+	{
+		// BApplication routes B_ABOUT_REQUESTED here (DeskCalc pattern);
+		// it never reaches MessageReceived
+		if (fAbout != NULL)
+			fAbout->Activate();
+		else if (fWindow != NULL) {
+			fAbout = new PWAboutWindow(fWindow, be_app);
+			fAbout->Show();
+		}
+	}
+
 	void	ReadyToRun() override
 	{
 		BScreen screen(B_MAIN_SCREEN_ID);
@@ -2130,18 +2142,6 @@ public:
 				if (CountWindows() <= 1)
 					Quit();	// last document window gone
 				break;
-			case B_ABOUT_REQUESTED:
-				PostMessage('pWab');
-				break;
-			case 'pWab': {
-				if (fAbout != NULL)
-					fAbout->Activate();
-				else if (fWindow != NULL) {
-					fAbout = new PWAboutWindow(fWindow, be_app);
-					fAbout->Show();
-				}
-				break;
-			}
 			case 'pWaq':
 				fAbout = NULL;
 				break;
