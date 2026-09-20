@@ -251,3 +251,30 @@ Everything lives under `prosewriter/`; the Prose build tree and its image
 are used read-only; our VM boots only `prosewriter/vm/prose-dev.image`
 (an APFS clone). ProseWriter becomes a prose package when finished — until
 then it installs by hand into `/boot/home/apps/` of the dev image only.
+
+
+### Session ledger, 2026-09-20 (evening)
+
+**Base image:** the owner's Sep 20 08:14 build ships prose_display +
+prose_display_agent, and under plain QEMU + ramfb its app_server never
+brings the framebuffer up (apps and the agent run; the screen stays
+black). prose-dev.image is therefore cloned from
+private_workspace/work/autoboot3/haiku.img (the Sep 19 base, 719 MB,
+which boots and displays under ramfb). When the owner's QEMU-side
+display story lands, re-clone to the current base.
+
+**Never hand-type partition offsets.** The corrupted-image incident
+was an inline bfs_shell run with the previous build's bounds against
+the new 1 GB-partition image. All image writes go through
+vm/install.sh and vm/extract.sh, which parse the MBR.
+
+**Stale-instance discipline:** scripts target the app by signature;
+the registrar answers with the OLDEST registered team. Every deploy
+cycle: list team ids (`ps`), kill them BY NUMBER, relaunch, then test.
+Quoting an awk pipeline through two shells expands to nothing — the
+in-guest kill patterns never worked; parse `ps` output on the host.
+
+**Save/load verified end to end** on the restored base: set Text,
+do Save to a path, relaunch with the file as the launch argument —
+the page renders the saved content. The file panels were correct all
+along; what failed was testing against dead instances.
