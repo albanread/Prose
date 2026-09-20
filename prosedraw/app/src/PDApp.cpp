@@ -1,0 +1,1288 @@
+// PDApp — ProseDraw's application, window, palette, inspector,
+// scripting and selftest.
+#include <Alert.h>
+#include <Application.h>
+#include <Box.h>
+#include <Button.h>
+#include <CheckBox.h>
+#include <Clipboard.h>
+#include <Entry.h>
+#include <File.h>
+#include <FilePanel.h>
+#include <Font.h>
+#include <Menu.h>
+#include <MenuBar.h>
+#include <MenuField.h>
+#include <MenuItem.h>
+#include <Message.h>
+#include <MimeType.h>
+#include <Messenger.h>
+#include <Node.h>
+#include <Path.h>
+#include <PopUpMenu.h>
+#include <PropertyInfo.h>
+#include <Screen.h>
+#include <ScrollView.h>
+#include <StringView.h>
+#include <TextControl.h>
+#include <Window.h>
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
+
+#include "PDCanvas.h"
+#include "PDDocument.h"
+
+// ---------------------------------------------------------------- helpers --
+static bool
+HasSuffix(const BString& path, const char* suffix)
+{
+	return path.IEndsWith(suffix);
+}
+
+static BString
+WithExtension(const BString& name, const char* ext)
+{
+	if (HasSuffix(name, ext))
+		return name;
+	BString with(name);
+	if (with.Length() > 0 && with[with.Length() - 1] == '.')
+		with.Truncate(with.Length() - 1);
+	with << ext;
+	return with;
+}
+
+static const struct {
+	const char* name;
+	float width, height;
+} kPapers[] = {
+	{ "A4",		595.0f, 842.0f },
+	{ "US Letter",	612.0f, 792.0f },
+	{ "US Legal",	612.0f, 1008.0f },
+	{ "A5",		420.0f, 595.0f },
+	{ "A3",		842.0f, 1191.0f },
+	{ NULL, 0, 0 }
+};
+
+static status_t
+WriteAttrOn(const char* path, const char* attr, const BString& value)
+{
+	BNode node(path);
+	if (node.InitCheck() != B_OK)
+		return node.InitCheck();
+	return node.WriteAttrString(attr, &value);
+}
+
+// ------------------------------------------------------------ inspector --
+class PDWindow : public BWindow {
+public:
+			PDWindow(BRect frame, const char* title);
+
+	bool	QuitRequested() override;
+	void	MessageReceived(BMessage* message) override;
+	void	MenusBeginning() override;
+
+	PDDocument* Document() { return &fDoc; }
+	PDCanvas*	Canvas() { return fCanvas; }
+	// UI sync for out-of-window mutations (scripting): title, `*`,
+	// status bar all live here
+	void	UpdateStatus();
+	void	NoteSavedTo(const BString& path)
+	{
+		fFilePath = path;
+		UpdateStatus();
+	}
+
+	enum {
+		OPEN_PANEL_MSG = 'pdOf', SAVE_PANEL_MSG = 'pdSf',
+		TOOL_MSG = 'pdTl', INSPECTOR_MSG = 'pdIn',
+		PAPER_MSG = 'pdPp', ORIENT_MSG = 'pdOr',
+		GRID_SHOW_MSG = 'pdGs', GRID_SNAP_MSG = 'pdGn',
+		ALIGN_MSG = 'pdAl', ZORDER_MSG = 'pdZo',
+		STATUS_MSG = 'pdUp', FOCUS_LABEL_MSG = 'pdIl'
+	};
+
+private:
+	void	BuildMenus();
+	void	LayoutChildren();
+	void	BuildInspector();
+	void	RefreshInspector();
+	void	ApplyInspector(int32 field);
+	void	DoSave(const BString& path);
+	status_t	OpenFile(const entry_ref& ref);
+	void	SetPaper(int32 index, bool landscape);
+	void	RegisterDocumentType();
+
+	PDDocument	fDoc;
+	PDCanvas*	fCanvas;
+	BMenuBar*	fMenuBar;
+	BView*		fPalette;
+	BView*		fInspector;
+	BStringView*	fStatus;
+	BScrollView*	fScroll;
+	BTextControl*	fLabel;
+	BTextControl*	fX, *fY, *fW, *fH;
+	BMenuField*	fFillField;
+	BMenuField*	fStrokeField;
+	BMenuField*	fWidthField;
+	BCheckBox*	fDashed;
+	BMenuField*	fTextSizeField;
+	BMenuItem*	fUndoItem, *fRedoItem, *fSaveItem;
+	int32		fPaperIndex = 0;
+	BString		fFilePath;
+	BFilePanel*	fOpenPanel = NULL;
+	BFilePanel*	fSavePanel = NULL;
+	bool		fRefreshingInspector = false;
+
+	struct ColourEntry { const char* name; rgb_color c; };
+	static const ColourEntry	kColours[];
+	static const int32		kColourCount;
+};
+
+const PDWindow::ColourEntry PDWindow::kColours[] = {
+	{ "White",	{ 255, 255, 255, 255 } },
+	{ "Grey",	{ 200, 200, 200, 255 } },
+	{ "Black",	{ 0, 0, 0, 255 } },
+	{ "Red",	{ 216, 40, 40, 255 } },
+	{ "Orange",	{ 240, 160, 40, 255 } },
+	{ "Yellow",	{ 250, 240, 120, 255 } },
+	{ "Green",	{ 70, 170, 70, 255 } },
+	{ "Blue",	{ 70, 110, 220, 255 } },
+	{ "Purple",	{ 150, 80, 190, 255 } },
+};
+const int32 PDWindow::kColourCount = 9;
+
+PDWindow::PDWindow(BRect frame, const char* title)
+	:
+	BWindow(frame, title, B_TITLED_WINDOW,
+		B_QUIT_ON_WINDOW_CLOSE | B_ASYNCHRONOUS_CONTROLS),
+	fDoc(),
+	fCanvas(new PDCanvas(&fDoc))
+{
+	RegisterDocumentType();
+	fMenuBar = new BMenuBar(Bounds(), "menubar");
+	BuildMenus();
+	AddChild(fMenuBar);
+
+	fScroll = new BScrollView("scroll", fCanvas, B_FOLLOW_ALL, true, true,
+		B_FANCY_BORDER);
+	AddChild(fScroll);
+
+	fPalette = new BView(BRect(0, 0, 84, 100), "palette", B_FOLLOW_NONE,
+		B_WILL_DRAW);
+	fPalette->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+	const char* tools[] = { "Select", "Box", "Round", "Ellipse",
+		"Diamond", "Text", "Link" };
+	for (int32 i = 0; i < 7; i++) {
+		BMessage* m = new BMessage(TOOL_MSG);
+		m->AddInt32("tool", i);
+		BButton* b = new BButton(BRect(4, 4 + i * 30, 80, 28 + i * 30),
+			"tool", tools[i], m);
+		if (i == 0)
+			b->SetValue(B_CONTROL_ON);
+		fPalette->AddChild(b);
+	}
+	AddChild(fPalette);
+
+	BuildInspector();
+	AddChild(fInspector);
+
+	fStatus = new BStringView(BRect(0, 0, 300, 18), "status", "",
+		B_FOLLOW_LEFT_RIGHT | B_FOLLOW_BOTTOM);
+	AddChild(fStatus);
+
+	SetSizeLimits(640, 4000, 480, 4000);
+	LayoutChildren();
+	fCanvas->DocumentChangedSize();
+	fCanvas->MakeFocus();
+	UpdateStatus();
+}
+
+void
+PDWindow::RegisterDocumentType()
+{
+	// The whole Tracker chain from day one: type, sniffer (HMF1 + our
+	// 'pDd&' what-code, little-endian), preferred app — patterns ported
+	// from ProseWriter, where their absence cost a sprint.
+	BMimeType docType(PDDocument::kDocType);
+	if (docType.InitCheck() != B_OK)
+		return;
+	docType.Install();
+	docType.SetShortDescription("ProseDraw diagram");
+	docType.SetLongDescription("ProseDraw diagram document");
+	status_t err = docType.SetSnifferRule(
+		"1.0 ([0:3] \"HMF1\") ([4:7] \"&dDp\")");
+	if (err != B_OK)
+		fprintf(stderr, "ProseDraw: sniffer rule rejected: %s\n",
+			strerror(err));
+	docType.SetPreferredApp("application/x-vnd.prose.ProseDraw");
+}
+
+void
+PDWindow::BuildMenus()
+{
+	BMenu* menu = new BMenu("File");
+	menu->AddItem(new BMenuItem("New",
+		new BMessage('pdNw'), 'N', B_COMMAND_KEY));
+	menu->AddSeparatorItem();
+	menu->AddItem(new BMenuItem("Open" B_UTF8_ELLIPSIS,
+		new BMessage(OPEN_PANEL_MSG), 'O', B_COMMAND_KEY));
+	menu->AddItem(fSaveItem = new BMenuItem("Save",
+		new BMessage('pdSv'), 'S', B_COMMAND_KEY));
+	menu->AddItem(new BMenuItem("Save as" B_UTF8_ELLIPSIS,
+		new BMessage(SAVE_PANEL_MSG), 'S', B_COMMAND_KEY | B_SHIFT_KEY));
+	menu->AddSeparatorItem();
+	BMenuItem* quit = new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED),
+		'Q', B_COMMAND_KEY);
+	quit->SetTarget(be_app);
+	menu->AddItem(quit);
+	menu->ItemAt(0)->SetTarget(be_app);
+	fMenuBar->AddItem(menu);
+
+	menu = new BMenu("Edit");
+	fUndoItem = new BMenuItem("Undo", new BMessage('pdUd'), 'Z',
+		B_COMMAND_KEY);
+	fRedoItem = new BMenuItem("Redo", new BMessage('pdRd'), 'Y',
+		B_COMMAND_KEY);
+	menu->AddItem(fUndoItem);
+	menu->AddItem(fRedoItem);
+	menu->AddSeparatorItem();
+	menu->AddItem(new BMenuItem("Select all", new BMessage(B_SELECT_ALL),
+		'A', B_COMMAND_KEY));
+	menu->AddItem(new BMenuItem("Duplicate", new BMessage('pdDp'), 'D',
+		B_COMMAND_KEY));
+	menu->AddItem(new BMenuItem("Delete", new BMessage('pdDl'),
+		B_BACKSPACE, B_COMMAND_KEY));
+	fMenuBar->AddItem(menu);
+
+	menu = new BMenu("Shape");
+	{
+		BMessage* front = new BMessage(ZORDER_MSG);
+		front->AddInt32("front", 1);
+		menu->AddItem(new BMenuItem("Bring to front", front));
+		BMessage* back = new BMessage(ZORDER_MSG);
+		back->AddInt32("front", 0);
+		menu->AddItem(new BMenuItem("Send to back", back));
+	}
+	fMenuBar->AddItem(menu);
+
+	menu = new BMenu("Align");
+	const char* aligns[] = { "Left", "Centre", "Right", "Top", "Middle",
+		"Bottom", "Distribute horizontally", "Distribute vertically" };
+	for (int32 i = 0; i < 8; i++) {
+		BMessage* m = new BMessage(ALIGN_MSG);
+		m->AddInt32("align", i);
+		menu->AddItem(new BMenuItem(aligns[i], m));
+	}
+	fMenuBar->AddItem(menu);
+
+	menu = new BMenu("View");
+	BMenu* paper = new BMenu("Paper");
+	for (int32 i = 0; kPapers[i].name != NULL; i++) {
+		BMessage* m = new BMessage(PAPER_MSG);
+		m->AddInt32("index", i);
+		paper->AddItem(new BMenuItem(kPapers[i].name, m));
+	}
+	paper->SetRadioMode(true);
+	paper->ItemAt(0)->SetMarked(true);
+	menu->AddItem(paper);
+	BMenu* orient = new BMenu("Orientation");
+	BMessage* po = new BMessage(ORIENT_MSG);
+	po->AddInt32("landscape", 0);
+	BMenuItem* portrait = new BMenuItem("Portrait", po);
+	BMessage* lo = new BMessage(ORIENT_MSG);
+	lo->AddInt32("landscape", 1);
+	BMenuItem* landscape = new BMenuItem("Landscape", lo);
+	orient->AddItem(portrait);
+	orient->AddItem(landscape);
+	orient->SetRadioMode(true);
+	portrait->SetMarked(true);
+	menu->AddItem(orient);
+	menu->AddSeparatorItem();
+	BMenuItem* grid = new BMenuItem("Show grid",
+		new BMessage(GRID_SHOW_MSG));
+	grid->SetMarked(true);
+	menu->AddItem(grid);
+	BMenuItem* snap = new BMenuItem("Snap to grid",
+		new BMessage(GRID_SNAP_MSG));
+	snap->SetMarked(true);
+	menu->AddItem(snap);
+	fMenuBar->AddItem(menu);
+}
+
+void
+PDWindow::BuildInspector()
+{
+	fInspector = new BView(BRect(0, 0, 208, 300), "inspector",
+		B_FOLLOW_NONE, B_WILL_DRAW);
+	fInspector->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+
+	fLabel = new BTextControl(BRect(8, 8, 200, 28), "label", "Label:", "",
+		new BMessage(INSPECTOR_MSG));
+	fLabel->SetDivider(42);
+	fLabel->Message()->AddInt32("field", 0);
+	fInspector->AddChild(fLabel);
+
+	const char* names[4] = { "X:", "Y:", "W:", "H:" };
+	BTextControl** fields[4] = { &fX, &fY, &fW, &fH };
+	for (int32 i = 0; i < 4; i++) {
+		BMessage* m = new BMessage(INSPECTOR_MSG);
+		m->AddInt32("field", 1 + i);
+		*fields[i] = new BTextControl(BRect(8, 36 + i * 26, 200,
+			56 + i * 26), names[i], names[i], "0", m);
+		(*fields[i])->SetDivider(42);
+		fInspector->AddChild(*fields[i]);
+	}
+
+	BPopUpMenu* fillMenu = new BPopUpMenu("fill");
+	for (int32 i = 0; i < kColourCount + 1; i++) {
+		BMessage* m = new BMessage(INSPECTOR_MSG);
+		m->AddInt32("field", 5);
+		m->AddInt32("index", i);
+		const char* n = i == 0 ? "None"
+			: kColours[i - 1].name;
+		fillMenu->AddItem(new BMenuItem(n, m));
+	}
+	fillMenu->ItemAt(1)->SetMarked(true);
+	fFillField = new BMenuField(BRect(8, 144, 200, 168), "fill", "Fill:",
+		fillMenu);
+	fFillField->SetDivider(42);
+	fInspector->AddChild(fFillField);
+
+	BPopUpMenu* strokeMenu = new BPopUpMenu("stroke");
+	for (int32 i = 0; i < kColourCount; i++) {
+		BMessage* m = new BMessage(INSPECTOR_MSG);
+		m->AddInt32("field", 6);
+		m->AddInt32("index", i);
+		strokeMenu->AddItem(new BMenuItem(kColours[i].name, m));
+	}
+	strokeMenu->ItemAt(2)->SetMarked(true);
+	fStrokeField = new BMenuField(BRect(8, 172, 200, 196), "stroke",
+		"Stroke:", strokeMenu);
+	fStrokeField->SetDivider(42);
+	fInspector->AddChild(fStrokeField);
+
+	BPopUpMenu* widthMenu = new BPopUpMenu("width");
+	const float widths[] = { 1, 2, 3, 4 };
+	for (int32 i = 0; i < 4; i++) {
+		BMessage* m = new BMessage(INSPECTOR_MSG);
+		m->AddInt32("field", 7);
+		m->AddInt32("index", i);
+		char label[8];
+		snprintf(label, sizeof(label), "%d pt", (int)widths[i]);
+		widthMenu->AddItem(new BMenuItem(label, m));
+	}
+	widthMenu->ItemAt(0)->SetMarked(true);
+	fWidthField = new BMenuField(BRect(8, 200, 200, 224), "width",
+		"Line:", widthMenu);
+	fWidthField->SetDivider(42);
+	fInspector->AddChild(fWidthField);
+
+	BMessage* dashMsg = new BMessage(INSPECTOR_MSG);
+	dashMsg->AddInt32("field", 8);
+	fDashed = new BCheckBox(BRect(8, 230, 200, 250), "dashed", "Dashed",
+		dashMsg);
+	fInspector->AddChild(fDashed);
+
+	BPopUpMenu* sizeMenu = new BPopUpMenu("textsize");
+	const float sizes[] = { 9, 10, 12, 14, 18, 24 };
+	for (int32 i = 0; i < 6; i++) {
+		BMessage* m = new BMessage(INSPECTOR_MSG);
+		m->AddInt32("field", 9);
+		m->AddInt32("index", i);
+		char label[12];
+		snprintf(label, sizeof(label), "%d pt", (int)sizes[i]);
+		sizeMenu->AddItem(new BMenuItem(label, m));
+	}
+	sizeMenu->ItemAt(2)->SetMarked(true);
+	fTextSizeField = new BMenuField(BRect(8, 254, 200, 278), "textsize",
+		"Text:", sizeMenu);
+	fTextSizeField->SetDivider(42);
+	fInspector->AddChild(fTextSizeField);
+}
+
+void
+PDWindow::LayoutChildren()
+{
+	float menuH = fMenuBar->Bounds().Height() + 1;
+	fMenuBar->ResizeTo(Bounds().Width(), menuH - 1);
+	fPalette->MoveTo(0, menuH);
+	float right = Bounds().right;
+	fInspector->MoveTo(right - 208, menuH);
+	fScroll->MoveTo(84, menuH);
+	fScroll->ResizeTo(right - 208 - 84 + 1, Bounds().bottom - 19 - menuH);
+	fStatus->MoveTo(8, Bounds().bottom - 17);
+	fStatus->ResizeTo(Bounds().Width() - 16, 16);
+}
+
+void
+PDWindow::MenusBeginning()
+{
+	fUndoItem->SetEnabled(fDoc.CanUndo());
+	fRedoItem->SetEnabled(fDoc.CanRedo());
+	fSaveItem->SetEnabled(fDoc.IsModified());
+}
+
+void
+PDWindow::UpdateStatus()
+{
+	const PDPageSetup& p = fDoc.Page();
+	BString s;
+	const char* paperName = "Custom";
+	for (int32 i = 0; kPapers[i].name != NULL; i++)
+		if (kPapers[i].width == p.width && kPapers[i].height == p.height)
+			paperName = kPapers[i].name;
+	bool landscape = p.width > p.height;
+	s.SetToFormat("%d shapes, %d selected   %s %s (%.0fx%.0f)   "
+		"grid %.0f pt%s", (int)fDoc.Count(),
+		(int)fCanvas->Selection().size(), paperName,
+		landscape ? "landscape" : "portrait", p.width, p.height,
+		fDoc.Grid(), fDoc.SnapEnabled() ? "" : ", snap off");
+	fStatus->SetText(s.String());
+	BString name("Untitled");
+	if (fFilePath.Length()) {
+		BPath leaf(fFilePath.String());
+		if (leaf.InitCheck() == B_OK && leaf.Leaf() != NULL
+			&& leaf.Leaf()[0] != '\0')
+			name = leaf.Leaf();
+	}
+	SetTitle(BString(fDoc.IsModified() ? "* " : "").Append(name).String());
+}
+
+void
+PDWindow::RefreshInspector()
+{
+	if (fRefreshingInspector)
+		return;
+	fRefreshingInspector = true;
+	const std::vector<int32>& sel = fCanvas->Selection();
+	BRect b = fCanvas->SelectionBounds();
+	char buf[16];
+	snprintf(buf, sizeof(buf), "%.0f", b.left);
+	fX->SetText(sel.empty() ? "" : buf);
+	snprintf(buf, sizeof(buf), "%.0f", b.top);
+	fY->SetText(sel.empty() ? "" : buf);
+	snprintf(buf, sizeof(buf), "%.0f", b.Width());
+	fW->SetText(sel.empty() ? "" : buf);
+	snprintf(buf, sizeof(buf), "%.0f", b.Height());
+	fH->SetText(sel.empty() ? "" : buf);
+	fLabel->SetText("");
+	if (sel.size() == 1) {
+		PDShape* s = fDoc.ShapeById(sel[0]);
+		if (s != NULL)
+			fLabel->SetText(s->label.String());
+	}
+	fRefreshingInspector = false;
+}
+
+void
+PDWindow::ApplyInspector(int32 field)
+{
+	const std::vector<int32>& sel = fCanvas->Selection();
+	if (sel.empty())
+		return;
+	if (field == 0) {
+		for (int32 id : sel)
+			fDoc.SetShapeLabel(id, fLabel->Text());
+	} else if (field >= 1 && field <= 4) {
+		BRect b = fCanvas->SelectionBounds();
+		float v = atof(field == 1 ? fX->Text() : field == 2 ? fY->Text()
+			: field == 3 ? fW->Text() : fH->Text());
+		if (field == 1) b.OffsetBy(v - b.left, 0);
+		if (field == 2) b.OffsetBy(0, v - b.top);
+		if (field == 3) b.right = b.left + v;
+		if (field == 4) b.bottom = b.top + v;
+		fCanvas->SetSelectionRect(b);
+	} else if (field >= 5) {
+		// style fields apply the shared style of the first selection
+		PDShape* s = fDoc.ShapeById(sel[0]);
+		if (s == NULL)
+			return;
+		PDStyle st = s->style;
+		switch (field) {
+			case 5:
+			{
+				int32 index = 0;
+				fFillField->Menu()->FindMarked()->Message()
+					->FindInt32("index", &index);
+				st.fillOn = index != 0;
+				if (index > 0)
+					st.fill = kColours[index - 1].c;
+				break;
+			}
+			case 6:
+			{
+				int32 index = 2;
+				fStrokeField->Menu()->FindMarked()->Message()
+					->FindInt32("index", &index);
+				st.stroke = kColours[index].c;
+				break;
+			}
+			case 7:
+			{
+				int32 index = 0;
+				fWidthField->Menu()->FindMarked()->Message()
+					->FindInt32("index", &index);
+				st.strokeWidth = (float)(index + 1);
+				break;
+			}
+			case 8:
+				st.dashed = fDashed->Value() == B_CONTROL_ON;
+				break;
+			case 9:
+			{
+				int32 index = 2;
+				const float sizes[] = { 9, 10, 12, 14, 18, 24 };
+				fTextSizeField->Menu()->FindMarked()->Message()
+					->FindInt32("index", &index);
+				st.textSize = sizes[index];
+				break;
+			}
+		}
+		for (int32 id : sel)
+			fDoc.SetShapeStyle(id, st);
+	}
+	fCanvas->Invalidate();
+	UpdateStatus();
+}
+
+void
+PDWindow::SetPaper(int32 index, bool landscape)
+{
+	if (index < 0 || kPapers[index].name == NULL)
+		return;
+	fPaperIndex = index;
+	float w = kPapers[index].width, h = kPapers[index].height;
+	if (landscape && w < h) { float t = w; w = h; h = t; }
+	if (!landscape && w > h) { float t = w; w = h; h = t; }
+	PDPageSetup p;
+	p.width = w;
+	p.height = h;
+	fDoc.SetPage(p);
+	fCanvas->DocumentChangedSize();
+	UpdateStatus();
+}
+
+void
+PDWindow::DoSave(const BString& pathStr)
+{
+	status_t err = fDoc.SaveToFile(pathStr.String());
+	if (err == B_OK) {
+		fFilePath = pathStr;
+		fDoc.SavedClean();
+		// typed saves: Tracker can find us without anyone running mimeset
+		WriteAttrOn(pathStr.String(), "BEOS:TYPE", PDDocument::kDocType);
+	} else {
+		BString msg;
+		msg.SetToFormat("Could not save %s: %s", pathStr.String(),
+			strerror(err));
+		(new BAlert("ProseDraw", msg.String(), "OK"))->Go(NULL);
+	}
+	UpdateStatus();
+}
+
+status_t
+PDWindow::OpenFile(const entry_ref& ref)
+{
+	if (fDoc.IsModified()) {
+		BAlert* alert = new BAlert("ProseDraw",
+			"The current diagram has unsaved changes. Open anyway?",
+			"Cancel", "Discard changes", "Open and save first",
+			B_WIDTH_AS_USUAL, B_OFFSET_SPACING, B_WARNING_ALERT);
+		int32 choice = alert->Go();
+		if (choice == 0)
+			return B_CANCELED;
+		if (choice == 2) {
+			if (fFilePath.Length()) {
+				DoSave(fFilePath);
+				if (fDoc.IsModified())
+					return B_CANCELED;
+			} else
+				return B_CANCELED;
+		}
+	}
+	BPath path(&ref);
+	status_t err = B_ERROR;
+	PDDocKind kind = PD_SniffDocument(path.Path());
+	if (kind == PD_KIND_NATIVE) {
+		err = fDoc.LoadFromFile(path.Path());
+	} else {
+		// not ours and not anything we read — say so
+		err = B_BAD_TYPE;
+	}
+	if (err != B_OK) {
+		BString msg;
+		msg.SetToFormat("ProseDraw could not open %s (kind %d): %s",
+			path.Path(), (int)kind, strerror(err));
+		(new BAlert("ProseDraw", msg.String(), "OK"))->Go(NULL);
+		return err;
+	}
+	fFilePath = path.Path();
+	fCanvas->Select(std::vector<int32>());
+	fCanvas->DocumentChangedSize();
+	UpdateStatus();
+	return B_OK;
+}
+
+bool
+PDWindow::QuitRequested()
+{
+	if (fDoc.IsModified()) {
+		BAlert* alert = new BAlert("ProseDraw",
+			"Save changes before closing?", "Cancel", "Don't save", "Save",
+			B_WIDTH_AS_USUAL, B_OFFSET_SPACING, B_WARNING_ALERT);
+		int32 choice = alert->Go();
+		if (choice == 0)
+			return false;
+		if (choice == 2) {
+			if (fFilePath.Length()) {
+				DoSave(fFilePath);
+				if (fDoc.IsModified())
+					return false;
+			} else {
+				if (fSavePanel == NULL)
+					fSavePanel = new BFilePanel(B_SAVE_PANEL,
+						new BMessenger(this), NULL, B_FILE_NODE, false,
+						new BMessage('pdSv'));
+				fSavePanel->Show();
+				return false;
+			}
+		}
+	}
+	BMessage closed('pdWc');
+	closed.AddPointer("win", this);
+	be_app_messenger.SendMessage(&closed);
+	return true;
+}
+
+void
+PDWindow::MessageReceived(BMessage* message)
+{
+	switch (message->what) {
+		case TOOL_MSG:
+		{
+			int32 tool = 0;
+			message->FindInt32("tool", &tool);
+			fCanvas->SetTool((PDTool)tool);
+			for (int32 i = 0; i < 7; i++) {
+				BButton* b = dynamic_cast<BButton*>(
+					fPalette->ChildAt(i));
+				if (b != NULL)
+					b->SetValue(i == tool ? B_CONTROL_ON : B_CONTROL_OFF);
+			}
+			UpdateStatus();
+			break;
+		}
+		case STATUS_MSG:
+			RefreshInspector();
+			UpdateStatus();
+			break;
+		case FOCUS_LABEL_MSG:
+			fLabel->MakeFocus();
+			break;
+		case INSPECTOR_MSG:
+		{
+			int32 field = 0;
+			message->FindInt32("field", &field);
+			ApplyInspector(field);
+			break;
+		}
+		case 'pdUd':
+			fDoc.Undo();
+			fCanvas->Invalidate();
+			UpdateStatus();
+			break;
+		case 'pdRd':
+			fDoc.Redo();
+			fCanvas->Invalidate();
+			UpdateStatus();
+			break;
+		case B_SELECT_ALL:
+			fCanvas->SelectAll();
+			break;
+		case 'pdDp':
+			fCanvas->DuplicateSelection();
+			break;
+		case 'pdDl':
+			fCanvas->DeleteSelection();
+			break;
+		case ALIGN_MSG:
+		{
+			int32 align = 0;
+			message->FindInt32("align", &align);
+			fDoc.Align(fCanvas->Selection(), (PDAlign)align);
+			fCanvas->Invalidate();
+			UpdateStatus();
+			break;
+		}
+		case ZORDER_MSG:
+		{
+			int32 front = 1;
+			message->FindInt32("front", &front);
+			for (int32 id : fCanvas->Selection())
+				fDoc.MoveZ(id, front != 0);
+			fCanvas->Invalidate();
+			break;
+		}
+		case PAPER_MSG:
+		{
+			int32 index = 0;
+			message->FindInt32("index", &index);
+			SetPaper(index, fDoc.Page().width > fDoc.Page().height);
+			break;
+		}
+		case ORIENT_MSG:
+		{
+			int32 landscape = 0;
+			message->FindInt32("landscape", &landscape);
+			SetPaper(fPaperIndex, landscape != 0);
+			break;
+		}
+		case GRID_SHOW_MSG:
+		{
+			BMenuItem* item = fMenuBar->FindItem("Show grid");
+			if (item != NULL) {
+				fDoc.SetShowGrid(!fDoc.ShowGrid());
+				item->SetMarked(fDoc.ShowGrid());
+				fCanvas->Invalidate();
+			}
+			break;
+		}
+		case GRID_SNAP_MSG:
+		{
+			BMenuItem* item = fMenuBar->FindItem("Snap to grid");
+			if (item != NULL) {
+				fDoc.SetSnapEnabled(!fDoc.SnapEnabled());
+				item->SetMarked(fDoc.SnapEnabled());
+			}
+			break;
+		}
+		case OPEN_PANEL_MSG:
+			if (fOpenPanel == NULL)
+				fOpenPanel = new BFilePanel(B_OPEN_PANEL,
+					new BMessenger(this), NULL, B_FILE_NODE, false,
+					new BMessage('pdOo'));
+			fOpenPanel->Show();
+			break;
+		case 'pdOo':
+		{
+			entry_ref ref;
+			if (message->FindRef("refs", &ref) == B_OK)
+				OpenFile(ref);
+			break;
+		}
+		case 'pdSv':
+		{
+			// save panel selection, or a scripted save
+			entry_ref ref;
+			if (message->FindRef("directory", &ref) == B_OK) {
+				BPath path(&ref);
+				BString name;
+				message->FindString("name", &name);
+				path.Append(WithExtension(name, ".draw").String());
+				DoSave(BString(path.Path()));
+			} else if (fFilePath.Length()) {
+				DoSave(fFilePath);
+			} else {
+				PostMessage(SAVE_PANEL_MSG);
+			}
+			break;
+		}
+		case SAVE_PANEL_MSG:
+			if (fSavePanel == NULL)
+				fSavePanel = new BFilePanel(B_SAVE_PANEL,
+					new BMessenger(this), NULL, B_FILE_NODE, false,
+					new BMessage('pdSv'));
+			{
+				BString suggested = fFilePath.Length()
+					? BString(BPath(fFilePath.String()).Leaf())
+					: BString("Untitled");
+				fSavePanel->SetSaveText(
+					WithExtension(suggested, ".draw").String());
+			}
+			fSavePanel->Show();
+			break;
+		default:
+			BWindow::MessageReceived(message);
+	}
+}
+
+// ------------------------------------------------------------------ app --
+// Scripting: the ProseWriter set from day one — Activate first (nothing
+// keyboardable works on this guest without it), plus the diagram verbs
+// the harness needs to build and check documents headlessly.
+static property_info sPDProperties[] = {
+	{ "ShapeCount",
+		{ B_GET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"number of shapes in the diagram", 0, { B_INT32_TYPE } },
+	{ "Activate",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"bring the window forward and focus the canvas (harness)", 0, { 0 } },
+	{ "AddShape",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"add a shape: \"rect|rrect|ellipse|diamond|text x y w h|label\", "
+		"or \"connect\" to join the last two", 0, { B_STRING_TYPE } },
+	{ "Save",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"save the diagram (data: path)", 0, { B_STRING_TYPE } },
+	{ "Open",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"open a diagram (data: path)", 0, { B_STRING_TYPE } },
+	{ "Quit",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"close every window and quit", 0, { 0 } },
+	{ 0 }
+};
+
+const BPropertyInfo kPDScriptingProperties(sPDProperties);
+
+static void
+ReplyString(BMessage* message, const char* value)
+{
+	BMessage reply(B_REPLY);
+	reply.AddString("result", value);
+	message->SendReply(&reply);
+}
+
+static void
+ReplyInt(BMessage* message, int32 value)
+{
+	BMessage reply(B_REPLY);
+	reply.AddInt32("result", value);
+	message->SendReply(&reply);
+}
+
+static void
+ReplyError(BMessage* message, const char* error)
+{
+	BMessage reply(B_REPLY);
+	reply.AddString("error", error);
+	message->SendReply(&reply);
+}
+
+// Answered with the window lock held (gets) or entirely by forwarding
+// (Open) — the ProseWriter threading rules.
+static bool
+HandleScriptingForWindow(PDWindow* window, BMessage* message,
+	const char* property)
+{
+	if (property == NULL || !property[0])
+		return false;
+	PDDocument& doc = *window->Document();
+	BString prop = property;
+	bool isGet = message->what == B_GET_PROPERTY;
+	bool isExec = message->what == B_EXECUTE_PROPERTY;
+
+	if (prop == "ShapeCount" && isGet) {
+		ReplyInt(message, doc.Count());
+		return true;
+	}
+	if (prop == "Activate" && isExec) {
+		window->Activate();
+		window->Canvas()->MakeFocus();
+		ReplyString(message, "");
+		return true;
+	}
+	if (prop == "AddShape" && isExec) {
+		BString data;
+		if (message->FindString("data", &data) != B_OK || !data.Length()) {
+			ReplyError(message, "data: shape spec required");
+			return true;
+		}
+		if (data == "connect") {
+			window->Canvas()->QueueConnector();
+			ReplyString(message, "");
+			return true;
+		}
+		PDShapeKind kind = PD_RECT;
+		if (data.IStartsWith("rrect")) kind = PD_RRECT;
+		else if (data.IStartsWith("ellipse")) kind = PD_ELLIPSE;
+		else if (data.IStartsWith("diamond")) kind = PD_DIAMOND;
+		else if (data.IStartsWith("text")) kind = PD_TEXT;
+		else if (!data.IStartsWith("rect")) {
+			ReplyError(message, "kind must be rect/rrect/ellipse/diamond/text");
+			return true;
+		}
+		float x = 0, y = 0, w = 96, h = 64;
+		int32 bar = data.FindFirst('|');
+		BString spec = bar >= 0 ? BString(data, bar) : data;
+		sscanf(spec.String() + (kind == PD_RECT ? 4 : kind == PD_TEXT ? 4
+			: kind == PD_RRECT ? 5 : kind == PD_ELLIPSE ? 7 : 7),
+			" %f %f %f %f", &x, &y, &w, &h);
+		BString label;
+		if (bar >= 0)
+			data.CopyInto(label, bar + 1, data.Length() - bar - 1);
+		PDShape* s = doc.AddShape(kind, BRect(x, y, x + w, y + h),
+			label.Length() ? label.String() : NULL);
+		window->Canvas()->Invalidate();
+		window->UpdateStatus();
+		ReplyInt(message, s->id);
+		return true;
+	}
+	if (prop == "Save" && isExec) {
+		BString path;
+		if (message->FindString("data", &path) == B_OK && path.Length()) {
+			// quiet: no modal alerts off the app looper (PW lesson)
+			status_t err = doc.SaveToFile(path.String());
+			if (err == B_OK) {
+				doc.SavedClean();
+				WriteAttrOn(path.String(), "BEOS:TYPE",
+					PDDocument::kDocType);
+				window->NoteSavedTo(path);
+			}
+			if (err == B_OK)
+				ReplyString(message, "");
+			else
+				ReplyError(message, strerror(err));
+		} else
+			ReplyError(message, "data: path required");
+		return true;
+	}
+	if (prop == "Open" && isExec) {
+		BString path;
+		if (message->FindString("data", &path) == B_OK && path.Length()) {
+			entry_ref ref;
+			if (get_ref_for_path(path.String(), &ref) == B_OK) {
+				// forward as the open panel's exact message: one code
+				// path, alerts stay on the window thread
+				BMessage open('pdOo');
+				open.AddRef("refs", &ref);
+				window->PostMessage(&open);
+				ReplyString(message, "");
+			} else
+				ReplyError(message, "bad path");
+		} else
+			ReplyError(message, "data: path required");
+		return true;
+	}
+	if (prop == "Quit" && isExec) {
+		window->PostMessage(B_QUIT_REQUESTED);
+		ReplyString(message, "");
+		return true;
+	}
+	return false;
+}
+
+// documents given on the command line (the roster may also deliver them
+// as B_REFS_RECEIVED before ReadyToRun — too early for a window)
+static std::vector<BString> gOpenPaths;
+
+class PDApp : public BApplication {
+public:
+			PDApp()
+				:
+				BApplication("application/x-vnd.prose.ProseDraw")
+			{
+			}
+
+	status_t GetSupportedSuites(BMessage* message) override
+	{
+		message->AddString("suites", "suite/x-vnd.prose.ProseDraw");
+		message->AddFlat("messages", &kPDScriptingProperties);
+		return BApplication::GetSupportedSuites(message);
+	}
+
+	BHandler* ResolveSpecifier(BMessage* message, int32 index,
+		BMessage* specifier, int32 what, const char* property) override
+	{
+		if (kPDScriptingProperties.FindMatch(message, index, specifier,
+				what, property) >= 0)
+			return this;
+		return BApplication::ResolveSpecifier(message, index, specifier,
+			what, property);
+	}
+
+	void	ReadyToRun() override
+	{
+		BScreen screen(B_MAIN_SCREEN_ID);
+		BRect avail = screen.Frame().InsetByCopy(40, 36);
+		PDWindow* window = new PDWindow(
+			BRect(avail.left, avail.top, avail.left + 860,
+				avail.top + 680), "Untitled");
+		window->Show();
+		for (const BString& path : gOpenPaths) {
+			entry_ref ref;
+			if (get_ref_for_path(path.String(), &ref) == B_OK) {
+				BMessage open('pdOo');
+				open.AddRef("refs", &ref);
+				window->PostMessage(&open);
+			}
+		}
+		gOpenPaths.clear();
+		if (fPendingRefs.what == B_REFS_RECEIVED) {
+			window->PostMessage(&fPendingRefs);
+			fPendingRefs.what = 0;
+		}
+		SetPreferredHandler(this);
+	}
+
+	bool	QuitRequested() override
+	{
+		bool any = false;
+		for (int32 i = CountWindows() - 1; i >= 0; i--) {
+			PDWindow* w = dynamic_cast<PDWindow*>(WindowAt(i));
+			if (w != NULL) {
+				w->PostMessage(B_QUIT_REQUESTED);
+				any = true;
+			}
+		}
+		return !any;
+	}
+
+	void	MessageReceived(BMessage* message) override
+	{
+		if (message->what == B_REFS_RECEIVED) {
+			if (DocWindow() != NULL)
+				DocWindow()->PostMessage(message);
+			else
+				fPendingRefs = *message;	// replayed after ReadyToRun
+		}
+		if (message->HasSpecifiers() && DocWindow() != NULL) {
+			BMessage spec;
+			int32 what = 0;
+			int32 index = 0;
+			const char* prop = NULL;
+			if (message->GetCurrentSpecifier(&index, &spec, &what,
+					&prop) == B_OK
+				&& kPDScriptingProperties.FindMatch(message, index, &spec,
+					what, prop) >= 0) {
+				PDWindow* window = DocWindow();
+				window->Lock();
+				HandleScriptingForWindow(window, message, prop);
+				window->Unlock();
+				return;
+			}
+		}
+		switch (message->what) {
+			case 'pdNw':
+			{
+				BRect frame(80, 60, 940, 740);
+				if (DocWindow() != NULL)
+					frame = DocWindow()->Frame().OffsetByCopy(24, 24);
+				BScreen screen(B_MAIN_SCREEN_ID);
+				if (frame.right > screen.Frame().right
+					|| frame.bottom > screen.Frame().bottom)
+					frame.OffsetTo(screen.Frame().left + 40,
+						screen.Frame().top + 40);
+				PDWindow* win = new PDWindow(frame, "Untitled");
+				win->Show();
+				break;
+			}
+			case 'pdWc':
+			{
+				void* closing = NULL;
+				message->FindPointer("win", &closing);
+				int32 docs = 0;
+				for (int32 i = CountWindows() - 1; i >= 0; i--) {
+					BWindow* w = WindowAt(i);
+					if (w != NULL && w != (BWindow*)closing
+						&& dynamic_cast<PDWindow*>(w) != NULL)
+						docs++;
+				}
+				if (docs == 0)
+					Quit();
+				break;
+			}
+			default:
+				BApplication::MessageReceived(message);
+		}
+	}
+
+private:
+	BMessage	fPendingRefs;
+
+	PDWindow*	DocWindow()
+	{
+		for (int32 i = CountWindows() - 1; i >= 0; i--) {
+			PDWindow* w = dynamic_cast<PDWindow*>(WindowAt(i));
+			if (w != NULL)
+				return w;
+		}
+		return NULL;
+	}
+};
+
+// --------------------------------------------------------------- selftest --
+static int
+SelfTest()
+{
+	struct Case { const char* name; bool ok; };
+	std::vector<Case> cases;
+	bool all = true;
+	#define CHECK(label, cond) { bool ok_ = (cond); \
+		cases.push_back(Case{ label, ok_ }); \
+		if (!ok_) all = false; }
+
+	printf("block: model\n"); fflush(stdout);
+	{
+		PDDocument doc;
+		CHECK("a4 default page", doc.Page().width == 595.0f
+			&& doc.Page().height == 842.0f);
+		PDPageSetup letter;
+		letter.width = 612;
+		letter.height = 792;
+		doc.SetPage(letter);
+		CHECK("letter page set", doc.Page().width == 612.0f);
+		PDShape* r = doc.AddShape(PD_RECT, BRect(63.5, 63.5, 160.2, 120.7),
+			"Box");
+		CHECK("shape snaps to grid on create",
+			r->rect.left == 64.0f && r->rect.top == 64.0f
+				&& r->rect.right == 160.0f && r->rect.bottom == 120.0f);
+		CHECK("label stored", r->label == "Box");
+		CHECK("ids are 1-based", r->id == 1);
+		doc.SetShapeRect(r->id, BRect(80, 80, 200, 160));
+		CHECK("move snaps", doc.ShapeById(r->id)->rect == BRect(80, 80,
+			200, 160));
+		doc.Undo();
+		CHECK("undo restores move", doc.ShapeById(r->id)->rect.left
+			== 64.0f);
+		doc.Redo();
+		CHECK("redo reapplies move", doc.ShapeById(r->id)->rect.left
+			== 80.0f);
+		doc.RemoveShapes(std::vector<int32>(1, r->id));
+		CHECK("delete empties", doc.Count() == 0);
+		doc.Undo();
+		CHECK("undo restores delete", doc.Count() == 1
+			&& doc.ShapeAt(0)->label == "Box");
+
+		// ids, not pointers: AddShape/Undo reallocate the vector, and a
+		// held pointer into it is a dangling read
+		int32 ia = doc.AddShape(PD_RECT, BRect(64, 64, 160, 128))->id;
+		int32 ib = doc.AddShape(PD_RECT, BRect(200, 96, 320, 176))->id;
+		int32 ic = doc.AddShape(PD_RECT, BRect(400, 128, 480, 200))->id;
+		CHECK("align left", doc.Align(std::vector<int32> {ia, ib, ic},
+			PD_ALIGN_LEFT)
+			&& doc.ShapeById(ib)->rect.left == 64.0f
+			&& doc.ShapeById(ic)->rect.left == 64.0f);
+		doc.Undo();
+		CHECK("align undoes", doc.ShapeById(ib)->rect.left == 200.0f);
+		doc.Align(std::vector<int32> {ia, ib, ic}, PD_DISTRIBE_H);
+		float gap1 = doc.ShapeById(ib)->rect.left
+			- doc.ShapeById(ia)->rect.right;
+		float gap2 = doc.ShapeById(ic)->rect.left
+			- doc.ShapeById(ib)->rect.right;
+		CHECK("distribute makes even gaps", fabsf(gap1 - gap2) < 0.01f
+			&& gap1 > 0);
+		CHECK("distribute needs three", !doc.Align(
+			std::vector<int32> {ia, ib}, PD_DISTRIBE_H));
+		doc.MoveZ(ia, true);
+		CHECK("move to front reorders", doc.ShapeAt(doc.Count() - 1)->id
+			== ia);
+	}
+
+	printf("block: connectors\n"); fflush(stdout);
+	{
+		PDDocument doc;
+		int32 ia = doc.AddShape(PD_RECT, BRect(64, 64, 160, 128))->id;
+		int32 ib = doc.AddShape(PD_RECT, BRect(256, 64, 352, 128))->id;
+		{
+			const PDShape* a = doc.ShapeById(ia);
+			const PDShape* b = doc.ShapeById(ib);
+			BPoint pa = PDDocument::AnchorPoint(*a, *b);
+			BPoint pb = PDDocument::AnchorPoint(*b, *a);
+			CHECK("anchor leaves east border", fabsf(pa.x - 160.0f) < 0.01f
+				&& fabsf(pa.y - 96.0f) < 0.01f);
+			CHECK("anchor arrives at west border", fabsf(pb.x - 256.0f)
+				< 0.01f);
+		}
+		int32 icn = doc.AddShape(PD_CONNECTOR, BRect(0, 0, 0, 0))->id;
+		doc.ShapeById(icn)->fromId = ia;
+		doc.ShapeById(icn)->toId = ib;
+		CHECK("connector hit mid-line", doc.ConnectorAtPoint(
+			BPoint(208, 96)) == icn);
+		CHECK("connector miss off-line", doc.ConnectorAtPoint(
+			BPoint(208, 40)) == 0);
+		doc.SetShapeRect(ib, BRect(256, 256, 352, 320));
+		BPoint pb2 = PDDocument::AnchorPoint(*doc.ShapeById(ib),
+			*doc.ShapeById(ia));
+		CHECK("connector follows move", fabsf(pb2.y - 256.0f) < 0.01f);
+		doc.RemoveShapes(std::vector<int32>(1, ia));
+		CHECK("removing an endpoint removes the connector",
+			doc.ShapeById(icn) == NULL);
+	}
+
+	printf("block: persistence\n"); fflush(stdout);
+	{
+		PDDocument doc;
+		doc.AddShape(PD_RECT, BRect(64, 64, 200, 140), "Start");
+		PDShape* e = doc.AddShape(PD_ELLIPSE, BRect(256, 64, 384, 140),
+			"End");
+		e->style.fill = rgb_color { 70, 170, 70, 255 };
+		e->style.dashed = true;
+		e->style.strokeWidth = 2;
+		PDShape* cn = doc.AddShape(PD_CONNECTOR, BRect(0, 0, 0, 0));
+		cn->fromId = 1;
+		cn->toId = 2;
+		BMessage msg;
+		doc.SaveToMessage(&msg);
+		PDDocument loaded;
+		loaded.LoadFromMessage(&msg);
+		CHECK("round trip count", loaded.Count() == 3);
+		CHECK("round trip label", loaded.ShapeAt(0)->label == "Start");
+		CHECK("round trip style", loaded.ShapeAt(1)->style.fill.green
+			== 170 && loaded.ShapeAt(1)->style.dashed);
+		CHECK("round trip connector ids",
+			loaded.ShapeAt(2)->fromId == 1 && loaded.ShapeAt(2)->toId == 2);
+		CHECK("loaded is clean", !loaded.IsModified());
+
+		const char* path = "/tmp/pd-selftest.draw";
+		CHECK("file save", doc.SaveToFile(path) == B_OK);
+		CHECK("no temp left", !BEntry(BString(path).Append(".pdtmp")
+			.String()).Exists());
+		PDDocument fromFile;
+		CHECK("file load", fromFile.LoadFromFile(path) == B_OK);
+		CHECK("file round trip", fromFile.Count() == 3
+			&& fromFile.ShapeAt(0)->label == "Start");
+		CHECK("sniff native", PD_SniffDocument(path) == PD_KIND_NATIVE);
+		BFile txt;
+		if (txt.SetTo("/tmp/pd-selftest.txt",
+				B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE) == B_OK)
+			txt.Write("just text", 9);
+		CHECK("sniff other", PD_SniffDocument("/tmp/pd-selftest.txt")
+			== PD_KIND_OTHER);
+		CHECK("sniff missing", PD_SniffDocument("/tmp/pd-none")
+			== PD_KIND_ERROR);
+		remove(path);
+		remove("/tmp/pd-selftest.txt");
+
+		CHECK("extension appended", WithExtension("diagram", ".draw")
+			== "diagram.draw");
+		CHECK("extension not doubled", WithExtension("a.DRAW", ".draw")
+			== "a.DRAW");
+	}
+
+	#undef CHECK
+
+	int passed = 0;
+	for (const Case& c : cases) {
+		printf("  %-42s %s\n", c.name, c.ok ? "PASS" : "FAIL");
+		if (c.ok) passed++;
+	}
+	printf("SELFTEST %s %d/%d\n", all ? "PASS" : "FAIL", passed,
+		(int)cases.size());
+	return all ? 0 : 1;
+}
+
+// -------------------------------------------------------------------- main --
+int
+main(int argc, char** argv)
+{
+	if (argc > 1 && strcmp(argv[1], "--selftest") == 0) {
+		PDApp app;
+		return SelfTest();
+	}
+	for (int i = 1; i < argc; i++)
+		if (argv[i][0] != '-')
+			gOpenPaths.push_back(argv[i]);
+	PDApp app;
+	app.Run();
+	return 0;
+}

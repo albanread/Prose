@@ -17,6 +17,11 @@ will be written here. The discipline that keeps it working:
   clicks as unreliable for testing (modal-alert buttons are Tab/Enter).
 - **Kill guest apps by numeric team id** — `ps` puts the id in the column
   after the command name; `killall` does not exist on this image.
+- **Before believing a guest failure, prove the guest binary is the host
+  build** — compare sizes (`stat -f%z` host vs `ls -l` guest). A ProseDraw
+  session lost an hour to "the fix didn't work" against an hour-stale
+  deployed copy plus three zombie teams blocked in modal alerts; kill the
+  zombies, redeploy, retest. Smoke scripts deploy-verify in step 1.
 - **API facts that have bitten us:** `BString::IFindLast` returns `int32`
   (B_ERROR when absent — never compare it to NULL); `BFile::Write` returns
   bytes written (a positive return is NOT B_OK); `B_DELETE` is 0x7F and
