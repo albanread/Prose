@@ -84,6 +84,18 @@ one. Packages can be `.hpkg` files too, installed as they are: midikit.sh
 needs `haiku_devel.hpkg` of the image's own build for `libroot_debug.so`.
 The minimum image has no grep, sed or awk, so probes use bash and coreutils.
 
+**By hand, with keys and the mouse:** `packages/guitest/guitest.sh start
+<program> [files]` boots a clone of the image headless and starts a program
+on it -- a binary just built on the Mac, or one already on the target;
+`guitest.sh ctl click 300 200 -- type 'text' -- key alt-s -- shot saved`
+sends it keys and mouse clicks through QEMU and takes screenshots, without
+opening a window or taking the Mac's keyboard; `guitest.sh stop <files>`
+waits for the power-off, prints the program's output and exit status, says
+if the debugger wrote a crash report, and fetches files from the target. It
+is how a ported application gets tried out (Sisong was: `packages/tests/sisong.sh`
+is what came of it). `GUITEST_PACKAGES` installs packages first,
+`GUITEST_SCRIPT` runs a script on the target instead of a program.
+
 ## Rules (the incident, turned into design)
 
 1. Builds write only below `/Volumes/HaikuSrc/prose-packages/`.
