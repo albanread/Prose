@@ -135,6 +135,27 @@ receiver examples in the tree — StyledEdit — simply inherit BTextView's
 native suites and define none of their own). Harness note: hey
 auto-launches by signature, so test only against a known single instance.
 
+*Sprint 5 status: complete. Scripting closed the Sprint 4 open item by
+copying SerialApp's pattern verbatim (property_info table, BPropertyInfo,
+GetSupportedSuites, ResolveSpecifier claiming our properties, FindMatch
+dispatch); the last two session bugs were process, not code: silently
+unapplied patches against drifted source (all replacements now assert),
+and kills that never killed — `ps` puts the team id after the command
+name, and quoting an awk pipeline through two shells expands to nothing;
+kills are by explicit numeric id. Sets run on the window looper via a
+'pWst' forward; the app acks immediately, so a get racing a set can read
+the old value. Styles: PWStyle (name + char format + para format),
+persisted in .prose, panel under Document ▸ Styles…. Measures are in the
+selftest output ("measure:" lines).*
+
+### Sprint 6 — content, and the typing optimization
+
+1. Images anchored in text with wrap (BTranslationUtils → BBitmap in the
+   paragraph model as an anchored object; wrap = column shaping).
+2. Tables (paragraph-embedded grid, tab-stop rendering generalised).
+3. Incremental relayout: reuse line runs before the damage point; the
+   183 ms single-key figure on 96 pages is the number to beat.
+
 **Sprint 4 hardening ledger** (all root-caused, all fixed): the selftest
 case array overflowed its fixed size (now a vector); the agent died on
 SIGPIPE from disconnected clients (ignored) and could wedge for 20

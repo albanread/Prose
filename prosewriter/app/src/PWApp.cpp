@@ -7,6 +7,7 @@
 #include <RadioButton.h>
 #include <PrintJob.h>
 #include <PopUpMenu.h>
+#include <ListView.h>
 #include <MenuField.h>
 #include <FindDirectory.h>
 #include <CheckBox.h>
@@ -19,8 +20,10 @@
 #include <MenuItem.h>
 #include <Messenger.h>
 #include <Path.h>
+#include <PropertyInfo.h>
 #include <Screen.h>
 #include <ScrollView.h>
+#include <StringItem.h>
 #include <StringView.h>
 #include <TextControl.h>
 #include <UTF8.h>
@@ -396,6 +399,100 @@ ParseArgs(int argc, char** argv)
 	}
 }
 
+// Styles panel: define once, apply everywhere — the Gobe lesson.
+class PWStylesWindow : public BWindow {
+public:
+	PWStylesWindow(PWWindow* owner)
+		:
+		BWindow(BRect(0, 0, 300, 240), "Styles",
+			B_TITLED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
+			B_ASYNCHRONOUS_CONTROLS),
+		fOwner(owner)
+	{
+		fList = new BListView(BRect(8, 8, 180, 200), "styles");
+		AddChild(new BScrollView("scroll", fList, B_FOLLOW_ALL, true, true));
+		fName = new BTextControl(BRect(8, 206, 180, 224), "name", "Name:",
+			"", NULL);
+		fName->SetDivider(36);
+		AddChild(fName);
+
+		AddChild(new BButton(BRect(190, 8, 290, 28), "new",
+			"New from selection", new BMessage(PWWindow::STYLE_NEW_MSG)));
+		AddChild(new BButton(BRect(190, 38, 290, 58), "apply", "Apply",
+			new BMessage(PWWindow::STYLE_APPLY_MSG)));
+		AddChild(new BButton(BRect(190, 68, 290, 88), "del", "Delete",
+			new BMessage(PWWindow::STYLE_DEL_MSG)));
+		RefreshList();
+		AddToSubset(owner);
+		MoveTo(owner->Frame().left + 80, owner->Frame().top + 100);
+	}
+
+	void	RefreshList()
+	{
+		fList->MakeEmpty();
+		PWDocument* doc = fOwner->Document();
+		for (int32 i = 0; i < doc->CountStyles(); i++)
+			fList->AddItem(new BStringItem(doc->StyleAt(i)->name.String()));
+	}
+
+	void	MessageReceived(BMessage* message) override
+	{
+		switch (message->what) {
+			case PWWindow::STYLE_NEW_MSG: {
+				const char* name = fName->Text();
+				if (!name || !name[0])
+					break;
+				int32 from, to;
+				fOwner->View()->GetSelection(&from, &to);
+				if (to < from) { int32 x = from; from = to; to = x; }
+				if (to == to && from == to)	// caret only: still valid
+					to = from;
+				PWDocument* doc = fOwner->Document();
+				int32 para, inPara;
+				doc->Locate(from, &para, &inPara);
+				doc->AddStyle(name,
+					to > from ? doc->FormatAt(from)
+						: fOwner->View()->CurrentFormat(),
+					doc->ParagraphFormat(para));
+				RefreshList();
+				break;
+			}
+			case PWWindow::STYLE_APPLY_MSG: {
+				int32 sel = fList->CurrentSelection();
+				if (sel >= 0) {
+					int32 from, to;
+					fOwner->View()->GetSelection(&from, &to);
+					if (to < from) { int32 x = from; from = to; to = x; }
+					fOwner->Document()->ApplyStyle(from, to - from, sel);
+					fOwner->View()->Relayout();
+				}
+				break;
+			}
+			case PWWindow::STYLE_DEL_MSG: {
+				int32 sel = fList->CurrentSelection();
+				if (sel >= 0) {
+					fOwner->Document()->RemoveStyle(sel);
+					RefreshList();
+				}
+				break;
+			}
+			default:
+				BWindow::MessageReceived(message);
+		}
+	}
+
+	bool	QuitRequested() override
+	{
+		fOwner->PostMessage('pWyC');
+		return true;
+	}
+
+private:
+	PWWindow*	fOwner;
+	BListView*	fList;
+	BTextControl*	fName;
+};
+
 // The window thread owns the document, layout and view; the harness
 // arguments are delivered as a message so nothing is mutated cross-thread.
 static void
@@ -590,6 +687,7 @@ PWWindow::BuildMenus()
 
 	menu = new BMenu("Document");
 	menu->AddItem(item("Header and footer" B_UTF8_ELLIPSIS, HEADER_MSG));
+	menu->AddItem(item("Styles" B_UTF8_ELLIPSIS, STYLES_MSG));
 	fSpellItem = item("Check spelling", 'pWsc');
 	fSpellItem->SetMessage(new BMessage('pWsc'));
 	fSpellItem->SetMarked(true);
@@ -1229,6 +1327,16 @@ PWWindow::MessageReceived(BMessage* message)
 		case 'pWhC':
 			fHeaderWin = NULL;
 			break;
+		case STYLES_MSG:
+			if (fStylesWin == NULL) {
+				fStylesWin = new PWStylesWindow(this);
+				fStylesWin->Show();
+			} else
+				fStylesWin->Activate();
+			break;
+		case 'pWyC':
+			fStylesWin = NULL;
+			break;
 		case 'pWsc':
 			fView->SetSpellEnabled(fSpellItem->IsMarked()
 				&& fSpell && fSpell->Loaded());
@@ -1237,6 +1345,19 @@ PWWindow::MessageReceived(BMessage* message)
 		case PRINT_MSG:
 			Print();
 			break;
+		case 'pWst': {
+			// a set, forwarded from the app looper (data carried as a
+			// plain field; the window applies it on its own thread)
+			BString prop;
+			BString data;
+			if (message->FindString("pwprop", &prop) == B_OK
+				&& message->FindString("data", &data) == B_OK) {
+				BMessage setter(B_SET_PROPERTY);
+				setter.AddString("data", data);
+				HandleScriptingForWindow(this, &setter, prop.String());
+			}
+			break;
+		}
 		case 'pWda': {
 			BMessage* args = message;
 			BString text;
@@ -1375,6 +1496,42 @@ PWWindow::QuitRequested()
 }
 
 // -------------------------------------------------------------------- app --
+// Scripting suite, the SerialApp pattern: a property_info table, a
+// BPropertyInfo, GetSupportedSuites advertising it, ResolveSpecifier
+// claiming our properties, and FindMatch dispatch in MessageReceived.
+// (Note: no PopSpecifier — popping breaks delivery-time reads.)
+static property_info sPWProperties[] = {
+	{ "Text",
+		{ B_GET_PROPERTY, B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, B_DIRECT_SPECIFIER, 0 },
+		"get or set the document text", 0, { B_STRING_TYPE } },
+	{ "Header",
+		{ B_GET_PROPERTY, B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, B_DIRECT_SPECIFIER, 0 },
+		"get or set the header pattern ({page}, {pages})", 0,
+		{ B_STRING_TYPE } },
+	{ "Footer",
+		{ B_GET_PROPERTY, B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, B_DIRECT_SPECIFIER, 0 },
+		"get or set the footer pattern ({page}, {pages})", 0,
+		{ B_STRING_TYPE } },
+	{ "Selection",
+		{ B_GET_PROPERTY, B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, B_DIRECT_SPECIFIER, 0 },
+		"get or set the selection as from-to", 0, { B_STRING_TYPE } },
+	{ "Modified",
+		{ B_GET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"is the document modified", 0, { B_INT32_TYPE } },
+	{ "WordCount",
+		{ B_GET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"number of words in the document", 0, { B_INT32_TYPE } },
+	{ 0 }
+};
+
+const BPropertyInfo kPWScriptingProperties(sPWProperties);
+
 class PWApp : public BApplication {
 public:
 			PWApp()
@@ -1382,6 +1539,23 @@ public:
 				BApplication("application/x-vnd.prose.ProseWriter")
 			{
 			}
+
+	status_t GetSupportedSuites(BMessage* message) override
+	{
+		message->AddString("suites", "suite/x-vnd.prose.ProseWriter");
+		message->AddFlat("messages", &kPWScriptingProperties);
+		return BApplication::GetSupportedSuites(message);
+	}
+
+	BHandler* ResolveSpecifier(BMessage* message, int32 index,
+		BMessage* specifier, int32 what, const char* property) override
+	{
+		if (kPWScriptingProperties.FindMatch(message, index, specifier,
+				what, property) >= 0)
+			return this;
+		return BApplication::ResolveSpecifier(message, index, specifier,
+			what, property);
+	}
 
 	void	ReadyToRun() override
 	{
@@ -1400,14 +1574,37 @@ public:
 
 	void	MessageReceived(BMessage* message) override
 	{
-		fprintf(stderr, "PWApp::MessageReceived what=%lx spec=%d\n",
-			(long)message->what, (int)message->HasSpecifiers());
-		if ((message->what == B_GET_PROPERTY
-				|| message->what == B_SET_PROPERTY)
-			&& fWindow != NULL) {
-			// not ours after all: let the inherited handling answer
-			BApplication::MessageReceived(message);
-			return;
+		if (message->HasSpecifiers() && fWindow != NULL) {
+			BMessage spec;
+			int32 what = 0;
+			int32 index = 0;
+			const char* prop = NULL;
+			if (message->GetCurrentSpecifier(&index, &spec, &what,
+					&prop) == B_OK
+				&& kPWScriptingProperties.FindMatch(message, index, &spec,
+					what, prop) >= 0) {
+				if (message->what == B_SET_PROPERTY) {
+					// Sets mutate window-owned state: a plain private
+					// message carries the work to the window looper
+					// (specifier stacks die in the window's dispatcher).
+					// The original message rides along so the reply
+					// goes back to the sender from the right thread.
+					BMessage fwd('pWst');
+					fwd.AddString("pwprop", prop);
+					BString data;
+					if (message->FindString("data", &data) == B_OK)
+						fwd.AddString("data", data);
+					fWindow->PostMessage(&fwd);
+					// The window applies asynchronously; this ack is
+					// immediate (a get straight after may race it).
+					ReplyString(message, "");
+				} else {
+					fWindow->Lock();
+					HandleScriptingForWindow(fWindow, message, prop);
+					fWindow->Unlock();
+				}
+				return;
+			}
 		}
 		switch (message->what) {
 			case 'pWnw': {
@@ -1817,6 +2014,37 @@ SelfTest()
 	}
 
 	{
+		// Named styles.
+		printf("block: styles\n"); fflush(stdout);
+		PWDocument doc;
+		doc.Insert(0, "style me", NULL);
+		PWCharFormat chr = doc.DefaultFormat();
+		chr.bold = true;
+		chr.size = 18;
+		PWParaFormat para;
+		para.alignment = PW_ALIGN_CENTER;
+		doc.AddStyle("Heading", chr, para);
+		CHECK("style stored", doc.CountStyles() == 1
+			&& doc.StyleNamed("Heading") != NULL);
+		doc.ApplyStyle(0, doc.Length(), 0);
+		CHECK("style applied char", doc.FormatAt(1).bold
+			&& (int)doc.FormatAt(1).size == 18);
+		CHECK("style applied para",
+			doc.ParagraphFormat(0).alignment == PW_ALIGN_CENTER);
+		doc.AddStyle("Heading", doc.DefaultFormat(), PWParaFormat());
+		CHECK("style replaced by name", doc.CountStyles() == 1
+			&& !doc.StyleNamed("Heading")->chr.bold);
+		BMessage msg;
+		doc.SaveToMessage(&msg);
+		PWDocument doc2;
+		doc2.LoadFromMessage(&msg);
+		CHECK("style persists", doc2.CountStyles() == 1
+			&& doc2.StyleNamed("Heading") != NULL);
+		doc2.RemoveStyle(0);
+		CHECK("style removed", doc2.CountStyles() == 0);
+	}
+
+	{
 		// Performance: ~100 pages.
 		PWDocument doc;
 		doc.Insert(0,
@@ -1830,8 +2058,19 @@ SelfTest()
 		layout.SetPageSetup(PWPageSetup());
 		layout.Layout();
 		bigtime_t ms = (system_time() - t0) / 1000;
-		printf("perf: %d paragraphs -> %d pages in %lld ms\n",
+		printf("measure: layout %d paragraphs -> %d pages in %lld ms\n",
 			(int)doc.CountParagraphs(), (int)layout.CountPages(), (long long)ms);
+		// keystroke-shape cost: relayout of a long document
+		t0 = system_time();
+		doc.Insert(doc.Length() / 2, "x", NULL);
+		layout.Layout();
+		bigtime_t ms2 = (system_time() - t0) / 1000;
+		printf("measure: single-key relayout %lld ms\n", (long long)ms2);
+		t0 = system_time();
+		PWSpellChecker big;
+		big.Load("/boot/home/config/settings/ProseWriter/words");
+		printf("measure: dictionary %d words in %lld ms\n",
+			(int)big.CountWords(), (long long)((system_time() - t0) / 1000));
 		CHECK("layout pages produced", layout.CountPages() > 50);
 		CHECK("layout under budget (1500 ms)", ms < 1500);
 	}

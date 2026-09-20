@@ -13,6 +13,7 @@
 
 class BCheckBox;
 class PWHeaderWindow;
+class PWStylesWindow;
 class PWPageSetupWindow;
 class BMenu;
 class BTextControl;
@@ -57,6 +58,10 @@ public:
 		APPLY_SETUP_MSG	= 'pWpA',
 		APPLY_HEADER_MSG	= 'pWhA',
 		RECENT_MSG		= 'pWrc',
+		STYLES_MSG		= 'pWsy',
+		STYLE_APPLY_MSG	= 'pWsa',
+		STYLE_NEW_MSG		= 'pWsn',
+		STYLE_DEL_MSG		= 'pWsd',
 		EXPORT_RTF_MSG		= 'pWer',
 		EXPORT_RTF_DONE_MSG	= 'pWex',
 	};
@@ -121,6 +126,7 @@ private:
 	BMenuItem*		fSpellItem;
 	PWPageSetupWindow*	fSetupWin = NULL;
 	PWHeaderWindow*	fHeaderWin = NULL;
+	PWStylesWindow*	fStylesWin = NULL;
 };
 
 #endif	// PW_WINDOW_H

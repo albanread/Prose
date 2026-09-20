@@ -142,6 +142,22 @@ public:
 
 	const PWCharFormat& DefaultFormat() const { return fDefault; }
 
+	// ---- named styles: a remembered (character, paragraph) format pair
+	struct PWStyle {
+		BString		name;
+		PWCharFormat	chr;
+		PWParaFormat	para;
+	};
+	int32		CountStyles() const { return (int32)fStyles.size(); }
+	const PWStyle* StyleAt(int32 index) const;
+	const PWStyle* StyleNamed(const char* name) const;
+	void		AddStyle(const char* name, const PWCharFormat& chr,
+				const PWParaFormat& para);
+	void		RemoveStyle(int32 index);
+	void		ClearStyles();
+	// Applies both halves to the selection / caret's paragraphs.
+	void		ApplyStyle(int32 offset, int32 length, int32 styleIndex);
+
 	// ---- headers & footers: run text with {page} and {pages} fields,
 	// substituted per page at draw time. Empty string = none.
 	void		SetHeaderText(const char* text) { fHeader = text; fModified = true; }
@@ -179,6 +195,7 @@ private:
 	std::vector<Para>	fParas;
 	PWCharFormat		fDefault;
 	std::vector<UndoStep>	fUndo, fRedo;
+	std::vector<PWStyle>	fStyles;
 	bool			fModified = false;
 	bool			fCoalesce = true;
 	BString			fHeader, fFooter;

@@ -638,6 +638,13 @@ PWDocument::SaveToMessage(BMessage* msg) const
 {
 	msg->AddString("header", fHeader);
 	msg->AddString("footer", fFooter);
+	for (const PWStyle& s : fStyles) {
+		BMessage styleMsg('pWs&');
+		styleMsg.AddString("name", s.name);
+		s.chr.Archive(&styleMsg);
+		s.para.Archive(&styleMsg);
+		msg->AddMessage("style", &styleMsg);
+	}
 	status_t err = B_OK;
 	for (size_t i = 0; i < fParas.size() && err == B_OK; i++) {
 		const Para& p = fParas[i];
@@ -663,6 +670,7 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 	fUndo.clear();
 	fRedo.clear();
 	fHeader = fFooter = "";
+	fStyles.clear();
 	PWCharFormat def = MakeDefaultFormat();
 	BMessage paraMsg;
 	for (int32 i = 0; msg->FindMessage("para", i, &paraMsg) == B_OK; i++) {
@@ -690,9 +698,89 @@ PWDocument::LoadFromMessage(const BMessage* msg)
 		fParas.push_back(Para{ { PWRun{ 0, 0, def } }, "", PWParaFormat() });
 	msg->FindString("header", &fHeader);
 	msg->FindString("footer", &fFooter);
+	BMessage styleMsg;
+	for (int32 i = 0; msg->FindMessage("style", i, &styleMsg) == B_OK; i++) {
+		BString name;
+		styleMsg.FindString("name", &name);
+		PWCharFormat chr;
+		chr.Unarchive(&styleMsg);
+		PWParaFormat para;
+		para.Unarchive(&styleMsg);
+		fStyles.push_back(PWStyle{ name, chr, para });
+	}
 	fModified = false;
 	fPlainTextValid = false;
 	return B_OK;
+}
+
+const PWDocument::PWStyle*
+PWDocument::StyleAt(int32 index) const
+{
+	if (index < 0 || index >= (int32)fStyles.size())
+		return NULL;
+	return &fStyles[index];
+}
+
+const PWDocument::PWStyle*
+PWDocument::StyleNamed(const char* name) const
+{
+	for (const PWStyle& s : fStyles)
+		if (s.name == name)
+			return &s;
+	return NULL;
+}
+
+void
+PWDocument::AddStyle(const char* name, const PWCharFormat& chr,
+	const PWParaFormat& para)
+{
+	for (PWStyle& s : fStyles) {
+		if (s.name == name) {
+			s.chr = chr;
+			s.para = para;
+			fModified = true;
+			return;
+		}
+	}
+	PWStyle s;
+	s.name = name;
+	s.chr = chr;
+	s.para = para;
+	fStyles.push_back(s);
+	fModified = true;
+}
+
+void
+PWDocument::RemoveStyle(int32 index)
+{
+	if (index >= 0 && index < (int32)fStyles.size()) {
+		fStyles.erase(fStyles.begin() + index);
+		fModified = true;
+	}
+}
+
+void
+PWDocument::ClearStyles()
+{
+	fStyles.clear();
+}
+
+void
+PWDocument::ApplyStyle(int32 offset, int32 length, int32 styleIndex)
+{
+	const PWStyle* s = StyleAt(styleIndex);
+	if (!s)
+		return;
+	if (length > 0)
+		ApplyFormat(offset, length, s->chr);
+	else
+		length = 1;	// caret only: its paragraph takes the paragraph half
+	int32 para, inPara;
+	Locate(offset, &para, &inPara);
+	int32 lastPara;
+	Locate(offset + length, &lastPara, &inPara);
+	for (int32 p = para; p <= lastPara && p < CountParagraphs(); p++)
+		SetParaFormat(p, s->para);
 }
 
 BString
