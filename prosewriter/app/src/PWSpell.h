@@ -27,6 +27,12 @@ public:
 	void		ScanParagraph(const char* text,
 				std::vector<std::pair<int32, int32>>* ranges) const;
 
+	// The word (letters/digits/'/-) containing byte `offset` in `text`;
+	// zero length when the caret sits between words. Used to exempt the
+	// word being typed from squiggling until the caret moves on.
+	static void	CaretWordRange(const char* text, int32 offset,
+				int32* start, int32* length);
+
 private:
 	bool		Found(const std::string& word) const;
 

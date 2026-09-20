@@ -325,11 +325,25 @@ PWPageView::DrawSquiggles(const PWLayout::Line& line,
 	const char* text = fDoc->ParagraphText(line.para);
 	int32 lineStart = line.startPara;
 	int32 lineEnd = line.startPara + line.length;
+	// The word the caret is in is still being typed — never squiggle it;
+	// it is checked as soon as the caret moves on.
+	int32 caretWordStart = -1, caretWordLen = 0;
+	{
+		int32 caretPara, caretIn;
+		fDoc->Locate(fCaret, &caretPara, &caretIn);
+		if (caretPara == line.para) {
+			PWSpellChecker::CaretWordRange(text, caretIn, &caretWordStart,
+				&caretWordLen);
+		}
+	}
 	for (const auto& range : it->second.second) {
 		int32 rs = std::max(range.first, lineStart);
 		int32 re = std::min(range.first + range.second, lineEnd);
 		if (re <= rs)
 			continue;
+		if (caretWordLen > 0 && rs < caretWordStart + caretWordLen
+			&& re > caretWordStart)
+			continue;	// overlaps the word being typed
 		// x of a byte offset by walking the line's segments
 		auto xAt = [&](int32 at) -> float {
 			float x = line.x;

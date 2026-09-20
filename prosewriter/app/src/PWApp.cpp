@@ -2105,6 +2105,22 @@ SelfTest()
 		CHECK("single letters pass", spell.IsCorrect("a"));
 		CHECK("hyphen parts", spell.IsCorrect("hello-world"));
 		CHECK("hyphen typo", !spell.IsCorrect("hello-wrold"));
+		int32 ws = 0, wl = 0;
+		PWSpellChecker::CaretWordRange("one two three", 5, &ws, &wl);
+		CHECK("caret word mid", ws == 4 && wl == 3);
+		PWSpellChecker::CaretWordRange("one two three", 3, &ws, &wl);
+		CHECK("caret word at end boundary", ws == 0 && wl == 3);
+		PWSpellChecker::CaretWordRange("one two three", 7, &ws, &wl);
+		CHECK("caret word at start boundary", ws == 4 && wl == 3);
+		PWSpellChecker::CaretWordRange("hello,  don't", 7, &ws, &wl);
+		CHECK("caret on separator", wl == 0);
+		// a comma directly after a word still exempts that word: the
+		// user might be about to keep typing it
+		PWSpellChecker::CaretWordRange("hello,", 5, &ws, &wl);
+		CHECK("caret after word grabs word", ws == 0 && wl == 5);
+		PWSpellChecker::CaretWordRange("don't", 5, &ws, &wl);
+		CHECK("caret word with apostrophe", ws == 0 && wl == 5);
+
 		std::vector<std::pair<int32, int32>> ranges;
 		spell.ScanParagraph("The wrold says hello, don't it? mp3", &ranges);
 		CHECK("one misspelling found", ranges.size() == 1);

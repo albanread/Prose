@@ -144,3 +144,33 @@ PWSpellChecker::ScanParagraph(const char* text,
 			ranges->push_back(std::make_pair(start, end - start));
 	}
 }
+
+
+void
+PWSpellChecker::CaretWordRange(const char* text, int32 offset,
+	int32* start, int32* length)
+{
+	*start = offset;
+	*length = 0;
+	if (!text)
+		return;
+	int32 len = (int32)strlen(text);
+	if (offset < 0 || offset > len)
+		return;
+	auto isWord = [](char c) {
+		return isalnum((unsigned char)c) || c == '\'' || c == '-';
+	};
+	int32 s = offset;
+	while (s > 0 && isWord(text[s - 1]))
+		s--;
+	int32 e = offset;
+	while (e < len && isWord(text[e]))
+		e++;
+	// trailing separators stay out (mirrors ScanParagraph)
+	while (e > s && (text[e - 1] == '\'' || text[e - 1] == '-'))
+		e--;
+	if (e < s)
+		e = s;
+	*start = s;
+	*length = e - s;
+}
