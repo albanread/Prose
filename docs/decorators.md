@@ -406,7 +406,8 @@ the workspace's colour with `B_DESKTOP_COLOR`, and so drew white labels on
 Prose Light's paper and, after a switch at run time, black ones on Prose
 Dark's ink. Measured on the themes since: contrast 17.8:1 on paper, 16.5:1
 on ink, 5.3:1 on Platinum's periwinkle and on Win2k's blue, 7.4:1 on
-NeXTSTEP's grey.
+NeXTSTEP's grey, 18.0:1 on Manuscript's paper, 18.5:1 on Manuscript Night's
+ink and 21:1 on High Contrast's white.
 
 | | |
 |---|---|
@@ -422,7 +423,7 @@ then `B_RESTORE_BACKGROUND_IMAGE` to Tracker) — and each of those persists
 it, so a theme applied once is the machine's state across restarts. The name
 is kept in `~/config/settings/prose/theme`.
 
-**Six ship.** *Prose Light*: the paper wallpaper, a light grey frame with
+**Nine ship.** *Prose Light*: the paper wallpaper, a light grey frame with
 the round buttons at the left, the system's own colours otherwise. *Prose
 Dark*: the ink wallpaper, a charcoal frame, and Haiku's dark palette for
 panels, menus, documents and lists. *Classic*: the yellow tab and the default
@@ -433,8 +434,21 @@ selections, on a plain periwinkle desktop with no picture. *Win2k* (patch
 behind, the 3D grey for panels, menus and controls, navy selections, on the
 plain blue desktop. *NeXTSTEP* (patch 0087): the NeXT frame and NeXT's four
 greys, light grey panels and menus, white where a menu item is chosen, on the
-dark grey workspace. All six list every colour, so switching back restores
-everything.
+dark grey workspace. *Manuscript* (patch 0091), for long writing: the
+brand's own colours -- warm paper panels, a paler paper page, near-black ink
+text, the proofreader's vermilion where something is chosen and Prose Blue for
+links -- on the ruled Manuscript wallpaper, in the Prose frame. *Manuscript
+Night*: the same on the ink ground with chalk-coloured text. *High Contrast*:
+black text on white everywhere, black selections, a blue keyboard focus, the
+frame with glyph buttons (its signs are the text colour, so nothing depends on
+telling colours apart), a black title bar on the window in front and white
+ones behind, on a white desktop. All nine list every colour, so switching
+back restores everything.
+
+Dark themes share one fault that is Haiku's, not theirs: the control look
+fills a disabled scroll bar's thumb with a light tint of the panel colour, so
+on Prose Dark and Manuscript Night an empty document's scroll bars come out
+pale, and StyledEdit's status field shows light text on them.
 
 **On the host: View ▸ Theme.** The submenu is filled from `prosetheme --list`
 when the guest's portal daemon says hello (a couple of seconds into a boot),

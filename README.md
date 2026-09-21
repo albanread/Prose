@@ -326,11 +326,12 @@ table there also records why each one exists.
 | 0081 | HostFS: the host's changes reach the guest — watched directories polled, node monitors told |
 | 0082 | virtio-fs: thirty-two request slots, their contiguity proven |
 | 0083 | hostfs: the unused open-flag conversion removed |
-| 0089 | icu74 built with its data in the library: numbers format again, everywhere |
 | 0084 | The desktop's labels stand out against the wallpaper: black or white by its colour, outlined; a theme's `desktop` colour is the one shown |
 | 0085 | Platinum, a window frame after Mac OS 8.5, and a Platinum theme |
 | 0086 | Win2k, a window frame after Windows 2000, and a Win2k theme |
 | 0087 | NeXT, a window frame after NeXTSTEP, and a NeXTSTEP theme |
+| 0089 | icu74 built with its data in the library: numbers format again, everywhere |
+| 0091 | Themes: Manuscript and Manuscript Night, for long writing in the brand's colours, and High Contrast |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

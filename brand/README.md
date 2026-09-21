@@ -42,7 +42,7 @@ based on `hrev60122` (`55d56e03a0`).
 | EFI loader boot menu title/icons | `src/system/boot/loader/` (menu title, HVIF icons) | TODO — this is what arm64 Prose shows at boot |
 | Deskbar leaf icon | `src/apps/deskbar/Deskbar.rdef`, `icons.rdef` (HVIF vector icons) | TODO: needs an HVIF pilcrow (Icon-O-Matic or hvif tooling) |
 | "Haiku" strings in apps | `AboutSystem.cpp`, `Deskbar` views, `Tracker` about, `Installer`, `Tour`, `login` | TODO: sweep `grep -rn '"Haiku' src/apps` |
-| Default wallpaper | Backgrounds prefs default; set via first-login script or `src/prefs/backgrounds` default | TODO: point at shipped Manuscript wallpaper |
+| Default wallpaper | `TrackerInitialState.cpp` (first boot) | **ink dark** on a new machine; the Manuscript wallpapers ship in `data/artwork` (patch 0091) and come with the Manuscript themes |
 | Package/repository names | `haiku.hpkg`, repo info templates in `build/jam/` | TODO (bigger; affects package management) |
 
 ## Applying

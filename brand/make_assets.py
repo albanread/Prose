@@ -105,6 +105,24 @@ def ruled(step: int, color: str, top: int = 220, bottom: int = H - 220) -> str:
     return f'<g>{lines}</g>'
 
 
+def lockup(x: int, y: int, fill: str, opacity: float) -> str:
+    """The wallpapers' wordmark: 'Prose' in bold with the mark in vermilion."""
+    return (f'<text x="{x}" y="{y}" font-family="Georgia, serif" font-size="74" '
+            f'font-weight="700" fill="{fill}" opacity="{opacity}">Prose'
+            f'<tspan fill="{VERMILION}">&#182;</tspan></text>')
+
+
+def asterism(x: int, y: int, size: int, fill: str, opacity: float) -> str:
+    """The asterism (three asterisks in a triangle), built from Georgia's
+    asterisk: Georgia has no U+2042 of its own."""
+    star = (f'font-family="Georgia, serif" font-size="{size}" fill="{fill}" '
+            f'opacity="{opacity}"')
+    half = size * 0.3
+    return (f'<text x="{x}" y="{y}" {star}>*</text>'
+            f'<text x="{x + 2 * half}" y="{y}" {star}>*</text>'
+            f'<text x="{x + half}" y="{y - size * 0.5}" {star}>*</text>')
+
+
 def editor_flourish() -> str:
     """The proofreader's circle-and-caret, in vermilion."""
     return f"""
@@ -121,12 +139,8 @@ write("wallpaper-manuscript-light.svg", f"""
   {ruled(58, RULE)}
   {pilcrow(2230, 420, 1290, INK, 0.05)}
   {editor_flourish()}
-  {wordmark_left(240, 1930, 74, INK, "", VERMILION)}
-  <text x="258" y="1930" font-family="Georgia, serif" font-size="74" fill="{INK}"
-        opacity="0.85">Prose&#182;<tspan font-size="52" opacity="0.7"
-        >   ·   the Kronkite kernel</tspan></text>
-  <text x="3560" y="330" font-family="Georgia, serif" font-size="88"
-        fill="{BLUE}" opacity="0.65">&#8252;</text>
+  {lockup(240, 1930, INK, 0.85)}
+  {asterism(3540, 360, 88, BLUE, 0.65)}
 </svg>""")
 
 # Manuscript dark: ink field, chalk rules, the mark in paper.
@@ -136,11 +150,8 @@ write("wallpaper-manuscript-dark.svg", f"""
   {ruled(58, RULE_DARK)}
   {pilcrow(2230, 420, 1290, PAPER, 0.055)}
   {editor_flourish()}
-  <text x="240" y="1930" font-family="Georgia, serif" font-size="74" fill="{PAPER}"
-        opacity="0.9">Prose&#182;<tspan font-size="52" opacity="0.6"
-        >   ·   the Kronkite kernel</tspan></text>
-  <text x="3560" y="330" font-family="Georgia, serif" font-size="88"
-        fill="{PAPER}" opacity="0.5">&#8252;</text>
+  {lockup(240, 1930, PAPER, 0.9)}
+  {asterism(3540, 360, 88, PAPER, 0.5)}
 </svg>""")
 
 # ------------------------------------------------------------- boot splash --

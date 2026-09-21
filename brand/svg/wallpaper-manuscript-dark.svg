@@ -15,9 +15,6 @@
         fill="none" stroke="#D6482B" stroke-width="14" stroke-linecap="round"/>
   <path d="M 1310 1580 C 1420 1500, 1560 1500, 1650 1560" fill="none"
         stroke="#D6482B" stroke-width="14" stroke-linecap="round"/>
-  <text x="240" y="1930" font-family="Georgia, serif" font-size="74" fill="#F5EFE3"
-        opacity="0.9">Prose&#182;<tspan font-size="52" opacity="0.6"
-        >   ·   the Kronkite kernel</tspan></text>
-  <text x="3560" y="330" font-family="Georgia, serif" font-size="88"
-        fill="#F5EFE3" opacity="0.5">&#8252;</text>
+  <text x="240" y="1930" font-family="Georgia, serif" font-size="74" font-weight="700" fill="#F5EFE3" opacity="0.9">Prose<tspan fill="#D6482B">&#182;</tspan></text>
+  <text x="3540" y="360" font-family="Georgia, serif" font-size="88" fill="#F5EFE3" opacity="0.5">*</text><text x="3592.8" y="360" font-family="Georgia, serif" font-size="88" fill="#F5EFE3" opacity="0.5">*</text><text x="3566.4" y="316.0" font-family="Georgia, serif" font-size="88" fill="#F5EFE3" opacity="0.5">*</text>
 </svg>
