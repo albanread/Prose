@@ -1,0 +1,61 @@
+SUMMARY="A drawing program for Prose"
+DESCRIPTION="ProseDraw is a native drawing program for Prose: shapes, \
+connectors that follow what they join, labels edited where they sit, \
+images placed on the page, zoom, and vector PDF export. It is developed in \
+the Prose repository (prosedraw/) and packaged from there; SOURCE_STATE in \
+the source says which commit this is."
+HOMEPAGE="https://github.com/albanread/Prose"
+COPYRIGHT="2026 The Prose project"
+LICENSE="MIT"
+REVISION="1"
+# The source is not fetched: make-source.sh beside this recipe packs the
+# committed state of prosedraw/app, and prosepkg reads a file:// source from
+# the recipe's own directory. Run it before building.
+SOURCE_URI="file://prosedraw-$portVersion.tar.gz"
+SOURCE_DIR="prosedraw-$portVersion"
+
+ARCHITECTURES="arm64 ?x86_64"
+
+PROVIDES="
+	prosedraw = $portVersion
+	app:ProseDraw = $portVersion
+	"
+REQUIRES="
+	haiku
+	lib:libz
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	devel:libz
+	"
+BUILD_PREREQUIRES="
+	cmd:g++
+	cmd:make
+	cmd:rc
+	cmd:xres
+	"
+
+BUILD()
+{
+	# The Makefile is the developers': it names the tree's cross compiler,
+	# ProseWriter's sysroot and a zlib of its own. Here the compiler is the g++
+	# on the PATH, prosepkg's wrapper, which knows where the headers and
+	# libraries are, and zlib is the system's. make's errors do not stop the
+	# build by themselves, so the binary is checked for.
+	make $jobArgs XGXX=g++ INCS="-I. -Isrc" LIBS="" ZLIBDIR=. \
+		CXXFLAGS="-O2 -Wall -Wno-multichar -Wno-unused-parameter -std=c++17" \
+		ProseDraw
+	test -x ProseDraw || { echo "ProseDraw did not build" >&2; exit 1; }
+	rc -o ProseDraw.rsrc ProseDraw.rdef
+	xres -o ProseDraw ProseDraw.rsrc
+}
+
+INSTALL()
+{
+	mkdir -p $appsDir
+	cp -a ProseDraw $appsDir/ProseDraw
+	settype -t application/x-vnd.Be-elfexecutable $appsDir/ProseDraw
+	mimeset -f $appsDir/ProseDraw
+	addAppDeskbarSymlink $appsDir/ProseDraw
+}
