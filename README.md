@@ -328,6 +328,7 @@ table there also records why each one exists.
 | 0083 | hostfs: the unused open-flag conversion removed |
 | 0084 | The desktop's labels stand out against the wallpaper: black or white by its colour, outlined; a theme's `desktop` colour is the one shown |
 | 0085 | Platinum, a window frame after Mac OS 8.5, and a Platinum theme |
+| 0086 | Win2k, a window frame after Windows 2000, and a Win2k theme |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

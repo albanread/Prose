@@ -245,7 +245,7 @@ setdecor Default
 ## 4. Platinum
 
 Patch `0085`: `src/add-ons/decorators/PlatinumDecorator`, packaged into
-`haiku.hpkg` beside the other two, and `Platinum.theme` (section 5). A frame
+`haiku.hpkg` beside the other two, and `Platinum.theme` (section 6). A frame
 after the Mac OS 8.5 appearance of that name. Haiku's `MacDecorator` ("Mac OS
 Platinum") is a sketch of it on the tab model, a gradient square for each
 button, and no package lists it; this one follows the original's anatomy.
@@ -293,7 +293,45 @@ Terminal and an alert drawn under the Platinum theme. Not exercised: a
 pressed box on screen (the automation's click presses and releases at
 once), a stacked bar, the resize highlight.
 
-## 5. Themes
+## 5. Win2k
+
+Patch `0086`: `src/add-ons/decorators/Win2kDecorator`, in `haiku.hpkg` with
+the others, and `Win2k.theme`. A frame after the Windows 2000 classic
+appearance; Haiku's `WinDecorator` resembles Windows 95 and is not shipped.
+
+| part | |
+|---|---|
+| frame | a raised edge two units deep (light and dark shadow outside, white and shadow inside) and two units of face |
+| caption | inside the frame, shaded from the tab colour at the left to the border colour at the right, the title at its left |
+| buttons | minimize and maximize (zoom) side by side, close two units apart, raised, with Windows' signs; pressed, the edge sinks and the sign moves a unit; they work on a window in the background too, as they did there |
+| document windows | the ridged size grip in the corner the scroll bars leave |
+| floating windows | a smaller caption with smaller signs |
+| modal windows | a dialog's frame, the edge and one unit of face, no caption |
+| add-on file | `Win2kDecorator` |
+
+![Win2k](images/decorator-win2k.png)
+
+- **Colours.** The frame and the buttons are the panel colour, Windows'
+  "3D objects", so they match the application's own panels; the edge's
+  greys are tints of it. The caption shades from `window_tab` to
+  `window_border` (and `window_inactive_tab` to `window_inactive_border`),
+  the two colours Windows called the title bar and its gradient; the title
+  is `window_text`. A tab and a border of one colour give a flat caption.
+  A change to the panel colour alone reaches the frame when a window colour
+  changes too, as a theme's does: app_server tells decorators only of the
+  six window colours.
+- **The rest is Platinum's**: whole units that grow with the font, the
+  top border drawn as the bar's lower part, stacked windows as slices.
+
+### Verified
+
+StyledEdit and Tracker drawn active and in the background, the Win2k theme
+applied through the host's `theme` command on a built image (the decorator
+from the system package), and the test program with one window of each
+look; a click on a background window's close button closed it, minimize
+minimized.
+
+## 6. Themes
 
 A theme is a wallpaper, a set of system colours and a decorator, chosen from
 the host's View ▸ Theme menu and applied to the guest through the portal.
@@ -324,8 +362,8 @@ when there is no picture (Tracker, patch 0084), and prosetheme writes the
 wallpaper with Backgrounds' "Icon label outline" on. Tracker used to compare
 the workspace's colour with `B_DESKTOP_COLOR`, and so drew white labels on
 Prose Light's paper and, after a switch at run time, black ones on Prose
-Dark's ink. Measured on the four themes since: contrast 17.8:1 on paper,
-16.5:1 on ink, 5.3:1 on Platinum's periwinkle.
+Dark's ink. Measured on the themes since: contrast 17.8:1 on paper, 16.5:1
+on ink, 5.3:1 on Platinum's periwinkle and on Win2k's blue.
 
 | | |
 |---|---|
@@ -341,14 +379,17 @@ then `B_RESTORE_BACKGROUND_IMAGE` to Tracker) — and each of those persists
 it, so a theme applied once is the machine's state across restarts. The name
 is kept in `~/config/settings/prose/theme`.
 
-**Four ship.** *Prose Light*: the paper wallpaper, a light grey frame with
+**Five ship.** *Prose Light*: the paper wallpaper, a light grey frame with
 the round buttons at the left, the system's own colours otherwise. *Prose
 Dark*: the ink wallpaper, a charcoal frame, and Haiku's dark palette for
 panels, menus, documents and lists. *Classic*: the yellow tab and the default
 colours a new machine has. *Platinum* (patch 0085): the Platinum frame,
 platinum grey panels and menus, a lavender highlight and dark blue menu
-selections, on a plain periwinkle desktop with no picture. All four list
-every colour, so switching back restores everything.
+selections, on a plain periwinkle desktop with no picture. *Win2k* (patch
+0086): the Win2k frame, navy captions shading to sky blue and grey ones
+behind, the 3D grey for panels, menus and controls, navy selections, on the
+plain blue desktop. All five list every colour, so switching back restores
+everything.
 
 **On the host: View ▸ Theme.** The submenu is filled from `prosetheme --list`
 when the guest's portal daemon says hello (a couple of seconds into a boot),

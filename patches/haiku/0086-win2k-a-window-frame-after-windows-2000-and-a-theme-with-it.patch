@@ -1,0 +1,1310 @@
+From 5009198a39412a0450f6dd02feeddea1ed622244 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 16:24:12 +0100
+Subject: [PATCH] Win2k: a window frame after Windows 2000, and a theme with it
+
+A new decorator after the Windows 2000 classic appearance: a raised grey
+frame, two units of edge and two of face, and inside it a caption shaded
+from the tab colour at its left to the border colour at its right, the
+title at the left, and three raised buttons at the right -- minimize and
+maximize (zoom) side by side, close set apart -- with Windows' signs, drawn
+as pixel art; a pressed button sinks and its sign moves. The buttons work
+on a window in the background too, as they did there. Document windows get
+the ridged size grip in the corner the scroll bars leave, floating windows
+a smaller caption, modal ones a dialog's frame with no caption.
+
+The frame and the buttons are the panel colour (Windows' "3D objects"),
+the caption runs from the tab colour to the border colour, active and
+inactive -- Windows' title bar and its gradient -- so a theme sets every
+part, and a tab and border of one colour give a flat caption. Drawn in
+whole units that grow with the system font, the top border as the bar's
+lower part, like Platinum.
+
+Win2k.theme: navy captions shading to sky blue, grey ones behind, the 3D
+grey for panels, menus and controls, navy selections, cream tooltips, and
+the plain blue desktop with no picture.
+
+Verified in a guest: StyledEdit and Tracker drawn active and in the
+background, and a program opening one window of each look; a click on a
+background window's close button closed it, minimize minimized.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0086-win2k-a-window-frame-after-windows-2000-and-a-theme-with-it.patch 53a6bcd9c84644f200c6a8f78644f20e3adc26d9f28e5f1057e9a6c10f6ad092
+---
+ build/jam/packages/Haiku                      |   7 +-
+ build/jam/packages/ProsePortal                |   2 +-
+ data/prose/themes/Win2k.theme                 |  53 +
+ src/add-ons/decorators/Jamfile                |   1 +
+ src/add-ons/decorators/Win2kDecorator/Jamfile |  21 +
+ .../Win2kDecorator/Win2kDecorator.cpp         | 975 ++++++++++++++++++
+ .../Win2kDecorator/Win2kDecorator.h           | 124 +++
+ .../Win2kDecorator/Win2kDecorator.rdef        |  15 +
+ 8 files changed, 1194 insertions(+), 4 deletions(-)
+ create mode 100644 data/prose/themes/Win2k.theme
+ create mode 100644 src/add-ons/decorators/Win2kDecorator/Jamfile
+ create mode 100644 src/add-ons/decorators/Win2kDecorator/Win2kDecorator.cpp
+ create mode 100644 src/add-ons/decorators/Win2kDecorator/Win2kDecorator.h
+ create mode 100644 src/add-ons/decorators/Win2kDecorator/Win2kDecorator.rdef
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 1d6a92fae0..f5be2d69e6 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -424,13 +424,14 @@ AddFilesToPackage add-ons Network\ Settings :
+ 	;
+ 
+ # PROSE fork: window frames of our own, chosen in Appearance or by a theme:
+-# two conventional ones and Platinum. Haiku keeps its own decorator add-ons
+-# in haiku_extras, which this image does not ship, so these go in the
+-# system package.
++# two conventional ones, Platinum and Win2k. Haiku keeps its own decorator
++# add-ons in haiku_extras, which this image does not ship, so these go in
++# the system package.
+ AddFilesToPackage add-ons decorators :
+ 	ProseDecorator
+ 	ProseRightDecorator
+ 	PlatinumDecorator
++	Win2kDecorator
+ 	;
+ 
+ AddFilesToPackage add-ons Tracker :
+diff --git a/build/jam/packages/ProsePortal b/build/jam/packages/ProsePortal
+index 7740fe1aba..7972fbec32 100644
+--- a/build/jam/packages/ProsePortal
++++ b/build/jam/packages/ProsePortal
+@@ -21,7 +21,7 @@ AddFilesToPackage data launch : $(portalLaunch) ;
+ AddFilesToPackage bin : prosetheme ;
+ 
+ local proseThemes = "Prose Light.theme" "Prose Dark.theme" Classic.theme
+-	Platinum.theme ;
++	Platinum.theme Win2k.theme ;
+ proseThemes = $(proseThemes:G=prose-themes) ;
+ SEARCH on $(proseThemes) = [ FDirName $(HAIKU_TOP) data prose themes ] ;
+ AddFilesToPackage data prose themes : $(proseThemes) ;
+diff --git a/data/prose/themes/Win2k.theme b/data/prose/themes/Win2k.theme
+new file mode 100644
+index 0000000000..c0d1a619b8
+--- /dev/null
++++ b/data/prose/themes/Win2k.theme
+@@ -0,0 +1,53 @@
++# Win2k
++# After Windows 2000's classic appearance: the Win2k frame, navy captions
++# shading to sky blue, 3D grey panels and menus, navy selections, and the
++# plain blue desktop with no picture.
++
++decorator = Win2kDecorator
++wallpaper = none
++
++# the window frame: the caption shades from the tab colour to the border
++# colour; the frame itself and its buttons are the panel colour
++window_tab = 10,36,106
++window_border = 166,202,240
++window_text = 255,255,255
++window_inactive_tab = 128,128,128
++window_inactive_border = 192,192,192
++window_inactive_text = 212,208,200
++
++# the desktop, shown with no picture, and under the icons' labels
++desktop = 58,110,165
++
++# panels, menus, documents, controls, lists
++panel_background = 212,208,200
++menu_background = 212,208,200
++navigation_base = 10,36,106
++menu_selected_background = 10,36,106
++menu_text = 0,0,0
++menu_selected_text = 255,255,255
++menu_selected_border = 10,36,106
++panel_text = 0,0,0
++document_background = 255,255,255
++document_text = 0,0,0
++control_background = 212,208,200
++control_text = 0,0,0
++control_border = 128,128,128
++control_highlight = 10,36,106
++navigation_pulse = 0,0,0
++shine = 255,255,255
++shadow = 0,0,0
++tooltip_background = 255,255,225
++tooltip_text = 0,0,0
++control_mark = 0,0,0
++list_background = 255,255,255
++list_selected_background = 10,36,106
++list_text = 0,0,0
++list_selected_text = 255,255,255
++scroll_bar_thumb = 212,208,200
++link_text = 0,0,255
++link_hover = 0,0,255
++link_visited = 128,0,128
++link_active = 255,0,0
++status_bar = 10,36,106
++success = 0,128,0
++failure = 255,0,0
+diff --git a/src/add-ons/decorators/Jamfile b/src/add-ons/decorators/Jamfile
+index 000fa81142..0940bf0461 100644
+--- a/src/add-ons/decorators/Jamfile
++++ b/src/add-ons/decorators/Jamfile
+@@ -7,3 +7,4 @@ SubInclude HAIKU_TOP src add-ons decorators WinDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators ProseDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators ProseRightDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators PlatinumDecorator ;
++SubInclude HAIKU_TOP src add-ons decorators Win2kDecorator ;
+diff --git a/src/add-ons/decorators/Win2kDecorator/Jamfile b/src/add-ons/decorators/Win2kDecorator/Jamfile
+new file mode 100644
+index 0000000000..94af664d79
+--- /dev/null
++++ b/src/add-ons/decorators/Win2kDecorator/Jamfile
+@@ -0,0 +1,21 @@
++SubDir HAIKU_TOP src add-ons decorators Win2kDecorator ;
++
++UseBuildFeatureHeaders freetype ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app stackandtile ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app decorator ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing Painter ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app font ] ;
++UsePrivateHeaders app shared interface graphics ;
++UseLibraryHeaders agg ;
++
++AddResources Win2kDecorator : Win2kDecorator.rdef ;
++
++Includes [ FGristFiles Win2kDecorator.cpp ]
++	: [ BuildFeatureAttribute freetype : headers ] ;
++
++Addon Win2kDecorator :
++	Win2kDecorator.cpp
++	: be <nogrist>app_server [ TargetLibstdc++ ] [ TargetLibsupc++ ]
++;
+diff --git a/src/add-ons/decorators/Win2kDecorator/Win2kDecorator.cpp b/src/add-ons/decorators/Win2kDecorator/Win2kDecorator.cpp
+new file mode 100644
+index 0000000000..ac867fbe51
+--- /dev/null
++++ b/src/add-ons/decorators/Win2kDecorator/Win2kDecorator.cpp
+@@ -0,0 +1,975 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++/*!	Win2k: a window frame after the Windows 2000 classic appearance. */
++
++
++#include "Win2kDecorator.h"
++
++#include <math.h>
++#include <new>
++#include <string.h>
++
++#include <GradientLinear.h>
++#include <GraphicsDefs.h>
++#include <Point.h>
++#include <Rect.h>
++#include <View.h>
++#include <WindowPrivate.h>
++
++#include "DesktopSettings.h"
++#include "DrawingEngine.h"
++
++
++// Sizes in units (see the header). The frame of a sizable window is a
++// raised edge two units deep and two of face, as Windows' was.
++static const int32 kFrameUnits = 4;
++static const int32 kModalFrameUnits = 3;		// a dialog's: edge and one face
++static const int32 kCaptionUnits = 18;
++static const int32 kSmallCaptionUnits = 14;
++
++// How far along the bottom and right borders a press counts as the resize
++// corner, as TabDecorator has it (file-static there).
++static const float kBorderResizeLength = 22.0f;
++// A scroll bar's width at the 12-point font: the size grip fills the corner
++// the scroll bars leave.
++static const float kScrollBarWidth = 14.0f;
++
++// The caption buttons' signs, one character a unit: for a button face of
++// 12 x 10 units, and smaller ones for a small caption.
++static const char* kCloseSign[] = {
++	"##....##",
++	".##..##.",
++	"..####..",
++	"...##...",
++	"..####..",
++	".##..##.",
++	"##....##"
++};
++static const char* kZoomSign[] = {
++	"#########",
++	"#########",
++	"#.......#",
++	"#.......#",
++	"#.......#",
++	"#.......#",
++	"#.......#",
++	"#.......#",
++	"#########"
++};
++static const char* kMinimizeSign[] = {
++	"######",
++	"######"
++};
++static const char* kSmallCloseSign[] = {
++	"##...##",
++	".##.##.",
++	"..###..",
++	".##.##.",
++	"##...##"
++};
++static const char* kSmallZoomSign[] = {
++	"#######",
++	"#######",
++	"#.....#",
++	"#.....#",
++	"#.....#",
++	"#######"
++};
++static const char* kSmallMinimizeSign[] = {
++	"####",
++	"####"
++};
++
++
++Win2kDecorator::Win2kDecorator(DesktopSettings& settings, BRect frame,
++	Desktop* desktop)
++	:
++	SATDecorator(settings, frame, desktop),
++	fFaceColor(make_color(212, 208, 200)),
++	fUnit(1.0f),
++	fSmall(false),
++	fCaption(kCaptionUnits),
++	fButtonWidth(16.0f),
++	fButtonHeight(14.0f)
++{
++}
++
++
++Win2kDecorator::~Win2kDecorator()
++{
++}
++
++
++// #pragma mark - hit testing
++
++
++Decorator::Region
++Win2kDecorator::RegionAt(BPoint where, int32& tabIndex) const
++{
++	tabIndex = -1;
++
++	// The bar, the top border under it included: a button where there is
++	// one -- on a window in the background too -- the bar elsewhere.
++	for (int32 i = 0; i < fTabList.CountItems(); i++) {
++		Decorator::Tab* tab = fTabList.ItemAt(i);
++		if (!_BarRect(tab).Contains(where))
++			continue;
++
++		tabIndex = i;
++		if (tab->closeRect.IsValid() && tab->closeRect.Contains(where))
++			return REGION_CLOSE_BUTTON;
++		if (tab->zoomRect.IsValid() && tab->zoomRect.Contains(where))
++			return REGION_ZOOM_BUTTON;
++		if (tab->minimizeRect.IsValid() && tab->minimizeRect.Contains(where))
++			return REGION_MINIMIZE_BUTTON;
++		return REGION_TAB;
++	}
++
++	if (fTopTab->look == B_DOCUMENT_WINDOW_LOOK && fResizeRect.Contains(where))
++		return REGION_RIGHT_BOTTOM_CORNER;
++
++	Region region;
++	if (fLeftBorder.Contains(where))
++		return REGION_LEFT_BORDER;
++	if (fTopBorder.Contains(where))
++		return REGION_TOP_BORDER;
++	if (fRightBorder.Contains(where))
++		region = REGION_RIGHT_BORDER;
++	else if (fBottomBorder.Contains(where))
++		region = REGION_BOTTOM_BORDER;
++	else
++		return REGION_NONE;
++
++	// The end of the bottom and right borders is the resize corner.
++	if ((fTopTab->flags & B_NOT_RESIZABLE) == 0
++		&& (fTopTab->look == B_TITLED_WINDOW_LOOK
++			|| fTopTab->look == B_FLOATING_WINDOW_LOOK
++			|| fTopTab->look == B_MODAL_WINDOW_LOOK
++			|| fTopTab->look == kLeftTitledWindowLook)) {
++		BRect corner(BPoint(fBottomBorder.right - fBorderResizeLength,
++			fBottomBorder.bottom - fBorderResizeLength),
++			fBottomBorder.RightBottom());
++		if (corner.Contains(where))
++			return REGION_RIGHT_BOTTOM_CORNER;
++	}
++
++	return region;
++}
++
++
++void
++Win2kDecorator::ExtendDirtyRegion(Region region, BRegion& dirty)
++{
++	SATDecorator::ExtendDirtyRegion(region, dirty);
++
++	// the bar reaches down over the top border
++	if (region == REGION_TAB && fTitleBarRect.IsValid())
++		dirty.Include(fTopBorder);
++}
++
++
++void
++Win2kDecorator::UpdateColors(DesktopSettings& settings)
++{
++	SATDecorator::UpdateColors(settings);
++
++	// The frame and the buttons are Windows' "3D objects": the panels'
++	// colour. (A change to it alone reaches a decorator only with a window
++	// colour; a theme changes both.)
++	fFaceColor = settings.UIColor(B_PANEL_BACKGROUND_COLOR);
++}
++
++
++// #pragma mark - layout
++
++
++void
++Win2kDecorator::_DoLayout()
++{
++	const float fontSize = fDrawState.Font().Size();
++	const float scale = max_c(fontSize / 12.0f, 1.0f);
++	fUnit = max_c(1.0f, roundf(fontSize / 12.0f));
++	const float u = fUnit;
++
++	bool hasBar = false;
++	fSmall = false;
++
++	switch ((int)fTopTab->look) {
++		case B_MODAL_WINDOW_LOOK:
++			fBorderWidth = int32(kModalFrameUnits * u);
++			break;
++
++		case B_TITLED_WINDOW_LOOK:
++		case B_DOCUMENT_WINDOW_LOOK:
++			hasBar = true;
++			fBorderWidth = int32(kFrameUnits * u);
++			break;
++
++		case B_FLOATING_WINDOW_LOOK:
++		case kLeftTitledWindowLook:
++			hasBar = true;
++			fSmall = true;
++			fBorderWidth = int32(kFrameUnits * u);
++			break;
++
++		case B_BORDERED_WINDOW_LOOK:
++			fBorderWidth = 1;
++			break;
++
++		default:
++			fBorderWidth = 0;
++	}
++
++	fResizeKnobSize = fBorderWidth + roundf(kScrollBarWidth * scale);
++	fBorderResizeLength = kBorderResizeLength * scale;
++
++	// The borders: strips beside and below the client area, none of them
++	// overlapping, the left and right ones without the corners -- the shape
++	// the base class's dirty-region bookkeeping expects.
++	if (fBorderWidth > 0) {
++		fLeftBorder.Set(fFrame.left - fBorderWidth, fFrame.top,
++			fFrame.left - 1, fFrame.bottom);
++		fRightBorder.Set(fFrame.right + 1, fFrame.top,
++			fFrame.right + fBorderWidth, fFrame.bottom);
++		fTopBorder.Set(fFrame.left - fBorderWidth, fFrame.top - fBorderWidth,
++			fFrame.right + fBorderWidth, fFrame.top - 1);
++		fBottomBorder.Set(fFrame.left - fBorderWidth, fFrame.bottom + 1,
++			fFrame.right + fBorderWidth, fFrame.bottom + fBorderWidth);
++	} else {
++		fLeftBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fRightBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fTopBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fBottomBorder.Set(0.0, 0.0, -1.0, -1.0);
++	}
++
++	if (fBorderWidth > 1) {
++		fResizeRect.Set(fBottomBorder.right - fResizeKnobSize,
++			fBottomBorder.bottom - fResizeKnobSize, fBottomBorder.right,
++			fBottomBorder.bottom);
++	} else
++		fResizeRect.Set(0, 0, -1, -1);
++
++	if (hasBar) {
++		font_height fontHeight;
++		fDrawState.Font().GetHeight(fontHeight);
++		float text = ceilf(fontHeight.ascent + fontHeight.descent);
++
++		// The caption: the title with a little room, and at least what
++		// Windows gave it; the buttons are two units shorter at either end.
++		fCaption = max_c((fSmall ? kSmallCaptionUnits : kCaptionUnits) * u,
++			ceilf((text + (fSmall ? 2 : 4) * u) / u) * u);
++		fButtonHeight = fCaption - 4 * u;
++		fButtonWidth = fButtonHeight + 2 * u;
++
++		// What shows as the bar: the frame's top, the caption, and a unit of
++		// face above the client area. The part above the top border -- the
++		// title bar rect -- is as tall as the caption and that unit.
++		float barHeight = fCaption + u;
++
++		fTitleBarRect.Set(fTopBorder.left, fTopBorder.top - barHeight,
++			fTopBorder.right, fTopBorder.top - 1);
++		fBorderRect = BRect(fTitleBarRect.LeftTop(),
++			fBottomBorder.RightBottom());
++		_LayoutBar();
++	} else {
++		fBorderRect = BRect(fTopBorder.LeftTop(), fBottomBorder.RightBottom());
++		for (int32 i = 0; i < fTabList.CountItems(); i++) {
++			Decorator::Tab* tab = fTabList.ItemAt(i);
++			tab->tabRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->closeRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->zoomRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->minimizeRect.Set(0.0, 0.0, -1.0, -1.0);
++		}
++		fTabsRegion.MakeEmpty();
++		fTitleBarRect.Set(0.0, 0.0, -1.0, -1.0);
++	}
++}
++
++
++/*!	One window: the bar is its tab. Stacked windows: equal slices, the
++	top one with every button, the others with close only.
++*/
++void
++Win2kDecorator::_LayoutBar()
++{
++	int32 count = fTabList.CountItems();
++	if (count < 1)
++		return;
++
++	float width = fTitleBarRect.Width() + 1;
++	float slice = floorf(width / count);
++
++	for (int32 i = 0; i < count; i++) {
++		Decorator::Tab* tab = fTabList.ItemAt(i);
++		BRect& tabRect = tab->tabRect;
++		tabRect.Set(fTitleBarRect.left + i * slice, fTitleBarRect.top,
++			i == count - 1 ? fTitleBarRect.right
++				: fTitleBarRect.left + (i + 1) * slice - 1,
++			fTitleBarRect.bottom);
++		tab->tabOffset = uint32(tabRect.left - fLeftBorder.left);
++		tab->tabLocation = 0.0f;
++
++		_LayoutButtons(tab, count == 1 || tab == fTopTab);
++
++		// What a window may shrink to: its buttons and a little title.
++		float buttons = 0;
++		if ((tab->flags & B_NOT_CLOSABLE) == 0)
++			buttons += fButtonWidth + 2 * fUnit;
++		if ((tab->flags & B_NOT_MINIMIZABLE) == 0)
++			buttons += fButtonWidth;
++		if ((tab->flags & B_NOT_ZOOMABLE) == 0)
++			buttons += fButtonWidth;
++		tab->minTabSize = 2 * fBorderWidth + 6 * fUnit + buttons
++			+ fDrawState.Font().Size() * 3;
++		tab->maxTabSize = tab->minTabSize;
++		if (fDrawingEngine != NULL && Title(tab) != NULL) {
++			tab->maxTabSize += ceilf(fDrawingEngine->StringWidth(Title(tab),
++				strlen(Title(tab)), fDrawState.Font()));
++		}
++	}
++
++	fTabsRegion = fTitleBarRect;
++}
++
++
++/*!	At the caption's right, two units in: close, then two units of gap,
++	then zoom and minimize side by side.
++*/
++void
++Win2kDecorator::_LayoutButtons(Decorator::Tab* tab, bool allButtons)
++{
++	tab->closeRect.Set(0.0, 0.0, -1.0, -1.0);
++	tab->zoomRect.Set(0.0, 0.0, -1.0, -1.0);
++	tab->minimizeRect.Set(0.0, 0.0, -1.0, -1.0);
++
++	BRect caption = _CaptionRect(tab);
++	if (!caption.IsValid())
++		return;
++
++	const float u = fUnit;
++	float y = caption.top
++		+ floorf((caption.Height() + 1 - fButtonHeight) / (2 * u)) * u;
++	BRect rect(0, 0, fButtonWidth - 1, fButtonHeight - 1);
++
++	float right = caption.right + 1 - 2 * u;
++	if ((tab->flags & B_NOT_CLOSABLE) == 0) {
++		tab->closeRect = rect.OffsetToCopy(right - fButtonWidth, y);
++		right -= fButtonWidth + 2 * u;
++	}
++	if (allButtons && (tab->flags & B_NOT_ZOOMABLE) == 0) {
++		tab->zoomRect = rect.OffsetToCopy(right - fButtonWidth, y);
++		right -= fButtonWidth;
++	}
++	if (allButtons && (tab->flags & B_NOT_MINIMIZABLE) == 0)
++		tab->minimizeRect = rect.OffsetToCopy(right - fButtonWidth, y);
++}
++
++
++/*!	A tab's slice of what shows as the bar: its tab rect and the top border
++	under it.
++*/
++BRect
++Win2kDecorator::_BarRect(Decorator::Tab* tab) const
++{
++	if (!fTitleBarRect.IsValid() || !tab->tabRect.IsValid())
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	return BRect(tab->tabRect.left, tab->tabRect.top, tab->tabRect.right,
++		fTopBorder.bottom);
++}
++
++
++/*!	The shaded caption inside the frame. Stacked slices leave a unit of face
++	between them.
++*/
++BRect
++Win2kDecorator::_CaptionRect(Decorator::Tab* tab) const
++{
++	BRect bar = _BarRect(tab);
++	if (!bar.IsValid())
++		return bar;
++
++	bool first = tab == fTabList.FirstItem();
++	bool last = tab == fTabList.LastItem();
++	float top = bar.top + fBorderWidth;
++	return BRect(first ? bar.left + fBorderWidth : bar.left + fUnit, top,
++		last ? bar.right - fBorderWidth : bar.right, top + fCaption - 1);
++}
++
++
++/*!	Where the title goes: at the caption's left, truncated to the room the
++	buttons leave. The rect runs from the ascent to the descent; invalid when
++	no title fits.
++*/
++BRect
++Win2kDecorator::_TitleRect(Decorator::Tab* tab)
++{
++	BRect caption = _CaptionRect(tab);
++	if (!caption.IsValid() || fDrawingEngine == NULL)
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	const float u = fUnit;
++	float left = caption.left + 3 * u;
++	float right = caption.right - 3 * u;
++	const BRect* buttons[3] = { &tab->closeRect, &tab->zoomRect,
++		&tab->minimizeRect };
++	for (int32 i = 0; i < 3; i++) {
++		if (buttons[i]->IsValid())
++			right = min_c(right, buttons[i]->left - 3 * u);
++	}
++	float room = right - left + 1;
++	if (room < fDrawState.Font().Size())
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	tab->truncatedTitle = Title(tab);
++	fDrawState.Font().TruncateString(&tab->truncatedTitle, B_TRUNCATE_END,
++		room);
++	tab->truncatedTitleLength = tab->truncatedTitle.Length();
++	if (tab->truncatedTitleLength == 0)
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	float width = ceilf(fDrawingEngine->StringWidth(
++		tab->truncatedTitle.String(), tab->truncatedTitleLength,
++		fDrawState.Font()));
++
++	font_height fontHeight;
++	fDrawState.Font().GetHeight(fontHeight);
++	float baseline = floorf(caption.top + (caption.Height() + 1
++		+ fontHeight.ascent - fontHeight.descent) / 2 + 0.5f);
++	return BRect(left, baseline - ceilf(fontHeight.ascent), left + width - 1,
++		baseline + ceilf(fontHeight.descent));
++}
++
++
++// #pragma mark - colours
++
++
++void
++Win2kDecorator::_GetPalette(Decorator::Tab* tab, Palette& palette)
++{
++	ComponentColors colors;
++	uint8 highlight = RegionHighlight(REGION_TAB);
++	GetComponentColors(COMPONENT_TAB, highlight, colors, tab);
++
++	// The caption shades from the tab colour to the border colour; with a
++	// stack-and-tile highlight it is that highlight, flat.
++	palette.captionStart = colors[COLOR_TAB];
++	palette.captionEnd = highlight != HIGHLIGHT_NONE ? colors[COLOR_TAB]
++		: tab->buttonFocus ? fFocusFrameColor : fNonFocusFrameColor;
++	palette.text = colors[COLOR_TAB_TEXT];
++
++	// Windows 2000's 3D colours are the face, white, and two greys at a
++	// half and a third of it; a dark face gets a gentler highlight.
++	palette.face = fFaceColor;
++	palette.light = fFaceColor;
++	palette.highlight = tint_color(fFaceColor,
++		fFaceColor.IsDark() ? 0.8f : B_LIGHTEN_MAX_TINT);
++	palette.shadow = tint_color(fFaceColor, 1.4f);
++	palette.darkShadow = tint_color(fFaceColor, 1.7f);
++	palette.glyph = fFaceColor.IsLight() ? make_color(0, 0, 0)
++		: make_color(255, 255, 255);
++}
++
++
++/*!	A border strip is the face, unless it is highlighted -- the resize
++	highlight, or stack-and-tile's -- in which case the family's colour for
++	that state is used, as the other decorators do.
++*/
++rgb_color
++Win2kDecorator::_SideFace(Component component, Region region,
++	const rgb_color& plain)
++{
++	uint8 highlight = RegionHighlight(region);
++	if (highlight == HIGHLIGHT_NONE)
++		return plain;
++
++	ComponentColors colors;
++	GetComponentColors(component, highlight, colors, fTopTab);
++	return colors[2];
++}
++
++
++// #pragma mark - drawing
++
++
++void
++Win2kDecorator::Draw(BRect updateRect)
++{
++	fDrawingEngine->SetDrawState(&fDrawState);
++
++	_DrawFrame(updateRect & fBorderRect);
++
++	if (IsOutlineResizing())
++		_DrawOutlineFrame(updateRect & fOutlineBorderRect);
++
++	// the bar reaches down over the top border
++	if (fTitleBarRect.IsValid())
++		_DrawTabs(updateRect & (fTitleBarRect | fTopBorder));
++}
++
++
++void
++Win2kDecorator::Draw()
++{
++	Draw(fBorderRect);
++}
++
++
++/*!	A unit-wide edge just inside \a rect, drawn as Windows drew one: the top
++	and left in one colour, then the bottom and right in the other, which
++	takes the two corners where they meet.
++*/
++void
++Win2kDecorator::_Edge(BRect rect, const rgb_color& topLeft,
++	const rgb_color& bottomRight)
++{
++	const float u = fUnit;
++	fDrawingEngine->FillRect(BRect(rect.left, rect.top, rect.right,
++		rect.top + u - 1), topLeft);
++	fDrawingEngine->FillRect(BRect(rect.left, rect.top, rect.left + u - 1,
++		rect.bottom), topLeft);
++	fDrawingEngine->FillRect(BRect(rect.left, rect.bottom - u + 1, rect.right,
++		rect.bottom), bottomRight);
++	fDrawingEngine->FillRect(BRect(rect.right - u + 1, rect.top, rect.right,
++		rect.bottom), bottomRight);
++}
++
++
++void
++Win2kDecorator::_DrawFrame(BRect invalid)
++{
++	if (fTopTab->look == B_NO_BORDER_WINDOW_LOOK || fBorderWidth <= 0)
++		return;
++
++	Palette palette;
++	_GetPalette(fTopTab, palette);
++
++	if (fTopTab->look == B_BORDERED_WINDOW_LOOK) {
++		fDrawingEngine->StrokeRect(fBorderRect, palette.darkShadow);
++		return;
++	}
++
++	// Everything is drawn: the drawing engine is clipped to what needs it.
++	const float u = fUnit;
++	const BRect& outer = fBorderRect;
++
++	// the face, inside the raised edge: the bar's part (the caption is drawn
++	// over it) and the strips, in their own colour when highlighted
++	fDrawingEngine->FillRect(BRect(outer.left + 2 * u, outer.top + 2 * u,
++		outer.right - 2 * u, fFrame.top - 1), palette.face);
++	fDrawingEngine->FillRect(BRect(outer.left + 2 * u, fFrame.top,
++		fFrame.left - 1, fFrame.bottom),
++		_SideFace(COMPONENT_LEFT_BORDER, REGION_LEFT_BORDER, palette.face));
++	fDrawingEngine->FillRect(BRect(fFrame.right + 1, fFrame.top,
++		outer.right - 2 * u, fFrame.bottom),
++		_SideFace(COMPONENT_RIGHT_BORDER, REGION_RIGHT_BORDER, palette.face));
++	fDrawingEngine->FillRect(BRect(outer.left + 2 * u, fFrame.bottom + 1,
++		outer.right - 2 * u, outer.bottom - 2 * u),
++		_SideFace(COMPONENT_BOTTOM_BORDER, REGION_BOTTOM_BORDER,
++			palette.face));
++
++	// the raised edge: light and dark shadow outside, highlight and shadow
++	// inside
++	_Edge(outer, palette.light, palette.darkShadow);
++	_Edge(outer.InsetByCopy(u, u), palette.highlight, palette.shadow);
++
++	if (fTopTab->look == B_DOCUMENT_WINDOW_LOOK
++		&& (fTopTab->flags & B_NOT_RESIZABLE) == 0
++		&& invalid.Intersects(fResizeRect)) {
++		_DrawSizeGrip(palette);
++	}
++}
++
++
++/*!	The size grip of a document window, in the corner the scroll bars
++	leave: the face, and three ridges across the corner, each a lit line
++	above two shaded ones. It reaches into the client area, so it must be
++	painted, not left to the window.
++*/
++void
++Win2kDecorator::_DrawSizeGrip(const Palette& palette)
++{
++	BRect box(fResizeRect.left, fResizeRect.top, fFrame.right, fFrame.bottom);
++	if (!box.IsValid())
++		return;
++
++	const float u = fUnit;
++	fDrawingEngine->FillRect(box, palette.face);
++
++	// counted in units from the bottom right corner
++	int32 cells = int32((box.Width() + 1) / u);
++	for (int32 ridge = 0; ridge < 3; ridge++) {
++		for (int32 line = 0; line < 3; line++) {
++			int32 distance = 1 + ridge * 4 + line;
++			if (distance >= cells)
++				break;
++			const rgb_color& color = line == 2
++				? palette.highlight : palette.shadow;
++			for (int32 i = 0; i <= distance; i++) {
++				float x = box.right + 1 - (i + 1) * u;
++				float y = box.bottom + 1 - (distance - i + 1) * u;
++				fDrawingEngine->FillRect(BRect(x, y, x + u - 1, y + u - 1),
++					color);
++			}
++		}
++	}
++}
++
++
++void
++Win2kDecorator::_DrawTab(Decorator::Tab* tab, BRect invalid)
++{
++	BRect bar = _BarRect(tab);
++	if (!bar.IsValid() || !invalid.Intersects(bar))
++		return;
++
++	Palette palette;
++	_GetPalette(tab, palette);
++
++	BRect caption = _CaptionRect(tab);
++	if (tab != fTabList.FirstItem()) {
++		// the face between the slices of a stacked bar
++		fDrawingEngine->FillRect(BRect(bar.left, caption.top,
++			caption.left - 1, caption.bottom), palette.face);
++	}
++	_FillCaption(tab, caption, palette);
++	_DrawTitle(tab, bar);
++	_DrawButtons(tab, bar);
++}
++
++
++/*!	Fills \a rect with its part of the tab's caption: the tab colour at the
++	caption's left shading to the gradient colour at its right.
++*/
++void
++Win2kDecorator::_FillCaption(Decorator::Tab* tab, BRect rect,
++	const Palette& palette)
++{
++	BRect caption = _CaptionRect(tab);
++	rect = rect & caption;
++	if (!rect.IsValid())
++		return;
++
++	if (palette.captionStart == palette.captionEnd) {
++		fDrawingEngine->FillRect(rect, palette.captionStart);
++		return;
++	}
++
++	BGradientLinear gradient;
++	gradient.SetStart(caption.LeftTop());
++	gradient.SetEnd(caption.RightTop());
++	gradient.AddColor(palette.captionStart, 0);
++	gradient.AddColor(palette.captionEnd, 255);
++	fDrawingEngine->FillRect(rect, gradient);
++}
++
++
++void
++Win2kDecorator::_DrawTitle(Decorator::Tab* tab, BRect rect)
++{
++	BRect title = _TitleRect(tab);
++	if (!title.IsValid())
++		return;
++
++	Palette palette;
++	_GetPalette(tab, palette);
++
++	// Its own ground first, a unit wider, so drawing it again does not
++	// thicken it.
++	_FillCaption(tab, title.InsetByCopy(-fUnit, 0), palette);
++
++	font_height fontHeight;
++	fDrawState.Font().GetHeight(fontHeight);
++	float baseline = title.bottom - ceilf(fontHeight.descent);
++
++	fDrawingEngine->SetDrawingMode(B_OP_OVER);
++	fDrawingEngine->SetHighColor(palette.text);
++	fDrawingEngine->SetFont(fDrawState.Font());
++	fDrawingEngine->DrawString(tab->truncatedTitle.String(),
++		tab->truncatedTitleLength, BPoint(title.left, baseline));
++	fDrawingEngine->SetDrawingMode(B_OP_COPY);
++}
++
++
++void
++Win2kDecorator::_DrawButtons(Decorator::Tab* tab, const BRect& invalid)
++{
++	if (tab->closeRect.IsValid() && invalid.Intersects(tab->closeRect))
++		_DrawClose(tab, false, tab->closeRect);
++	if (tab->zoomRect.IsValid() && invalid.Intersects(tab->zoomRect))
++		_DrawZoom(tab, false, tab->zoomRect);
++	if (tab->minimizeRect.IsValid() && invalid.Intersects(tab->minimizeRect))
++		_DrawMinimize(tab, false, tab->minimizeRect);
++}
++
++
++void
++Win2kDecorator::_DrawClose(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawButton(tab, direct, rect, BUTTON_CLOSE, tab->closePressed);
++}
++
++
++void
++Win2kDecorator::_DrawZoom(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawButton(tab, direct, rect, BUTTON_ZOOM, tab->zoomPressed);
++}
++
++
++void
++Win2kDecorator::_DrawMinimize(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawButton(tab, direct, rect, BUTTON_MINIMIZE, tab->minimizePressed);
++}
++
++
++/*!	A caption button: the face in a raised edge, white and dark shadow
++	outside, light and shadow inside, and its sign in black. Pressed, the
++	edge sinks and the sign moves a unit down and right.
++*/
++void
++Win2kDecorator::_DrawButton(Decorator::Tab* tab, bool direct, BRect rect,
++	Button button, bool pressed)
++{
++	if (!rect.IsValid())
++		return;
++
++	// Pressed feedback is drawn straight to the front buffer; the rest of
++	// the time the window's own update copies it, as DefaultDecorator does.
++	bool copyToFrontEnabled = fDrawingEngine->CopyToFrontEnabled();
++	fDrawingEngine->SetCopyToFrontEnabled(direct);
++
++	Palette palette;
++	_GetPalette(tab, palette);
++	const float u = fUnit;
++
++	fDrawingEngine->FillRect(rect, palette.face);
++	if (pressed) {
++		_Edge(rect, palette.darkShadow, palette.highlight);
++		_Edge(rect.InsetByCopy(u, u), palette.shadow, palette.light);
++	} else {
++		_Edge(rect, palette.highlight, palette.darkShadow);
++		_Edge(rect.InsetByCopy(u, u), palette.light, palette.shadow);
++	}
++
++	// the sign, in whole units, centred on the face inside the edge; the
++	// minimize bar sits a unit above the face's bottom
++	BRect face = rect.InsetByCopy(2 * u, 2 * u);
++	int32 faceColumns = int32((face.Width() + 1) / u);
++	int32 faceRows = int32((face.Height() + 1) / u);
++	bool small = faceRows < 9;
++	const char** rows;
++	int32 count;
++	switch (button) {
++		case BUTTON_CLOSE:
++			if (small) {
++				rows = kSmallCloseSign;
++				count = sizeof(kSmallCloseSign) / sizeof(kSmallCloseSign[0]);
++			} else {
++				rows = kCloseSign;
++				count = sizeof(kCloseSign) / sizeof(kCloseSign[0]);
++			}
++			break;
++		case BUTTON_ZOOM:
++			if (small) {
++				rows = kSmallZoomSign;
++				count = sizeof(kSmallZoomSign) / sizeof(kSmallZoomSign[0]);
++			} else {
++				rows = kZoomSign;
++				count = sizeof(kZoomSign) / sizeof(kZoomSign[0]);
++			}
++			break;
++		case BUTTON_MINIMIZE:
++		default:
++			if (small) {
++				rows = kSmallMinimizeSign;
++				count = sizeof(kSmallMinimizeSign)
++					/ sizeof(kSmallMinimizeSign[0]);
++			} else {
++				rows = kMinimizeSign;
++				count = sizeof(kMinimizeSign) / sizeof(kMinimizeSign[0]);
++			}
++			break;
++	}
++
++	// a bigger face -- a bigger system font -- gets bigger cells
++	float cell = u * max_c(1, faceRows / (small ? 7 : 10));
++	int32 columns = strlen(rows[0]);
++	float x = face.left
++		+ floorf((faceColumns * u - columns * cell) / (2 * u)) * u;
++	float y = button == BUTTON_MINIMIZE
++		? face.bottom + 1 - u - count * cell
++		: face.top + floorf((faceRows * u - count * cell) / (2 * u)) * u;
++	if (pressed) {
++		x += u;
++		y += u;
++	}
++
++	for (int32 row = 0; row < count; row++) {
++		for (int32 column = 0; column < columns; column++) {
++			if (rows[row][column] != '#')
++				continue;
++			float left = x + column * cell;
++			float top = y + row * cell;
++			fDrawingEngine->FillRect(BRect(left, top, left + cell - 1,
++				top + cell - 1), palette.glyph);
++		}
++	}
++
++	fDrawingEngine->SetCopyToFrontEnabled(copyToFrontEnabled);
++}
++
++
++// #pragma mark - state
++
++
++void
++Win2kDecorator::_SetTitle(Decorator::Tab* tab, const char* string,
++	BRegion* updateRegion)
++{
++	_DoLayout();
++	_DoOutlineLayout();
++	if (updateRegion != NULL && fTitleBarRect.IsValid())
++		updateRegion->Include(fTitleBarRect | fTopBorder);
++}
++
++
++void
++Win2kDecorator::_SetFocus(Decorator::Tab* tab)
++{
++	tab->buttonFocus = IsFocus(tab)
++		|| ((tab->look == B_FLOATING_WINDOW_LOOK
++			|| tab->look == kLeftTitledWindowLook)
++			&& (tab->flags & B_AVOID_FOCUS) != 0);
++
++	// The top tab of a stacked bar is the one with every button.
++	if (fTabList.CountItems() > 1) {
++		for (int32 i = 0; i < fTabList.CountItems(); i++) {
++			Decorator::Tab* other = fTabList.ItemAt(i);
++			_LayoutButtons(other, other == fTopTab);
++		}
++	}
++}
++
++
++bool
++Win2kDecorator::_SetTabLocation(Decorator::Tab* tab, float location,
++	bool isShifting, BRegion* updateRegion)
++{
++	// A bar has no sliding tab.
++	return false;
++}
++
++
++bool
++Win2kDecorator::_MoveTab(int32 from, int32 to, bool isMoving,
++	BRegion* updateRegion)
++{
++	// Slices keep their order.
++	return false;
++}
++
++
++void
++Win2kDecorator::_MoveBy(BPoint offset)
++{
++	TabDecorator::_MoveBy(offset);
++	for (int32 i = 0; i < fTabList.CountItems(); i++)
++		fTabList.ItemAt(i)->minimizeRect.OffsetBy(offset);
++}
++
++
++void
++Win2kDecorator::_ResizeBy(BPoint offset, BRegion* dirty)
++{
++	// What repaints: the right and bottom strips where they were and where
++	// they go, the size grip likewise, the parts of the left strip the
++	// window grows into (it is never repainted otherwise), and the bar with
++	// the top border when the width changes, since the caption's shading and
++	// the buttons move. What the window shrinks away from is the desktop's
++	// to repaint.
++	if (dirty != NULL) {
++		dirty->Include(fRightBorder);
++		dirty->Include(fBottomBorder);
++		if (fResizeRect.IsValid())
++			dirty->Include(fResizeRect);
++	}
++
++	fFrame.right += offset.x;
++	fFrame.bottom += offset.y;
++	_DoLayout();
++	_DoOutlineLayout();
++
++	if (dirty != NULL) {
++		dirty->Include(fRightBorder);
++		dirty->Include(fBottomBorder);
++		if (fResizeRect.IsValid())
++			dirty->Include(fResizeRect);
++		if (offset.y > 0.0) {
++			dirty->Include(BRect(fLeftBorder.left,
++				fLeftBorder.bottom - offset.y, fLeftBorder.right,
++				fLeftBorder.bottom));
++		}
++		if (offset.x != 0.0) {
++			dirty->Include(fTopBorder);
++			if (fTitleBarRect.IsValid())
++				dirty->Include(fTitleBarRect);
++		}
++	}
++}
++
++
++void
++Win2kDecorator::_GetFootprint(BRegion* region)
++{
++	if (region == NULL)
++		return;
++
++	region->MakeEmpty();
++	if (fTopTab->look == B_NO_BORDER_WINDOW_LOOK || fBorderWidth <= 0)
++		return;
++
++	region->Set(fBorderRect);
++	region->Exclude(fFrame);
++
++	if (fTopTab->look == B_DOCUMENT_WINDOW_LOOK
++		&& (fTopTab->flags & B_NOT_RESIZABLE) == 0) {
++		// the size grip reaches into the client area
++		float knob = fResizeKnobSize - fBorderWidth;
++		region->Include(BRect(fFrame.right - knob, fFrame.bottom - knob,
++			fFrame.right, fFrame.bottom));
++	}
++}
++
++
++// #pragma mark - the add-on
++
++
++class Win2kDecorAddOn : public DecorAddOn {
++public:
++								Win2kDecorAddOn(image_id id, const char* name)
++									:
++									DecorAddOn(id, name)
++								{
++								}
++
++protected:
++	virtual	Decorator*			_AllocateDecorator(DesktopSettings& settings,
++									BRect rect, Desktop* desktop)
++								{
++									return new (std::nothrow) Win2kDecorator(
++										settings, rect, desktop);
++								}
++};
++
++
++extern "C" DecorAddOn*
++instantiate_decor_addon(image_id id, const char* name)
++{
++	return new (std::nothrow) Win2kDecorAddOn(id, name);
++}
+diff --git a/src/add-ons/decorators/Win2kDecorator/Win2kDecorator.h b/src/add-ons/decorators/Win2kDecorator/Win2kDecorator.h
+new file mode 100644
+index 0000000000..e08dd8a344
+--- /dev/null
++++ b/src/add-ons/decorators/Win2kDecorator/Win2kDecorator.h
+@@ -0,0 +1,124 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ *
++ * Win2k: a window frame after the Windows 2000 classic appearance. A raised
++ * grey frame, and inside it a caption shaded from one colour to another with
++ * the title at its left in white and three raised buttons at its right --
++ * minimize, maximize (zoom) and, set apart, close -- that work on a window
++ * in the background too, as they did there. Document windows get a size
++ * grip in the corner the scroll bars leave.
++ *
++ * Pixel art in whole units, a unit being one pixel at the 12-point system
++ * font and two or more above it, as Platinum is. The colours come from the
++ * system: the frame and buttons are the panel colour (Windows' "3D objects"),
++ * the caption runs from the tab colour to the border colour -- the colour
++ * Windows called "gradient of the title bar" -- for the active and the
++ * inactive state, and the title is the tab text colour. A theme sets all of
++ * them; with a tab and border of one colour the caption is flat.
++ *
++ * The layout follows PlatinumDecorator: a bar over the frame on SATDecorator,
++ * stacked windows as slices, and the top border drawn as the bar's lower
++ * part, so every border stays as wide as BorderWidth() says.
++ */
++#ifndef WIN2K_DECORATOR_H
++#define WIN2K_DECORATOR_H
++
++
++#include "DecorManager.h"
++#include "SATDecorator.h"
++
++
++class Win2kDecorator : public SATDecorator {
++public:
++								Win2kDecorator(DesktopSettings& settings,
++									BRect frame, Desktop* desktop);
++	virtual						~Win2kDecorator();
++
++	virtual	Region				RegionAt(BPoint where, int32& tab) const;
++	virtual	void				ExtendDirtyRegion(Region region,
++									BRegion& dirty);
++	virtual	void				UpdateColors(DesktopSettings& settings);
++
++	virtual	void				Draw(BRect updateRect);
++	virtual	void				Draw();
++
++protected:
++	virtual	void				_DoLayout();
++
++	virtual	void				_DrawFrame(BRect invalid);
++	virtual	void				_DrawTab(Decorator::Tab* tab, BRect invalid);
++	virtual	void				_DrawTitle(Decorator::Tab* tab, BRect rect);
++	virtual	void				_DrawButtons(Decorator::Tab* tab,
++									const BRect& invalid);
++	virtual	void				_DrawClose(Decorator::Tab* tab, bool direct,
++									BRect rect);
++	virtual	void				_DrawZoom(Decorator::Tab* tab, bool direct,
++									BRect rect);
++	virtual	void				_DrawMinimize(Decorator::Tab* tab, bool direct,
++									BRect rect);
++
++	virtual	void				_SetTitle(Decorator::Tab* tab,
++									const char* string,
++									BRegion* updateRegion = NULL);
++	virtual	void				_SetFocus(Decorator::Tab* tab);
++	virtual	bool				_SetTabLocation(Decorator::Tab* tab,
++									float location, bool isShifting,
++									BRegion* updateRegion = NULL);
++	virtual	bool				_MoveTab(int32 from, int32 to, bool isMoving,
++									BRegion* updateRegion = NULL);
++
++	virtual	void				_MoveBy(BPoint offset);
++	virtual	void				_ResizeBy(BPoint offset, BRegion* dirty);
++
++	virtual	void				_GetFootprint(BRegion* region);
++
++private:
++			enum Button {
++				BUTTON_CLOSE,
++				BUTTON_ZOOM,
++				BUTTON_MINIMIZE
++			};
++
++			struct Palette {
++				rgb_color		face;
++				rgb_color		light;			// "3D light": the face
++				rgb_color		highlight;		// "3D highlight": white
++				rgb_color		shadow;
++				rgb_color		darkShadow;
++				rgb_color		glyph;
++				rgb_color		captionStart;
++				rgb_color		captionEnd;
++				rgb_color		text;
++			};
++
++			void				_LayoutBar();
++			void				_LayoutButtons(Decorator::Tab* tab,
++									bool allButtons);
++			BRect				_BarRect(Decorator::Tab* tab) const;
++			BRect				_CaptionRect(Decorator::Tab* tab) const;
++			BRect				_TitleRect(Decorator::Tab* tab);
++
++			void				_GetPalette(Decorator::Tab* tab,
++									Palette& palette);
++			rgb_color			_SideFace(Component component, Region region,
++									const rgb_color& plain);
++
++			void				_Edge(BRect rect, const rgb_color& topLeft,
++									const rgb_color& bottomRight);
++			void				_FillCaption(Decorator::Tab* tab, BRect rect,
++									const Palette& palette);
++			void				_DrawButton(Decorator::Tab* tab, bool direct,
++									BRect rect, Button button, bool pressed);
++			void				_DrawSizeGrip(const Palette& palette);
++
++			rgb_color			fFaceColor;
++			float				fUnit;
++			bool				fSmall;			// a floating window's caption
++			float				fCaption;		// the caption's height
++			float				fButtonWidth;
++			float				fButtonHeight;
++};
++
++
++#endif	// WIN2K_DECORATOR_H
+diff --git a/src/add-ons/decorators/Win2kDecorator/Win2kDecorator.rdef b/src/add-ons/decorators/Win2kDecorator/Win2kDecorator.rdef
+new file mode 100644
+index 0000000000..8f2121afa1
+--- /dev/null
++++ b/src/add-ons/decorators/Win2kDecorator/Win2kDecorator.rdef
+@@ -0,0 +1,15 @@
++resource("be:decor:info") message('deco') {
++	"name"				= "Win2k",
++	"authors"			= "The Prose project",
++	"short_descr"		= "A shaded caption and a raised grey frame, after Windows 2000",
++	"long_descr"		= "A raised grey frame; a caption shading from the tab "
++		"colour to the border colour, the title at its left, minimize, "
++		"maximize and close buttons at its right, which work on a window in "
++		"the background too; a size grip on document windows. Drawn in whole "
++		"pixels that grow with the system font; the frame is the panel "
++		"colour, so a theme sets every part.",
++	"lic_url"			= "https://opensource.org/license/mit",
++	"lic_name"			= "MIT",
++	"support_url"		= "https://github.com/albanread/Prose",
++	float "version"		= 1.0
++};
