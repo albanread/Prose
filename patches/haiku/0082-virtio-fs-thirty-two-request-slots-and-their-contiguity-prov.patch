@@ -1,0 +1,55 @@
+From 39a08dd670654603dfa981fcf68ccd19ecf9b2cf Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 13:26:57 +0100
+Subject: [PATCH] virtio_fs: thirty-two request slots, and their contiguity
+ proven
+
+Eight slots meant eight FUSE requests in flight at most -- a Tracker
+copy of a folder is a create, data, attributes and times for every file
+at once, and each of those is several requests, so a burst of them
+queued behind one another. Thirty-two cost 4.25 MiB of contiguous
+memory, which the machine has.
+
+The slot area's physical layout was derived from the first page's
+address alone; B_CONTIGUOUS promises one physical run, and asking
+get_memory_map() for the whole area in one entry now proves it before
+any request is ever built from those addresses (a second run would
+return B_BUFFER_OVERFLOW instead of silent DMA corruption).
+
+Prose-Patch: 0082-virtio-fs-thirty-two-request-slots-and-their-contiguity-prov.patch d632e611483d255b31147c823e3bbf2c4a516edc08d5e0e1d518c93f40b208ca
+---
+ .../drivers/disk/virtual/virtio_fs/virtio_fs.cpp     | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp b/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp
+index b866173cab..3081719270 100644
+--- a/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp
++++ b/src/add-ons/kernel/drivers/disk/virtual/virtio_fs/virtio_fs.cpp
+@@ -48,8 +48,11 @@
+ 
+ // Requests in flight. Each owns a slot: a page for the device-readable header
+ // and arguments, a page for the device-writable header and reply, and one data
+-// buffer, used in whichever direction the request moves its payload.
+-#define SLOT_COUNT			8
++// buffer, used in whichever direction the request moves its payload. Eight
++// serialized a burst (a Tracker copy of a folder is create, data, attributes,
++// times for every file at once); thirty-two cost 4.25 MiB of the many the
++// machine has.
++#define SLOT_COUNT			32
+ #define SLOT_IN_SIZE		B_PAGE_SIZE
+ #define SLOT_OUT_SIZE		B_PAGE_SIZE
+ #define SLOT_DATA_SIZE		(128 * 1024)
+@@ -424,9 +427,12 @@ virtio_fs_init_driver(device_node* node, void** _cookie)
+ 		virtio_fs_teardown(info);
+ 		return status;
+ 	}
++	// one entry for the whole area proves it is one physical run before any
++	// request is ever built from the addresses below
+ 	physical_entry physical;
+-	status = get_memory_map(address, B_PAGE_SIZE, &physical, 1);
++	status = get_memory_map(address, size, &physical, 1);
+ 	if (status != B_OK) {
++		ERROR("the slot area is not physically contiguous: %s\n", strerror(status));
+ 		virtio_fs_teardown(info);
+ 		return status;
+ 	}

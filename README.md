@@ -321,6 +321,11 @@ table there also records why each one exists.
 | 0076 | Sisong 2.16-3: a new C++ file, and compiling one file on its own |
 | 0077 | A compiler on the machine: clang and lld, Haiku's headers and link libraries, `make` and `mkdepend` |
 | 0078 | Six short programs in `/boot/system/data/prose-examples`, to read and build |
+| 0079 | Sisong 2.16-4: clang++ is its C++ compiler now, and `File ▸ Examples` copies one in |
+| 0080 | ffmpeg 6.1.6 in the repository list and the profile: the Media Kit can decode |
+| 0081 | HostFS: the host's changes reach the guest — watched directories polled, node monitors told |
+| 0082 | virtio-fs: thirty-two request slots, their contiguity proven |
+| 0083 | hostfs: the unused open-flag conversion removed |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

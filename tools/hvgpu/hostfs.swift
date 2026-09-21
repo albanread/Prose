@@ -73,6 +73,10 @@ func makeHostFSDevice() throws -> VZVirtioFileSystemDeviceConfiguration? {
         }
     }
 
+    for share in shares {
+        probeShareAccess(share)
+    }
+
     let device = VZVirtioFileSystemDeviceConfiguration(tag: tag)
     if shares.count == 1 {
         device.share = VZSingleDirectoryShare(
@@ -96,4 +100,45 @@ func makeHostFSDevice() throws -> VZVirtioFileSystemDeviceConfiguration? {
         log("HostFS: \(share.url.path) \(share.readOnly ? "read-only" : "read-write"), tag \(tag)")
     }
     return device
+}
+
+
+/// macOS can keep the app out of the folder it is asked to share: ~/Documents
+/// and friends are the user's until they say otherwise, and a denied app gets
+/// EPERM on every operation -- the volume mounts and every file in it fails.
+/// That used to surface as nothing; now it is said out loud, once, with the
+/// way out. A run that named its --share only logs: scripts read logs.
+func probeShareAccess(_ share: HostShare) {
+    do {
+        _ = try FileManager.default.contentsOfDirectory(atPath: share.url.path)
+        return
+    } catch let error as NSError where error.code == NSFileReadNoPermissionError {
+    } catch {
+        // unreadable for another reason (an unreadable disk, say): the mount
+        // itself will say so where the user can see it
+        return
+    }
+
+    log("hostfs: macOS denies this app access to \(share.url.path) -- the guest "
+        + "will see the volume but no file in it will open. Allow access in "
+        + "System Settings ▸ Privacy & Security ▸ Files & Folders, or share "
+        + "another folder (Settings).")
+    guard usingInstalledMachine else { return }
+    let saidKey = "prose.saidSharePermission"
+    guard !UserDefaults.standard.bool(forKey: saidKey) else { return }
+    UserDefaults.standard.set(true, forKey: saidKey)
+
+    let alert = NSAlert()
+    alert.messageText = "Prose cannot read \(share.url.path)"
+    alert.informativeText = "macOS keeps the Documents folder private. The machine "
+        + "will see the shared volume, but no file in it will open, and nothing "
+        + "copied into it will arrive.\n\nAllow access in Privacy & Security ▸ "
+        + "Files & Folders, or share a folder macOS does not guard."
+    alert.addButton(withTitle: "Open Privacy Settings")
+    alert.addButton(withTitle: "Later")
+    if alert.runModal() == .alertFirstButtonReturn {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.settings.preference.privacy?Privacy_AllFiles") {
+            NSWorkspace.shared.open(url)
+        }
+    }
 }

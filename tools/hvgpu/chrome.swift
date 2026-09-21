@@ -521,6 +521,7 @@ final class WindowChrome: NSObject {
     private var guestIP: String?
     private var ipCheckedAt = 0
     var statusBarBeforeFullScreen = true
+    private var dropReceiver: DropReceiver?
 
     /// Show the status bar? The user's last choice; --no-statusbar for this run only.
     static var statusBarInitiallyShown: Bool {
@@ -556,6 +557,15 @@ final class WindowChrome: NSObject {
         bar.midi.isHidden = args.contains("--no-midi")
         bar.network.isHidden = args.contains("--no-net")
         bar.disk.toolTip = "Disk: \(diskURL.lastPathComponent)"
+
+        // files dropped on the window go into the shared folder (drop.swift)
+        let drop = DropReceiver { [unowned controller] line in
+            controller.chrome?.content.statusBar.show(message: line)
+            log(line)
+        }
+        drop.flash = { [unowned self] in content.flash() }
+        content.registerForDraggedTypes([.fileURL])
+        dropReceiver = drop
 
         let t = Timer(timeInterval: 0.1, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
         RunLoop.main.add(t, forMode: .common)       // keeps running while menus are open or the window resizes

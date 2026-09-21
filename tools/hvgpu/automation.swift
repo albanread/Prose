@@ -132,7 +132,7 @@ final class Automation {
     static let commands: Set<String> = [
         "state", "start", "shut-down", "shutdown", "restart", "force-stop", "run", "info", "ping",
         "pause", "resume", "type", "key", "click", "move", "capture",
-        "display-size", "presenter", "full-screen", "wait", "stats", "theme",
+        "display-size", "presenter", "full-screen", "wait", "stats", "theme", "share",
     ]
 
     /// A --script step as a command line for the core, or nil when it is one of
@@ -330,6 +330,39 @@ final class Automation {
                 return .done(values, reply.status == 0 ? "" : "exit \(reply.status)")
             }
             return nil
+
+        case "share":
+            // hostfs.swift: which Mac folder the machine mounts as HostFS. A
+            // machine's configuration is fixed when it is made, so a change
+            // asks for a new one -- bootVM() sees to that at the next start.
+            guard usingInstalledMachine else {
+                return .failed(.failed, "a run given a disk shares what --share asked for")
+            }
+            if let folder = args["folder"], !folder.isEmpty {
+                let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath)
+                    .standardizedFileURL
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                    isDirectory.boolValue else {
+                    return .failed(.badArgument, "not a folder: \(url.path)")
+                }
+                Settings.set(Settings.shareFolderKey, url.path)
+            }
+            if let flag = args["read-only"] ?? args["readonly"] {
+                Settings.set(Settings.shareReadOnlyKey,
+                    ["yes", "1", "true"].contains(flag.lowercased()))
+            }
+            if args["enabled"].map({ $0 == "no" || $0 == "0" }) == true {
+                Settings.set(Settings.shareEnabledKey, false)
+            } else {
+                Settings.set(Settings.shareEnabledKey, true)
+            }
+            let running = c.vm?.state == .running
+            return .done(["folder": Settings.shareFolder.path,
+                          "read-only": Settings.shareReadOnly ? "yes" : "no",
+                          "enabled": Settings.shareEnabled ? "yes" : "no",
+                          "applies": running ? "at next start" : "when the machine starts"],
+                running ? "the running machine keeps its share until it starts again" : "")
 
         case "theme":
             // themes.swift: the same path View ▸ Theme takes

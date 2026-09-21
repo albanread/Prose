@@ -1,0 +1,72 @@
+From eded51a9a44015cce46e0eccc95b11987d98cbfa Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 13:27:06 +0100
+Subject: [PATCH] hostfs: remove the unused open-flag conversion
+
+haiku_to_linux_open_flags() and the Linux O_* macros only it used have
+been dead since the first version: hostfs opens host files itself, with
+its own constants, and never forwards a caller's open mode. Nothing
+declared, included or called it.
+
+Prose-Patch: 0083-hostfs-remove-the-unused-open-flag-conversion.patch d918820e2485acb553af46fb08c6abc4f196acc1ff2904ecc8238c964f62ab44
+---
+ .../kernel/file_systems/hostfs/Volume.cpp     | 33 -------------------
+ .../kernel/file_systems/hostfs/hostfs.h       |  1 -
+ 2 files changed, 34 deletions(-)
+
+diff --git a/src/add-ons/kernel/file_systems/hostfs/Volume.cpp b/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
+index e688a1af26..fb0a70f99b 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
++++ b/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
+@@ -77,39 +77,6 @@ linux_to_haiku_error(int32 error, uint32 opcode)
+ }
+ 
+ 
+-// open(2) flags as Linux (and so FUSE) numbers them on arm64 and x86
+-#define LINUX_O_WRONLY		00000001
+-#define LINUX_O_RDWR		00000002
+-#define LINUX_O_CREAT		00000100
+-#define LINUX_O_EXCL		00000200
+-#define LINUX_O_TRUNC		00001000
+-#define LINUX_O_APPEND		00002000
+-
+-
+-uint32
+-haiku_to_linux_open_flags(int openMode)
+-{
+-	uint32 flags = 0;
+-	switch (openMode & O_RWMASK) {
+-		case O_WRONLY:
+-			flags = LINUX_O_WRONLY;
+-			break;
+-		case O_RDWR:
+-			flags = LINUX_O_RDWR;
+-			break;
+-	}
+-	if ((openMode & O_CREAT) != 0)
+-		flags |= LINUX_O_CREAT;
+-	if ((openMode & O_EXCL) != 0)
+-		flags |= LINUX_O_EXCL;
+-	if ((openMode & O_TRUNC) != 0)
+-		flags |= LINUX_O_TRUNC;
+-	if ((openMode & O_APPEND) != 0)
+-		flags |= LINUX_O_APPEND;
+-	return flags;
+-}
+-
+-
+ //	#pragma mark - Node
+ 
+ 
+diff --git a/src/add-ons/kernel/file_systems/hostfs/hostfs.h b/src/add-ons/kernel/file_systems/hostfs/hostfs.h
+index 915d884f98..7b8fcb1d5b 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/hostfs.h
++++ b/src/add-ons/kernel/file_systems/hostfs/hostfs.h
+@@ -262,7 +262,6 @@ private:
+ 
+ 
+ status_t	linux_to_haiku_error(int32 error, uint32 opcode);
+-uint32		haiku_to_linux_open_flags(int openMode);
+ 
+ // attributes.cpp
+ bool		hostfs_probe_xattrs(Volume* volume);

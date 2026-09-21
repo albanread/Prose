@@ -1,0 +1,545 @@
+From 5a14c426e914927cb368c9b554e0aafd0b02fb1d Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 13:26:44 +0100
+Subject: [PATCH] HostFS: the host's changes reach the guest
+
+Nothing pushes them: the virtio-fs device grants no notification queue,
+so a file the Mac drops into the shared folder never appeared in Tracker,
+and one it took away never disappeared -- the guest saw the share as it
+was when it last read it, and Tracker, which trusts node monitors, never
+re-read.
+
+A low-priority thread on the volume now asks, every two seconds, every
+directory the VFS holds a vnode for what it contains now. A directory
+whose modification time or size moved is listed again (READDIRPLUS where
+the host grants it), and what differs from the node table is passed to
+the node monitors: new names are looked up and announced
+(notify_entry_created, as idle nodes so their next lookup finds them),
+names gone are announced (notify_entry_removed; the table learns on the
+next lookup), and entries whose size or modification time moved are
+announced (notify_stat_changed), which also drops a file's cached pages
+through the existing staleness path. The listing's lookups for entries
+already in the table are forgotten at once, so the host counts no extra
+reference per pass.
+
+The first listing of a directory is the baseline, not the news: what it
+holds was there when the volume was mounted, and goes into the table
+without a word. A directory the VFS itself has read took its baseline
+then, in dir_fetch().
+
+The pass holds no lock while it talks to the host; the directories it
+asks and the table entries it diffs against are pinned (pending), and it
+stops between any two of them when the volume goes away. "nopoll" as a
+mount parameter turns it off; a failed spawn only logs (the old
+open-a-directory-to-see behaviour) and the mount still succeeds.
+
+Verified: private_workspace/hostfs-appear.sh -- the Mac drops, changes
+and removes files in the share while the guest watches the volume with
+node monitors, and private_workspace/hostfs-test.sh still passes.
+
+Prose-Patch: 0081-hostfs-the-host-s-changes-reach-the-guest.patch 28573c1d78ec9db00e03eb19f5afcbe261451722b63cb1b4a15e22e3761cf3e4
+---
+ .../kernel/file_systems/hostfs/Volume.cpp     |  89 +++++-
+ .../kernel/file_systems/hostfs/hostfs.h       |  33 ++-
+ .../file_systems/hostfs/kernel_interface.cpp  | 260 ++++++++++++++++++
+ 3 files changed, 375 insertions(+), 7 deletions(-)
+
+diff --git a/src/add-ons/kernel/file_systems/hostfs/Volume.cpp b/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
+index e59b4e6b3a..e688a1af26 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
++++ b/src/add-ons/kernel/file_systems/hostfs/Volume.cpp
+@@ -125,6 +125,7 @@ Node::Node(Volume* volume, uint64 nodeid, const fuse_attr& attr)
+ 	pending(0),
+ 	children(0),
+ 	published(false),
++	listed(false),
+ 	idle(false),
+ 	attr(attr),
+ 	attrTime(system_time()),
+@@ -170,7 +171,11 @@ Volume::Volume(fs_volume* fsVolume)
+ 	fMinor(0),
+ 	fInitFlags(0),
+ 	fMaxRead(B_PAGE_SIZE),
+-	fMaxWrite(B_PAGE_SIZE)
++	fMaxWrite(B_PAGE_SIZE),
++	fPollThread(-1),
++	fPollSem(-1),
++	fPollStop(1),
++	fPoll(true)
+ {
+ 	memset(&fTransport, 0, sizeof(fTransport));
+ 	mutex_init(&fLock, "hostfs volume");
+@@ -181,6 +186,8 @@ Volume::Volume(fs_volume* fsVolume)
+ 
+ Volume::~Volume()
+ {
++	_StopPolling();
++
+ 	// whatever is left was never handed to the VFS (a failed mount)
+ 	Node* node = fNodes.Clear(true);
+ 	while (node != NULL) {
+@@ -279,6 +286,10 @@ Volume::Mount(const char* device, uint32 flags, const char* args)
+ 	// mount parameters say "noattr"
+ 	fXattrs = (args == NULL || strstr(args, "noattr") == NULL) && hostfs_probe_xattrs(this);
+ 
++	// nothing pushes the host's changes into the guest: unless the mount
++	// parameters say "nopoll", they are looked for instead
++	fPoll = args == NULL || strstr(args, "nopoll") == NULL;
++
+ 	status = publish_vnode(fFSVolume, FUSE_ROOT_ID, fRoot, &gHostFSVnodeOps, S_IFDIR, 0);
+ 	if (status != B_OK) {
+ 		fNodes.Remove(fRoot);
+@@ -286,6 +297,8 @@ Volume::Mount(const char* device, uint32 flags, const char* args)
+ 		fRoot = NULL;
+ 		return status;
+ 	}
++	if (fPoll)
++		_StartPolling();
+ 	return B_OK;
+ }
+ 
+@@ -293,6 +306,9 @@ Volume::Mount(const char* device, uint32 flags, const char* args)
+ void
+ Volume::Unmount()
+ {
++	// nothing asks the host any more while the volume comes down
++	_StopPolling();
++
+ 	// the VFS has put every vnode but the one publish_vnode() gave us
+ 	put_vnode(fFSVolume, FUSE_ROOT_ID);
+ 
+@@ -318,6 +334,77 @@ Volume::Unmount()
+ }
+ 
+ 
++//	#pragma mark - the host's changes
++
++
++/*!	Nothing pushes the host's changes to the guest (the device grants no
++	notification queue), so a low-priority thread looks for them instead:
++	every HOSTFS_POLL_INTERVAL it asks the directories the VFS holds what
++	they contain now, and what differs from the node table is passed to the
++	node monitors -- so a file the Mac drops into the share appears in
++	Tracker, and one it takes away disappears. The pass itself is
++	Volume::_PollPass(), in kernel_interface.cpp.
++*/
++void
++Volume::_StartPolling()
++{
++	fPollSem = create_sem(0, "hostfs host changes");
++	if (fPollSem >= 0) {
++		atomic_set(&fPollStop, 0);
++		fPollThread = spawn_kernel_thread(_PollEntry, "hostfs host changes",
++			B_LOW_PRIORITY, this);
++	}
++	if (fPollSem < 0 || fPollThread < 0) {
++		INFORM("cannot watch the host for changes (%s); what changes there "
++			"is seen when a directory is opened\n",
++			strerror(fPollSem < 0 ? (status_t)fPollSem : (status_t)fPollThread));
++		if (fPollSem >= 0) {
++			delete_sem(fPollSem);
++			fPollSem = -1;
++		}
++		fPollThread = -1;
++		return;
++	}
++	resume_thread(fPollThread);
++}
++
++
++void
++Volume::_StopPolling()
++{
++	if (fPollThread < 0)
++		return;
++	atomic_set(&fPollStop, 1);
++	release_sem(fPollSem);
++	status_t result;
++	wait_for_thread(fPollThread, &result);
++	fPollThread = -1;
++	delete_sem(fPollSem);
++	fPollSem = -1;
++}
++
++
++/*static*/ status_t
++Volume::_PollEntry(void* cookie)
++{
++	return ((Volume*)cookie)->_PollThread();
++}
++
++
++status_t
++Volume::_PollThread()
++{
++	while (atomic_get(&fPollStop) == 0) {
++		acquire_sem_etc(fPollSem, 1, B_RELATIVE_TIMEOUT, HOSTFS_POLL_INTERVAL);
++		if (atomic_get(&fPollStop) != 0)
++			break;
++		_PollPass();
++	}
++	return B_OK;
++}
++
++
++
+ //	#pragma mark - requests
+ 
+ 
+diff --git a/src/add-ons/kernel/file_systems/hostfs/hostfs.h b/src/add-ons/kernel/file_systems/hostfs/hostfs.h
+index 4e2b491955..915d884f98 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/hostfs.h
++++ b/src/add-ons/kernel/file_systems/hostfs/hostfs.h
+@@ -57,6 +57,10 @@
+ // so that listing a directory does not mean forgetting every entry again
+ #define HOSTFS_MAX_IDLE_NODES	2048
+ 
++// how often the host is asked what changed in the directories the VFS holds
++// (nothing pushes the host's changes; see Volume::_PollThread)
++#define HOSTFS_POLL_INTERVAL	2000000
++
+ 
+ class Volume;
+ 
+@@ -87,6 +91,8 @@ struct Node {
+ 											// get_vnode()
+ 			int32				children;	// table nodes with this parent
+ 			bool				published;	// the VFS has a vnode for it
++			bool				listed;		// the table holds this directory's
++											// contents (a baseline, not the news)
+ 			bool				idle;		// in the idle list
+ 			DoublyLinkedListLink<Node> idleLink;
+ 
+@@ -204,6 +210,7 @@ public:
+ 			Node*				AcquireParent(Node* node);
+ 			void				Unpend(Node* node);
+ 			void				Publish(Node* node);
++			void				MarkListed(Node* node);
+ 			void				Unpublish(Node* node);
+ 			void				Moved(Node* node, uint64 parent,
+ 									const char* name);
+@@ -213,12 +220,21 @@ public:
+ 									size_t bufferSize);
+ 
+ private:
+-			Node*				_SetParent(Node* node, uint64 parent,
+-									const char* name);
+-			void				_Busy(Node* node);
+-			void				_Collect(Node* node, Node*& reclaimList);
+-			void				_TrimIdle(int32 keep, Node*& reclaimList);
+-			void				_Reclaim(Node* reclaimList);
++				Node*				_SetParent(Node* node, uint64 parent,
++										const char* name);
++				void				_Busy(Node* node);
++				void				_Collect(Node* node, Node*& reclaimList);
++				void				_TrimIdle(int32 keep, Node*& reclaimList);
++				void				_Reclaim(Node* reclaimList);
++
++			// the host's changes: a low-priority thread asks every watched
++			// directory what it contains now and tells the node monitors
++				void				_StartPolling();
++				void				_StopPolling();
++				static status_t		_PollEntry(void* cookie);
++				status_t			_PollThread();
++				void				_PollPass();
++				void				_PollDirectory(Node* dir);
+ 
+ private:
+ 			fs_volume*			fFSVolume;
+@@ -237,6 +253,11 @@ private:
+ 			size_t				fMaxWrite;
+ 			char				fName[B_FILE_NAME_LENGTH];
+ 			char				fDeviceName[B_PATH_NAME_LENGTH];
++
++			thread_id	fPollThread;
++			sem_id		fPollSem;
++			int32		fPollStop;
++			bool		fPoll;
+ };
+ 
+ 
+diff --git a/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp b/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp
+index 696b322196..15f69db5c4 100644
+--- a/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp
++++ b/src/add-ons/kernel/file_systems/hostfs/kernel_interface.cpp
+@@ -1504,6 +1504,17 @@ is_dot_or_dotdot(const fuse_dirent* entry)
+ 	entry comes with a lookup the host counts; they all go into the node table
+ 	right away (as idle nodes), so none is lost if the caller stops reading.
+ */
++/*!	What the VFS has listed is the table's baseline of that directory: the
++	poller will not announce it as new.
++*/
++void
++Volume::MarkListed(Node* node)
++{
++	MutexLocker locker(fLock);
++	node->listed = true;
++}
++
++
+ static status_t
+ dir_fetch(Volume* volume, Node* dir, DirCookie* cookie)
+ {
+@@ -1533,6 +1544,8 @@ dir_fetch(Volume* volume, Node* dir, DirCookie* cookie)
+ 	}
+ 
+ 	if (plus) {
++		// what this listing holds was there before the reader asked for it
++		volume->MarkListed(dir);
+ 		size_t position = 0;
+ 		for_each_dir_record(cookie->buffer, length, position, true,
+ 			[&](const fuse_dirent* entry, const fuse_entry_out* lookup, size_t) {
+@@ -1651,6 +1664,253 @@ hostfs_rewind_dir(fs_volume* _volume, fs_vnode* _node, void* _cookie)
+ }
+ 
+ 
++//	#pragma mark - the host's changes
++
++
++// how many directories one pass asks, and how many entries of one listing
++// are diffed
++#define POLL_MAX_DIRECTORIES	256
++#define POLL_MAX_ENTRIES		4096
++
++
++struct poll_entry {
++	char		name[B_FILE_NAME_LENGTH];
++	uint64		nodeid;		// 0: the listing carries none (plain READDIR)
++	fuse_attr	attr;
++	bool		haveAttr;	// READDIRPLUS: the listing knows the attributes
++};
++
++
++struct known_entry {
++	Node*		node;
++	char		name[B_FILE_NAME_LENGTH];
++	uint64		nodeid;
++};
++
++
++static int
++poll_entry_compare_name(const void* _a, const void* _b)
++{
++	return strcmp(((const poll_entry*)_a)->name, ((const poll_entry*)_b)->name);
++}
++
++
++static int
++known_entry_compare_name(const void* _a, const void* _b)
++{
++	return strcmp(((const known_entry*)_a)->name, ((const known_entry*)_b)->name);
++}
++
++
++/*!	One pass: every directory the VFS holds a vnode for (the root always,
++	among them) is pinned and asked by _PollDirectory() what it contains now.
++	Directories nothing watches are not asked: nobody would be told.
++*/
++void
++Volume::_PollPass()
++{
++	Node* directories[POLL_MAX_DIRECTORIES];
++	int32 count = 0;
++	{
++		MutexLocker locker(fLock);
++		NodeTable::Iterator iterator = fNodes.GetIterator();
++		while (Node* node = iterator.Next()) {
++			if (node->published && node->IsDirectory()) {
++				_Busy(node);
++				node->pending++;
++				directories[count++] = node;
++				if (count == POLL_MAX_DIRECTORIES)
++					break;
++			}
++		}
++	}
++	for (int32 i = 0; i < count; i++) {
++		if (atomic_get(&fPollStop) != 0)
++			break;
++		_PollDirectory(directories[i]);
++		Unpend(directories[i]);
++	}
++}
++
++
++/*!	One directory: if the host says it changed since it was last seen, read
++	the whole listing again and tell the node monitors what differs from the
++	node table -- names that are new, names that are gone, and entries whose
++	size or modification time moved. Names new to this directory enter the
++	table as idle nodes (their listing lookups are kept until they go idle
++	again); the lookups of entries already known are returned at once, so the
++	host does not count one more reference per pass.
++*/
++void
++Volume::_PollDirectory(Node* dir)
++{
++	fuse_attr attr;
++	if (GetAttr(dir->nodeid, &attr) != B_OK)
++		return;
++
++	bool changed;
++	{
++		MutexLocker locker(dir->lock);
++		changed = attr.mtime != dir->attr.mtime
++			|| attr.mtimensec != dir->attr.mtimensec
++			|| attr.size != dir->attr.size;
++		// a directory is never stale-cached; this only refreshes
++		node_take_attr(dir, attr);
++	}
++	if (!changed)
++		return;
++
++	uint64 fh;
++	if (Open(dir->nodeid, true, LINUX_O_RDONLY, &fh) != B_OK)
++		return;
++
++	poll_entry* entries = (poll_entry*)malloc(sizeof(poll_entry) * POLL_MAX_ENTRIES);
++	uint8* buffer = (uint8*)malloc(DIR_BUFFER_SIZE);
++	known_entry* known = (known_entry*)malloc(sizeof(known_entry) * POLL_MAX_ENTRIES);
++	if (entries == NULL || buffer == NULL || known == NULL) {
++		free(entries);
++		free(buffer);
++		free(known);
++		Release(dir->nodeid, true, fh);
++		return;
++	}
++	MemoryDeleter entriesDeleter(entries);
++	MemoryDeleter bufferDeleter(buffer);
++	MemoryDeleter knownDeleter(known);
++
++	const bool plus = (InitFlags() & FUSE_DO_READDIRPLUS) != 0;
++	int32 entryCount = 0;
++	uint64 offset = 0;
++	while (entryCount < POLL_MAX_ENTRIES) {
++		fuse_read_in in = {};
++		in.fh = fh;
++		in.offset = offset;
++		in.size = DIR_BUFFER_SIZE;
++		size_t length = 0;
++		if (Request(plus ? FUSE_READDIRPLUS : FUSE_READDIR, dir->nodeid, &in,
++				sizeof(in), NULL, NULL, NULL, 0, NULL, 0, buffer, DIR_BUFFER_SIZE,
++				&length) != B_OK)
++			break;
++		if (length == 0)
++			break;	// the end of the listing
++
++		size_t position = 0;
++		bool wellFormed = for_each_dir_record(buffer, length, position, plus,
++			[&](const fuse_dirent* entry, const fuse_entry_out* lookup, size_t) {
++				offset = entry->off;
++				if (is_dot_or_dotdot(entry) || !is_usable_name(entry)
++					|| entryCount >= POLL_MAX_ENTRIES) {
++					return true;
++				}
++				poll_entry& record = entries[entryCount++];
++				memcpy(record.name, entry->name, entry->namelen);
++				record.name[entry->namelen] = '\0';
++				record.nodeid = plus && lookup != NULL ? lookup->nodeid : 0;
++				record.haveAttr = plus && lookup != NULL;
++				if (record.haveAttr)
++					record.attr = lookup->attr;
++				return true;
++			});
++		if (!wellFormed)
++			break;
++	}
++	Release(dir->nodeid, true, fh);
++
++	// The first listing of a directory is the baseline, not the news: what it
++	// holds was there when the volume was mounted, so it goes into the table
++	// without a word. (A directory the VFS has read took its baseline then, in
++	// dir_fetch().)
++	bool firstListing;
++	{
++		MutexLocker locker(fLock);
++		firstListing = !dir->listed;
++		dir->listed = true;
++	}
++
++	// the children the table knows, pinned so they survive the diff
++	int32 knownCount = 0;
++	{
++		MutexLocker locker(fLock);
++		NodeTable::Iterator iterator = fNodes.GetIterator();
++		while (Node* node = iterator.Next()) {
++			if (node->parent == dir->nodeid && node->name != NULL
++				&& knownCount < POLL_MAX_ENTRIES) {
++				node->pending++;
++				known[knownCount].node = node;
++				strlcpy(known[knownCount].name, node->name, B_FILE_NAME_LENGTH);
++				known[knownCount].nodeid = node->nodeid;
++				knownCount++;
++			}
++		}
++	}
++	qsort(entries, entryCount, sizeof(poll_entry), poll_entry_compare_name);
++	qsort(known, knownCount, sizeof(known_entry), known_entry_compare_name);
++
++	for (int32 i = 0; i < entryCount; i++) {
++		poll_entry& record = entries[i];
++
++		known_entry knownKey;
++		strlcpy(knownKey.name, record.name, sizeof(knownKey.name));
++		known_entry* found = (known_entry*)bsearch(&knownKey, known, knownCount,
++			sizeof(known_entry), known_entry_compare_name);
++		if (found != NULL && record.nodeid != 0 && found->nodeid != record.nodeid) {
++			// the name belongs to another node now: the old one is gone
++			notify_entry_removed(ID(), dir->nodeid, found->name, found->nodeid);
++			found = NULL;
++		}
++		if (found != NULL) {
++			Node* node = found->node;
++			// the table holds its own lookups for this one
++			if (record.nodeid != 0)
++				Forget(record.nodeid, 1);
++			if (record.haveAttr) {
++				bool attrChanged;
++				{
++					MutexLocker locker(node->lock);
++					attrChanged = record.attr.mtime != node->attr.mtime
++						|| record.attr.mtimensec != node->attr.mtimensec
++						|| record.attr.size != node->attr.size;
++				}
++				if (attrChanged) {
++					node_update(this, node, record.attr);
++					notify_stat_changed(ID(), dir->nodeid, node->nodeid,
++						B_STAT_SIZE | B_STAT_MODIFICATION_TIME | B_STAT_CHANGE_TIME);
++				}
++			}
++			continue;
++		}
++
++		// new in this directory: look it up, keep it as an idle node, say so
++		fuse_entry_out entry;
++		if (record.nodeid != 0) {
++			memset(&entry, 0, sizeof(entry));
++			entry.nodeid = record.nodeid;
++			entry.attr = record.attr;
++		} else if (Lookup(dir->nodeid, record.name, &entry) != B_OK)
++			continue;	// gone again already
++		Node* created = AcquireEntry(entry, dir->nodeid, record.name);
++		if (created != NULL) {
++			if (!firstListing)
++				notify_entry_created(ID(), dir->nodeid, record.name, created->nodeid);
++			Unpend(created);
++		}
++	}
++
++	for (int32 k = 0; k < knownCount; k++) {
++		known_entry& child = known[k];
++		poll_entry entryKey;
++		strlcpy(entryKey.name, child.name, sizeof(entryKey.name));
++		poll_entry* found = (poll_entry*)bsearch(&entryKey, entries, entryCount,
++			sizeof(poll_entry), poll_entry_compare_name);
++		if (found == NULL)
++			notify_entry_removed(ID(), dir->nodeid, child.name, child.nodeid);
++			// the node stays in the table: its next lookup fails, and it goes
++			// idle and is forgotten like any other
++		Unpend(child.node);
++	}
++}
++
++
+ //	#pragma mark - module
+ 
+ 

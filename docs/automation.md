@@ -124,7 +124,7 @@ Host side, no guest cooperation needed:
 | `click at` {x, y}, `move to` {x, y}, `drag` | through the virtio tablet, in guest pixels |
 | `capture screen to` *file* | the display buffer, at the guest's real resolution |
 | `display size`, `presenter mode`, `full screen` | read and write |
-| `share` *folder* [`read only`] | add a HostFS share |
+| `share` [*folder*] [`read-only=yes|no`] [`enabled=no`] | the folder the machine mounts as HostFS: read it back, or choose it (a new share asks for a new machine, so a running one keeps its share until it starts again) |
 | `guest address` | the VM's address on the NAT bridge |
 | `theme` [*name*] | the machine's themes and which is current; with a name, apply it (`prosetheme` in the guest, docs/decorators.md) |
 
