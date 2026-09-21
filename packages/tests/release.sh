@@ -53,9 +53,9 @@ if grep -a -q -- '%c -g -Wall -o %e %f -lbe' /boot/system/apps/Sisong; then ok "
 if grep -a -q prose-examples /boot/system/apps/Sisong; then ok "Sisong has File > Examples"; else bad "Sisong has no Examples menu"; fi
 
 echo "== themes"
-themes=$(prosetheme --list 2>&1 | tr '\n' ',')
+themes=$(prosetheme --list 2>&1 | sed 's/^\* //' | tr '\n' ',')
 ok "themes: $themes"
-for t in "Prose Light" "Prose Dark" Classic Platinum Win2k NeXTSTEP; do
+for t in "Prose Light" "Prose Dark" Classic Platinum Win2k NeXTSTEP Manuscript "Manuscript Night" "High Contrast"; do
 	case ",$themes" in *",$t,"*|*",* $t,"*) ok "theme: $t" ;; *) bad "no theme $t" ;; esac
 done
 if prosetheme Platinum >/dev/null 2>&1 && [ "$(prosetheme --current)" = Platinum ]; then ok "Platinum applies"; else bad "Platinum did not apply"; fi
