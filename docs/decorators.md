@@ -242,11 +242,62 @@ setdecor ProseRightDecorator
 setdecor Default
 ```
 
-## 4. Themes
+## 4. Platinum
+
+Patch `0085`: `src/add-ons/decorators/PlatinumDecorator`, packaged into
+`haiku.hpkg` beside the other two, and `Platinum.theme` (section 5). A frame
+after the Mac OS 8.5 appearance of that name. Haiku's `MacDecorator` ("Mac OS
+Platinum") is a sketch of it on the tab model, a gradient square for each
+button, and no package lists it; this one follows the original's anatomy.
+
+| part | |
+|---|---|
+| frame | outline, a bevel lit at the top and left, two units of face, a bevel the other way round the content, an inner line: the frame stands proud of the window |
+| title bar | six grooves, a shaded line over a lit one, from the close box to the zoom box, stopping short of the centred title |
+| boxes | close at the left, plain; zoom (a smaller window) and collapse (a rolled-up one, which minimizes) at the right; each sunk in a well |
+| document windows | a grow box with ridges, in the corner the scroll bars leave |
+| background windows | flat: no bevels, grooves or boxes, and a click where a box was only brings the window forward |
+| floating windows | a thinner frame, smaller boxes, three grooves |
+| modal windows | the frame without a bar |
+| add-on file | `PlatinumDecorator` |
+
+![Platinum](images/decorator-platinum.png)
+
+- **Pixel art, in units.** Every line is a whole number of units, a unit
+  being `round(size / 12)` pixels (two at this machine's font), so bevels
+  and grooves stay crisp on a dense screen. The frame is 6 units (floating
+  3, modal 4), a box 13 with its well, the bar's inside at least 15.
+- **Greys from the tab colour.** The face is `COLOR_TAB`, the title
+  `COLOR_TAB_TEXT`; lit edges are white (a gentler tint on a dark face),
+  shaded ones `B_DARKEN_2_TINT` of the face, the outline black in front and
+  `B_DARKEN_4_TINT` behind. `window_tab = 221,221,221` gives the original's
+  greys, and a theme can tint it.
+- **The top border is the bar's lower part.** Stack and tile and
+  `BWindow::DecoratorFrame()` take every border to be `BorderWidth()` wide,
+  so the top border keeps that width and is drawn as part of the bar:
+  `Draw()` and `ExtendDirtyRegion()` repaint it with the bar, and a press on
+  it moves the window.
+- **The layout is ProseDecorator's**: a bar over the frame on
+  `SATDecorator`; stacked windows as slices, only the top one with zoom and
+  collapse.
+
+### Verified
+
+On a saved image, headless, with a test program that opens one window of
+each look (titled, document, floating, modal, bordered): the active and
+background bars, the floating and modal frames and the grow box draw as
+above; a click on a background window's close box brought the window
+forward and left it open; collapse minimized; zoom on a background window
+only activated it, and a second click zoomed it. StyledEdit, Tracker,
+Terminal and an alert drawn under the Platinum theme. Not exercised: a
+pressed box on screen (the automation's click presses and releases at
+once), a stacked bar, the resize highlight.
+
+## 5. Themes
 
 A theme is a wallpaper, a set of system colours and a decorator, chosen from
 the host's View ▸ Theme menu and applied to the guest through the portal.
-Patch `0072`; host side in `tools/hvgpu/themes.swift`.
+Patch `0073`; host side in `tools/hvgpu/themes.swift`.
 
 **In the guest: `prosetheme`.** A theme is `NAME.theme` in
 `/boot/system/data/prose/themes` (shipped, in the `prose_portal` package) or
@@ -262,9 +313,19 @@ window_tab = 236,236,236                    a colour, r,g,b
 The colour keys are the system's: `panel_background`, `panel_text`,
 `document_background`, `document_text`, `control_*`, `menu_*`, `list_*`,
 `link_*`, `tooltip_*`, `scroll_bar_thumb`, `status_bar`, `success`,
-`failure`, the six `window_*` colours, and `desktop` (which also decides
-whether Tracker draws the icons' labels light or dark). A key a theme leaves
-out keeps its current value, so a theme may be partial.
+`failure`, the six `window_*` colours, and `desktop`, which prosetheme also
+sets as every workspace's colour: `B_DESKTOP_COLOR` alone changes nothing on
+the screen (patch 0084). A key a theme leaves out keeps its current value, so
+a theme may be partial.
+
+**The icons' labels** are black or white, whichever stands out against what
+they stand on: the wallpaper's average colour, or the workspace's colour
+when there is no picture (Tracker, patch 0084), and prosetheme writes the
+wallpaper with Backgrounds' "Icon label outline" on. Tracker used to compare
+the workspace's colour with `B_DESKTOP_COLOR`, and so drew white labels on
+Prose Light's paper and, after a switch at run time, black ones on Prose
+Dark's ink. Measured on the four themes since: contrast 17.8:1 on paper,
+16.5:1 on ink, 5.3:1 on Platinum's periwinkle.
 
 | | |
 |---|---|
@@ -280,12 +341,14 @@ then `B_RESTORE_BACKGROUND_IMAGE` to Tracker) — and each of those persists
 it, so a theme applied once is the machine's state across restarts. The name
 is kept in `~/config/settings/prose/theme`.
 
-**Three ship.** *Prose Light*: the paper wallpaper, a light grey frame with
+**Four ship.** *Prose Light*: the paper wallpaper, a light grey frame with
 the round buttons at the left, the system's own colours otherwise. *Prose
 Dark*: the ink wallpaper, a charcoal frame, and Haiku's dark palette for
 panels, menus, documents and lists. *Classic*: the yellow tab and the default
-colours a new machine has. All three list every colour, so switching back
-restores everything.
+colours a new machine has. *Platinum* (patch 0085): the Platinum frame,
+platinum grey panels and menus, a lavender highlight and dark blue menu
+selections, on a plain periwinkle desktop with no picture. All four list
+every colour, so switching back restores everything.
 
 **On the host: View ▸ Theme.** The submenu is filled from `prosetheme --list`
 when the guest's portal daemon says hello (a couple of seconds into a boot),
@@ -295,5 +358,5 @@ attached to every machine now — the automation switch gates other
 applications, not the machine's own menus. The same path is the `theme`
 automation command (`docs/automation.md`), which is how it is tested.
 
-A fourth theme is a text file: drop `Mine.theme` in
+Another theme is a text file: drop `Mine.theme` in
 `~/config/settings/prose/themes` and it is in the menu at the next boot.

@@ -1,0 +1,1344 @@
+From ed1c4e7c9effa655a8b675f3374eec88beb17133 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 16:03:01 +0100
+Subject: [PATCH] Platinum: a window frame after Mac OS 8.5, and a theme with
+ it
+
+A new decorator. A bevelled grey frame inside a dark outline, the frame
+standing proud of the content with an inner line round it; a title bar
+grooved with fine lines from the close box to the zoom box, stopping
+short of the centred title; a plain square close box at the left, zoom
+and collapse boxes at the right, each sunk in a well (collapse
+minimizes); a grow box with ridges in a document window's corner. A
+window in the background goes flat and loses its grooves and boxes, as
+it did there, and a click where a box was only brings the window
+forward. Floating windows get a thinner frame and smaller boxes, modal
+ones the frame with no bar.
+
+It is drawn in whole units that grow with the system font (two pixels
+on this machine's), so it stays pixel art on a dense screen, and its
+greys are tints of the system's tab colour, so a theme can tint it. The
+layout is ProseDecorator's, except that the top border is drawn as the
+lower part of the title bar: every border stays as wide as BorderWidth()
+says, which stack and tile and BWindow::DecoratorFrame() count on.
+
+Platinum.theme puts it together with platinum grey panels and menus, a
+lavender highlight and dark blue menu selections, on a plain periwinkle
+desktop with no picture.
+
+Verified in a guest with a test program opening one window of each
+look: the active and inactive bars, the modal and floating frames and
+the grow box drawn as intended; a click on a background window's close
+box brought it forward and left it open, collapse minimized, zoom on a
+background window only activated it and a second click zoomed it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0085-platinum-a-window-frame-after-mac-os-8-5-and-a-theme-with-it.patch b54534713b642bb2ce71c5ab9ecb4f01383034aa66ef4977365c5e90f5ddaf40
+---
+ build/jam/packages/Haiku                      |    8 +-
+ build/jam/packages/ProsePortal                |    3 +-
+ data/prose/themes/Platinum.theme              |   51 +
+ src/add-ons/decorators/Jamfile                |    1 +
+ .../decorators/PlatinumDecorator/Jamfile      |   21 +
+ .../PlatinumDecorator/PlatinumDecorator.cpp   | 1003 +++++++++++++++++
+ .../PlatinumDecorator/PlatinumDecorator.h     |  127 +++
+ .../PlatinumDecorator/PlatinumDecorator.rdef  |   15 +
+ 8 files changed, 1225 insertions(+), 4 deletions(-)
+ create mode 100644 data/prose/themes/Platinum.theme
+ create mode 100644 src/add-ons/decorators/PlatinumDecorator/Jamfile
+ create mode 100644 src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.cpp
+ create mode 100644 src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.h
+ create mode 100644 src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.rdef
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 006cf577ec..1d6a92fae0 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -423,12 +423,14 @@ AddFilesToPackage add-ons Network\ Settings :
+ 	TelnetService
+ 	;
+ 
+-# PROSE fork: two conventional window frames, chosen in Appearance. Haiku
+-# keeps its own decorator add-ons in haiku_extras, which this image does
+-# not ship, so these go in the system package.
++# PROSE fork: window frames of our own, chosen in Appearance or by a theme:
++# two conventional ones and Platinum. Haiku keeps its own decorator add-ons
++# in haiku_extras, which this image does not ship, so these go in the
++# system package.
+ AddFilesToPackage add-ons decorators :
+ 	ProseDecorator
+ 	ProseRightDecorator
++	PlatinumDecorator
+ 	;
+ 
+ AddFilesToPackage add-ons Tracker :
+diff --git a/build/jam/packages/ProsePortal b/build/jam/packages/ProsePortal
+index c62b7f6cb4..7740fe1aba 100644
+--- a/build/jam/packages/ProsePortal
++++ b/build/jam/packages/ProsePortal
+@@ -20,7 +20,8 @@ AddFilesToPackage data launch : $(portalLaunch) ;
+ # themes without a new system.
+ AddFilesToPackage bin : prosetheme ;
+ 
+-local proseThemes = "Prose Light.theme" "Prose Dark.theme" Classic.theme ;
++local proseThemes = "Prose Light.theme" "Prose Dark.theme" Classic.theme
++	Platinum.theme ;
+ proseThemes = $(proseThemes:G=prose-themes) ;
+ SEARCH on $(proseThemes) = [ FDirName $(HAIKU_TOP) data prose themes ] ;
+ AddFilesToPackage data prose themes : $(proseThemes) ;
+diff --git a/data/prose/themes/Platinum.theme b/data/prose/themes/Platinum.theme
+new file mode 100644
+index 0000000000..b742804f07
+--- /dev/null
++++ b/data/prose/themes/Platinum.theme
+@@ -0,0 +1,51 @@
++# Platinum
++# After Mac OS 8.5: the Platinum frame, platinum grey panels and menus, a
++# lavender highlight, and a plain periwinkle desktop with no picture.
++
++decorator = PlatinumDecorator
++wallpaper = none
++
++# the window frame: the bevels are tints of the tab colour
++window_tab = 221,221,221
++window_text = 0,0,0
++window_inactive_tab = 232,232,232
++window_inactive_text = 128,128,128
++window_border = 221,221,221
++window_inactive_border = 232,232,232
++
++# the desktop, shown with no picture, and under the icons' labels
++desktop = 102,102,153
++
++# panels, menus, documents, controls, lists
++panel_background = 221,221,221
++menu_background = 221,221,221
++navigation_base = 102,102,204
++menu_selected_background = 51,51,153
++menu_text = 0,0,0
++menu_selected_text = 255,255,255
++menu_selected_border = 51,51,153
++panel_text = 0,0,0
++document_background = 255,255,255
++document_text = 0,0,0
++control_background = 238,238,238
++control_text = 0,0,0
++control_border = 136,136,136
++control_highlight = 204,204,255
++navigation_pulse = 0,0,0
++shine = 255,255,255
++shadow = 0,0,0
++tooltip_background = 255,255,204
++tooltip_text = 0,0,0
++control_mark = 51,51,153
++list_background = 255,255,255
++list_selected_background = 204,204,255
++list_text = 0,0,0
++list_selected_text = 0,0,0
++scroll_bar_thumb = 204,204,255
++link_text = 0,0,204
++link_hover = 51,51,204
++link_visited = 102,0,153
++link_active = 204,0,0
++status_bar = 102,102,204
++success = 0,153,0
++failure = 204,0,0
+diff --git a/src/add-ons/decorators/Jamfile b/src/add-ons/decorators/Jamfile
+index 68c921fcd6..000fa81142 100644
+--- a/src/add-ons/decorators/Jamfile
++++ b/src/add-ons/decorators/Jamfile
+@@ -6,3 +6,4 @@ SubInclude HAIKU_TOP src add-ons decorators MacDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators WinDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators ProseDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators ProseRightDecorator ;
++SubInclude HAIKU_TOP src add-ons decorators PlatinumDecorator ;
+diff --git a/src/add-ons/decorators/PlatinumDecorator/Jamfile b/src/add-ons/decorators/PlatinumDecorator/Jamfile
+new file mode 100644
+index 0000000000..6a811f65a4
+--- /dev/null
++++ b/src/add-ons/decorators/PlatinumDecorator/Jamfile
+@@ -0,0 +1,21 @@
++SubDir HAIKU_TOP src add-ons decorators PlatinumDecorator ;
++
++UseBuildFeatureHeaders freetype ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app stackandtile ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app decorator ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing Painter ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app font ] ;
++UsePrivateHeaders app shared interface graphics ;
++UseLibraryHeaders agg ;
++
++AddResources PlatinumDecorator : PlatinumDecorator.rdef ;
++
++Includes [ FGristFiles PlatinumDecorator.cpp ]
++	: [ BuildFeatureAttribute freetype : headers ] ;
++
++Addon PlatinumDecorator :
++	PlatinumDecorator.cpp
++	: be <nogrist>app_server [ TargetLibstdc++ ] [ TargetLibsupc++ ]
++;
+diff --git a/src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.cpp b/src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.cpp
+new file mode 100644
+index 0000000000..5955ee7850
+--- /dev/null
++++ b/src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.cpp
+@@ -0,0 +1,1003 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++/*!	Platinum: a window frame after the Mac OS 8.5 appearance. */
++
++
++#include "PlatinumDecorator.h"
++
++#include <math.h>
++#include <new>
++#include <string.h>
++
++#include <GraphicsDefs.h>
++#include <Point.h>
++#include <Rect.h>
++#include <View.h>
++#include <WindowPrivate.h>
++
++#include "DesktopSettings.h"
++#include "DrawingEngine.h"
++
++
++// Sizes in units (see the header). A titled window's frame is, outside in:
++// outline, bevel, two of face, inner bevel, inner line.
++static const int32 kFrameUnits = 6;
++static const int32 kModalFrameUnits = 4;		// no inner line
++static const int32 kFloatingFrameUnits = 3;		// outline, bevel, inner line
++static const int32 kBoxUnits = 13;				// a box with its well
++static const int32 kSmallBoxUnits = 9;
++static const int32 kGrooves = 6;
++static const int32 kSmallGrooves = 3;
++
++// How far along the bottom and right borders a press counts as the resize
++// corner, as TabDecorator has it (file-static there).
++static const float kBorderResizeLength = 22.0f;
++// A scroll bar's width at the 12-point font: the grow box fills the corner
++// the scroll bars leave.
++static const float kScrollBarWidth = 14.0f;
++
++
++PlatinumDecorator::PlatinumDecorator(DesktopSettings& settings, BRect frame,
++	Desktop* desktop)
++	:
++	SATDecorator(settings, frame, desktop),
++	fUnit(1.0f),
++	fSmall(false),
++	fInnerBevel(true),
++	fInnerLine(true),
++	fBoxSize(kBoxUnits),
++	fBoxInset(6.0f),
++	fBoxGap(2.0f),
++	fTitleGap(5.0f),
++	fGrooves(kGrooves)
++{
++}
++
++
++PlatinumDecorator::~PlatinumDecorator()
++{
++}
++
++
++// #pragma mark - hit testing
++
++
++Decorator::Region
++PlatinumDecorator::RegionAt(BPoint where, int32& tabIndex) const
++{
++	tabIndex = -1;
++
++	// The bar, the top border under it included: a box where one shows,
++	// the bar everywhere else. A window in the background shows none, so a
++	// click there brings it forward and does nothing more.
++	for (int32 i = 0; i < fTabList.CountItems(); i++) {
++		Decorator::Tab* tab = fTabList.ItemAt(i);
++		if (!_BarRect(tab).Contains(where))
++			continue;
++
++		tabIndex = i;
++		if (tab->buttonFocus) {
++			if (tab->closeRect.IsValid() && tab->closeRect.Contains(where))
++				return REGION_CLOSE_BUTTON;
++			if (tab->zoomRect.IsValid() && tab->zoomRect.Contains(where))
++				return REGION_ZOOM_BUTTON;
++			if (tab->minimizeRect.IsValid()
++				&& tab->minimizeRect.Contains(where)) {
++				return REGION_MINIMIZE_BUTTON;
++			}
++		}
++		return REGION_TAB;
++	}
++
++	if (fTopTab->look == B_DOCUMENT_WINDOW_LOOK && fResizeRect.Contains(where))
++		return REGION_RIGHT_BOTTOM_CORNER;
++
++	Region region;
++	if (fLeftBorder.Contains(where))
++		return REGION_LEFT_BORDER;
++	if (fTopBorder.Contains(where))
++		return REGION_TOP_BORDER;
++	if (fRightBorder.Contains(where))
++		region = REGION_RIGHT_BORDER;
++	else if (fBottomBorder.Contains(where))
++		region = REGION_BOTTOM_BORDER;
++	else
++		return REGION_NONE;
++
++	// The end of the bottom and right borders is the resize corner.
++	if ((fTopTab->flags & B_NOT_RESIZABLE) == 0
++		&& (fTopTab->look == B_TITLED_WINDOW_LOOK
++			|| fTopTab->look == B_FLOATING_WINDOW_LOOK
++			|| fTopTab->look == B_MODAL_WINDOW_LOOK
++			|| fTopTab->look == kLeftTitledWindowLook)) {
++		BRect corner(BPoint(fBottomBorder.right - fBorderResizeLength,
++			fBottomBorder.bottom - fBorderResizeLength),
++			fBottomBorder.RightBottom());
++		if (corner.Contains(where))
++			return REGION_RIGHT_BOTTOM_CORNER;
++	}
++
++	return region;
++}
++
++
++void
++PlatinumDecorator::ExtendDirtyRegion(Region region, BRegion& dirty)
++{
++	SATDecorator::ExtendDirtyRegion(region, dirty);
++
++	// the bar reaches down over the top border
++	if (region == REGION_TAB && fTitleBarRect.IsValid())
++		dirty.Include(fTopBorder);
++}
++
++
++// #pragma mark - layout
++
++
++void
++PlatinumDecorator::_DoLayout()
++{
++	const float fontSize = fDrawState.Font().Size();
++	const float scale = max_c(fontSize / 12.0f, 1.0f);
++	fUnit = max_c(1.0f, roundf(fontSize / 12.0f));
++	const float u = fUnit;
++
++	bool hasBar = false;
++	fSmall = false;
++	fInnerBevel = true;
++	fInnerLine = true;
++
++	switch ((int)fTopTab->look) {
++		case B_MODAL_WINDOW_LOOK:
++			fBorderWidth = int32(kModalFrameUnits * u);
++			fInnerLine = false;
++			break;
++
++		case B_TITLED_WINDOW_LOOK:
++		case B_DOCUMENT_WINDOW_LOOK:
++			hasBar = true;
++			fBorderWidth = int32(kFrameUnits * u);
++			break;
++
++		case B_FLOATING_WINDOW_LOOK:
++		case kLeftTitledWindowLook:
++			hasBar = true;
++			fSmall = true;
++			fInnerBevel = false;
++			fBorderWidth = int32(kFloatingFrameUnits * u);
++			break;
++
++		case B_BORDERED_WINDOW_LOOK:
++			fBorderWidth = 1;
++			break;
++
++		default:
++			fBorderWidth = 0;
++	}
++
++	fResizeKnobSize = fBorderWidth + roundf(kScrollBarWidth * scale);
++	fBorderResizeLength = kBorderResizeLength * scale;
++
++	fBoxSize = (fSmall ? kSmallBoxUnits : kBoxUnits) * u;
++	fBoxInset = (fSmall ? 3 : 6) * u;
++	fBoxGap = 2 * u;
++	fTitleGap = (fSmall ? 3 : 5) * u;
++
++	// The borders: strips beside and below the client area, none of them
++	// overlapping, the left and right ones without the corners -- the shape
++	// the base class's dirty-region bookkeeping expects.
++	if (fBorderWidth > 0) {
++		fLeftBorder.Set(fFrame.left - fBorderWidth, fFrame.top,
++			fFrame.left - 1, fFrame.bottom);
++		fRightBorder.Set(fFrame.right + 1, fFrame.top,
++			fFrame.right + fBorderWidth, fFrame.bottom);
++		fTopBorder.Set(fFrame.left - fBorderWidth, fFrame.top - fBorderWidth,
++			fFrame.right + fBorderWidth, fFrame.top - 1);
++		fBottomBorder.Set(fFrame.left - fBorderWidth, fFrame.bottom + 1,
++			fFrame.right + fBorderWidth, fFrame.bottom + fBorderWidth);
++	} else {
++		fLeftBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fRightBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fTopBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fBottomBorder.Set(0.0, 0.0, -1.0, -1.0);
++	}
++
++	if (fBorderWidth > 1) {
++		fResizeRect.Set(fBottomBorder.right - fResizeKnobSize,
++			fBottomBorder.bottom - fResizeKnobSize, fBottomBorder.right,
++			fBottomBorder.bottom);
++	} else
++		fResizeRect.Set(0, 0, -1, -1);
++
++	if (hasBar) {
++		font_height fontHeight;
++		fDrawState.Font().GetHeight(fontHeight);
++		float text = ceilf(fontHeight.ascent + fontHeight.descent);
++
++		// The bar's inside, between its bevel rows: room for a box with a
++		// unit above and below it, and for the title.
++		float inside = max_c(fBoxSize + 2 * u,
++			ceilf((text + (fSmall ? 2 : 4) * u) / u) * u);
++		// What shows as the bar runs from the outline down to the inner
++		// line over the content: outline and bevel above the inside, the
++		// inner bevel and line below it. The part above the top border is
++		// the title bar rect.
++		float below = ((fInnerBevel ? 1 : 0) + (fInnerLine ? 1 : 0)) * u;
++		float barHeight = 2 * u + inside + below - fBorderWidth;
++
++		fGrooves = fSmall ? kSmallGrooves : kGrooves;
++		while (fGrooves > 1 && 2 * fGrooves * u > inside - 2 * u)
++			fGrooves--;
++
++		fTitleBarRect.Set(fTopBorder.left, fTopBorder.top - barHeight,
++			fTopBorder.right, fTopBorder.top - 1);
++		fBorderRect = BRect(fTitleBarRect.LeftTop(),
++			fBottomBorder.RightBottom());
++		_LayoutBar();
++	} else {
++		fBorderRect = BRect(fTopBorder.LeftTop(), fBottomBorder.RightBottom());
++		for (int32 i = 0; i < fTabList.CountItems(); i++) {
++			Decorator::Tab* tab = fTabList.ItemAt(i);
++			tab->tabRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->closeRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->zoomRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->minimizeRect.Set(0.0, 0.0, -1.0, -1.0);
++		}
++		fTabsRegion.MakeEmpty();
++		fTitleBarRect.Set(0.0, 0.0, -1.0, -1.0);
++	}
++}
++
++
++/*!	One window: the bar is its tab. Stacked windows: equal slices, the
++	top one with every box, the others with a close box only.
++*/
++void
++PlatinumDecorator::_LayoutBar()
++{
++	int32 count = fTabList.CountItems();
++	if (count < 1)
++		return;
++
++	float width = fTitleBarRect.Width() + 1;
++	float slice = floorf(width / count);
++
++	for (int32 i = 0; i < count; i++) {
++		Decorator::Tab* tab = fTabList.ItemAt(i);
++		BRect& tabRect = tab->tabRect;
++		tabRect.Set(fTitleBarRect.left + i * slice, fTitleBarRect.top,
++			i == count - 1 ? fTitleBarRect.right
++				: fTitleBarRect.left + (i + 1) * slice - 1,
++			fTitleBarRect.bottom);
++		tab->tabOffset = uint32(tabRect.left - fLeftBorder.left);
++		tab->tabLocation = 0.0f;
++
++		_LayoutBoxes(tab, count == 1 || tab == fTopTab);
++
++		// What a window may shrink to: its boxes and a little title.
++		float boxes = 0;
++		if ((tab->flags & B_NOT_CLOSABLE) == 0)
++			boxes += fBoxSize + fBoxGap;
++		if ((tab->flags & B_NOT_MINIMIZABLE) == 0)
++			boxes += fBoxSize + fBoxGap;
++		if ((tab->flags & B_NOT_ZOOMABLE) == 0)
++			boxes += fBoxSize + fBoxGap;
++		tab->minTabSize = 2 * (fBoxInset + 2 * fUnit) + boxes
++			+ fDrawState.Font().Size() * 3;
++		tab->maxTabSize = tab->minTabSize;
++		if (fDrawingEngine != NULL && Title(tab) != NULL) {
++			tab->maxTabSize += ceilf(fDrawingEngine->StringWidth(Title(tab),
++				strlen(Title(tab)), fDrawState.Font()));
++		}
++	}
++
++	fTabsRegion = fTitleBarRect;
++}
++
++
++void
++PlatinumDecorator::_LayoutBoxes(Decorator::Tab* tab, bool allBoxes)
++{
++	tab->closeRect.Set(0.0, 0.0, -1.0, -1.0);
++	tab->zoomRect.Set(0.0, 0.0, -1.0, -1.0);
++	tab->minimizeRect.Set(0.0, 0.0, -1.0, -1.0);
++
++	BRect inside = _BarInside(tab);
++	if (!inside.IsValid())
++		return;
++
++	const float u = fUnit;
++	const float box = fBoxSize;
++	// centred in the bar's inside, on the unit grid
++	float y = inside.top + floorf((inside.Height() + 1 - box) / (2 * u)) * u;
++	BRect rect(0, 0, box - 1, box - 1);
++
++	if ((tab->flags & B_NOT_CLOSABLE) == 0)
++		tab->closeRect = rect.OffsetToCopy(inside.left + fBoxInset, y);
++
++	// collapse at the far right, zoom beside it
++	float right = inside.right + 1 - fBoxInset;
++	if (allBoxes && (tab->flags & B_NOT_MINIMIZABLE) == 0) {
++		tab->minimizeRect = rect.OffsetToCopy(right - box, y);
++		right -= box + fBoxGap;
++	}
++	if (allBoxes && (tab->flags & B_NOT_ZOOMABLE) == 0)
++		tab->zoomRect = rect.OffsetToCopy(right - box, y);
++}
++
++
++/*!	A tab's slice of what shows as the bar: its tab rect and the top border
++	under it.
++*/
++BRect
++PlatinumDecorator::_BarRect(Decorator::Tab* tab) const
++{
++	if (!fTitleBarRect.IsValid() || !tab->tabRect.IsValid())
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	return BRect(tab->tabRect.left, tab->tabRect.top, tab->tabRect.right,
++		fTopBorder.bottom);
++}
++
++
++/*!	The face inside the bar's bevels: what the grooves, the title and the
++	boxes are drawn on. Stacked slices keep a unit at their right for the
++	rule between them.
++*/
++BRect
++PlatinumDecorator::_BarInside(Decorator::Tab* tab) const
++{
++	BRect bar = _BarRect(tab);
++	if (!bar.IsValid())
++		return bar;
++
++	const float u = fUnit;
++	float below = ((fInnerBevel ? 1 : 0) + (fInnerLine ? 1 : 0)) * u;
++	bool first = tab == fTabList.FirstItem();
++	bool last = tab == fTabList.LastItem();
++	return BRect(first ? bar.left + 2 * u : bar.left, bar.top + 2 * u,
++		last ? bar.right - 2 * u : bar.right - u, bar.bottom - below);
++}
++
++
++/*!	The horizontal room the title may use: between the close box and the
++	zoom and collapse boxes, clear of them by the title's gap.
++*/
++void
++PlatinumDecorator::_TitleRoom(Decorator::Tab* tab, float* left,
++	float* right) const
++{
++	BRect inside = _BarInside(tab);
++	*left = inside.left + fBoxInset;
++	*right = inside.right - fBoxInset;
++
++	if (tab->closeRect.IsValid())
++		*left = max_c(*left, tab->closeRect.right + 1 + fTitleGap);
++	if (tab->zoomRect.IsValid())
++		*right = min_c(*right, tab->zoomRect.left - 1 - fTitleGap);
++	if (tab->minimizeRect.IsValid())
++		*right = min_c(*right, tab->minimizeRect.left - 1 - fTitleGap);
++}
++
++
++/*!	Where the title goes, truncated to its room: centred in the bar when
++	that keeps it clear of the boxes, otherwise centred in the room. The rect
++	runs from the ascent to the descent; invalid when no title fits.
++*/
++BRect
++PlatinumDecorator::_TitleRect(Decorator::Tab* tab)
++{
++	BRect inside = _BarInside(tab);
++	if (!inside.IsValid() || fDrawingEngine == NULL)
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	float left, right;
++	_TitleRoom(tab, &left, &right);
++	float room = right - left + 1;
++	if (room < fDrawState.Font().Size())
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	tab->truncatedTitle = Title(tab);
++	fDrawState.Font().TruncateString(&tab->truncatedTitle, B_TRUNCATE_END,
++		room);
++	tab->truncatedTitleLength = tab->truncatedTitle.Length();
++	if (tab->truncatedTitleLength == 0)
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	float width = ceilf(fDrawingEngine->StringWidth(
++		tab->truncatedTitle.String(), tab->truncatedTitleLength,
++		fDrawState.Font()));
++
++	float x = floorf((inside.left + inside.right + 1 - width) / 2);
++	if (x < left || x + width - 1 > right)
++		x = floorf(left + (room - width) / 2);
++
++	font_height fontHeight;
++	fDrawState.Font().GetHeight(fontHeight);
++	float baseline = floorf(inside.top + (inside.Height() + 1
++		+ fontHeight.ascent - fontHeight.descent) / 2 + 0.5f);
++	return BRect(x, baseline - ceilf(fontHeight.ascent), x + width - 1,
++		baseline + ceilf(fontHeight.descent));
++}
++
++
++// #pragma mark - colours
++
++
++void
++PlatinumDecorator::_GetPalette(Decorator::Tab* tab, Palette& palette)
++{
++	ComponentColors colors;
++	GetComponentColors(COMPONENT_TAB, RegionHighlight(REGION_TAB), colors,
++		tab);
++	palette.face = colors[COLOR_TAB];
++	palette.text = colors[COLOR_TAB_TEXT];
++	palette.active = tab->buttonFocus;
++
++	// Tints of the face: on the platinum grey a theme sets, white and a
++	// mid grey, as the original had; gentler light on a dark face.
++	palette.light = tint_color(palette.face,
++		palette.face.IsDark() ? 0.8f : B_LIGHTEN_MAX_TINT);
++	palette.shadow = tint_color(palette.face, B_DARKEN_2_TINT);
++	palette.outline = tint_color(palette.face,
++		palette.active ? B_DARKEN_MAX_TINT : B_DARKEN_4_TINT);
++}
++
++
++/*!	A border strip is the face, unless it is highlighted -- the resize
++	highlight, or stack-and-tile's -- in which case the family's colour for
++	that state is used, as the other decorators do.
++*/
++rgb_color
++PlatinumDecorator::_SideFace(Component component, Region region,
++	const rgb_color& plain)
++{
++	uint8 highlight = RegionHighlight(region);
++	if (highlight == HIGHLIGHT_NONE)
++		return plain;
++
++	ComponentColors colors;
++	GetComponentColors(component, highlight, colors, fTopTab);
++	return colors[2];
++}
++
++
++// #pragma mark - drawing
++
++
++void
++PlatinumDecorator::Draw(BRect updateRect)
++{
++	fDrawingEngine->SetDrawState(&fDrawState);
++
++	_DrawFrame(updateRect & fBorderRect);
++
++	if (IsOutlineResizing())
++		_DrawOutlineFrame(updateRect & fOutlineBorderRect);
++
++	// the bar reaches down over the top border
++	if (fTitleBarRect.IsValid())
++		_DrawTabs(updateRect & (fTitleBarRect | fTopBorder));
++}
++
++
++void
++PlatinumDecorator::Draw()
++{
++	Draw(fBorderRect);
++}
++
++
++/*!	Fills the ring of the given width just inside \a outer. */
++void
++PlatinumDecorator::_FillRing(BRect outer, float width, const rgb_color& color)
++{
++	if (!outer.IsValid())
++		return;
++
++	fDrawingEngine->FillRect(BRect(outer.left, outer.top, outer.right,
++		outer.top + width - 1), color);
++	fDrawingEngine->FillRect(BRect(outer.left, outer.bottom - width + 1,
++		outer.right, outer.bottom), color);
++	fDrawingEngine->FillRect(BRect(outer.left, outer.top + width,
++		outer.left + width - 1, outer.bottom - width), color);
++	fDrawingEngine->FillRect(BRect(outer.right - width + 1, outer.top + width,
++		outer.right, outer.bottom - width), color);
++}
++
++
++/*!	A unit-wide bevel just inside \a rect: its top and left edges in one
++	colour, its bottom and right edges in the other. The two corners where
++	they meet are left as they were (the face, as a rule).
++*/
++void
++PlatinumDecorator::_Bevel(BRect rect, const rgb_color& topLeft,
++	const rgb_color& bottomRight)
++{
++	const float u = fUnit;
++	fDrawingEngine->FillRect(BRect(rect.left, rect.top, rect.right - u,
++		rect.top + u - 1), topLeft);
++	fDrawingEngine->FillRect(BRect(rect.left, rect.top + u,
++		rect.left + u - 1, rect.bottom - u), topLeft);
++	fDrawingEngine->FillRect(BRect(rect.left + u, rect.bottom - u + 1,
++		rect.right, rect.bottom), bottomRight);
++	fDrawingEngine->FillRect(BRect(rect.right - u + 1, rect.top + u,
++		rect.right, rect.bottom - u), bottomRight);
++}
++
++
++void
++PlatinumDecorator::_DrawFrame(BRect invalid)
++{
++	if (fTopTab->look == B_NO_BORDER_WINDOW_LOOK || fBorderWidth <= 0)
++		return;
++
++	Palette palette;
++	_GetPalette(fTopTab, palette);
++
++	if (fTopTab->look == B_BORDERED_WINDOW_LOOK) {
++		fDrawingEngine->StrokeRect(fBorderRect, palette.outline);
++		return;
++	}
++
++	// Everything is drawn: the drawing engine is clipped to what needs it.
++	const float u = fUnit;
++	const BRect& outer = fBorderRect;
++	float inner = ((fInnerBevel ? 1 : 0) + (fInnerLine ? 1 : 0)) * u;
++	BRect opening = fFrame.InsetByCopy(-inner, -inner);
++
++	// the face, between the outer rings and the inner ones; the bar's part
++	// is the tab's colour, the strips' their own when highlighted
++	fDrawingEngine->FillRect(BRect(outer.left + 2 * u, outer.top + 2 * u,
++		outer.right - 2 * u, opening.top - 1), palette.face);
++	fDrawingEngine->FillRect(BRect(outer.left + 2 * u, opening.top,
++		opening.left - 1, opening.bottom),
++		_SideFace(COMPONENT_LEFT_BORDER, REGION_LEFT_BORDER, palette.face));
++	fDrawingEngine->FillRect(BRect(opening.right + 1, opening.top,
++		outer.right - 2 * u, opening.bottom),
++		_SideFace(COMPONENT_RIGHT_BORDER, REGION_RIGHT_BORDER, palette.face));
++	fDrawingEngine->FillRect(BRect(outer.left + 2 * u, opening.bottom + 1,
++		outer.right - 2 * u, outer.bottom - 2 * u),
++		_SideFace(COMPONENT_BOTTOM_BORDER, REGION_BOTTOM_BORDER,
++			palette.face));
++
++	// the outline, and the bevel inside it: lit at the top and left in
++	// front, flat behind
++	_FillRing(outer, u, palette.outline);
++	BRect bevel = outer.InsetByCopy(u, u);
++	_FillRing(bevel, u, palette.face);
++	if (palette.active)
++		_Bevel(bevel, palette.light, palette.shadow);
++
++	// round the opening: a bevel the other way, so the frame stands proud of
++	// the content, then the inner line
++	if (fInnerBevel) {
++		BRect ring = fFrame.InsetByCopy(-inner, -inner);
++		_FillRing(ring, u, palette.face);
++		if (palette.active)
++			_Bevel(ring, palette.shadow, palette.light);
++	}
++	if (fInnerLine)
++		_FillRing(fFrame.InsetByCopy(-u, -u), u, palette.outline);
++
++	if (fTopTab->look == B_DOCUMENT_WINDOW_LOOK
++		&& (fTopTab->flags & B_NOT_RESIZABLE) == 0
++		&& invalid.Intersects(fResizeRect)) {
++		_DrawGrowBox(palette);
++	}
++}
++
++
++/*!	The grow box of a document window: the corner the scroll bars leave,
++	edged with the inner line, bevelled, with three ridges across it. It
++	reaches into the client area, so it must be painted, not left to the
++	window.
++*/
++void
++PlatinumDecorator::_DrawGrowBox(const Palette& palette)
++{
++	BRect box(fResizeRect.left, fResizeRect.top, fFrame.right, fFrame.bottom);
++	if (!box.IsValid())
++		return;
++
++	const float u = fUnit;
++	fDrawingEngine->FillRect(box, palette.face);
++	fDrawingEngine->FillRect(BRect(box.left, box.top, box.right,
++		box.top + u - 1), palette.outline);
++	fDrawingEngine->FillRect(BRect(box.left, box.top + u, box.left + u - 1,
++		box.bottom), palette.outline);
++
++	BRect face(box.left + u, box.top + u, box.right, box.bottom);
++	if (!palette.active)
++		return;
++	_Bevel(face, palette.light, palette.shadow);
++
++	// Ridges across the corner, in whole units: a lit run with a shaded one
++	// below and right of it, counted in units from the bottom right.
++	BRect grip = face.InsetByCopy(u, u);
++	int32 cells = int32((grip.Width() + 1) / u);
++	for (int32 ridge = 1; ridge + 1 < cells; ridge += 3) {
++		for (int32 i = 0; i <= ridge + 1; i++) {
++			// i units in from the right; the lit cell one step further out
++			int32 shaded = ridge - i;
++			int32 lit = ridge + 1 - i;
++			float x = grip.right + 1 - (i + 1) * u;
++			if (shaded >= 0 && shaded < cells) {
++				float y = grip.bottom + 1 - (shaded + 1) * u;
++				fDrawingEngine->FillRect(BRect(x, y, x + u - 1, y + u - 1),
++					palette.shadow);
++			}
++			if (lit >= 0 && lit < cells) {
++				float y = grip.bottom + 1 - (lit + 1) * u;
++				fDrawingEngine->FillRect(BRect(x, y, x + u - 1, y + u - 1),
++					palette.light);
++			}
++		}
++	}
++}
++
++
++void
++PlatinumDecorator::_DrawTab(Decorator::Tab* tab, BRect invalid)
++{
++	BRect bar = _BarRect(tab);
++	if (!bar.IsValid() || !invalid.Intersects(bar))
++		return;
++
++	Palette palette;
++	_GetPalette(tab, palette);
++
++	fDrawingEngine->FillRect(_BarInside(tab), palette.face);
++	if (tab != fTabList.LastItem()) {
++		// a rule between the slices of a stacked bar
++		fDrawingEngine->FillRect(BRect(bar.right - fUnit + 1, bar.top,
++			bar.right, bar.bottom), palette.outline);
++	}
++
++	if (palette.active)
++		_DrawGrooves(tab, palette);
++	_DrawTitle(tab, bar);
++	_DrawButtons(tab, bar);
++}
++
++
++/*!	The grooves across an active bar: pairs of unit-high lines, a shaded one
++	with a lit one under it and a unit to its right, so they look cut in.
++	They run from the close box to the zoom box, clear of both, and stop
++	short of the title either side.
++*/
++void
++PlatinumDecorator::_DrawGrooves(Decorator::Tab* tab, const Palette& palette)
++{
++	BRect inside = _BarInside(tab);
++	if (!inside.IsValid())
++		return;
++
++	const float u = fUnit;
++	float top = inside.top
++		+ floorf((inside.Height() + 1 - 2 * fGrooves * u) / (2 * u)) * u;
++
++	float left = inside.left + u;
++	float right = inside.right - u;
++	if (tab->closeRect.IsValid())
++		left = tab->closeRect.right + 1 + fBoxGap;
++	if (tab->zoomRect.IsValid())
++		right = min_c(right, tab->zoomRect.left - 1 - fBoxGap);
++	if (tab->minimizeRect.IsValid())
++		right = min_c(right, tab->minimizeRect.left - 1 - fBoxGap);
++
++	// the runs either side of the title, or one run with no title
++	float runs[2][2] = { { left, right }, { 0, -1 } };
++	BRect title = _TitleRect(tab);
++	if (title.IsValid()) {
++		runs[0][1] = min_c(right, title.left - 1 - fTitleGap);
++		runs[1][0] = max_c(left, title.right + 1 + fTitleGap);
++		runs[1][1] = right;
++	}
++
++	for (int32 run = 0; run < 2; run++) {
++		float x = runs[run][0];
++		float end = runs[run][1];
++		if (end - x + 1 < 2 * u)
++			continue;
++		for (int32 groove = 0; groove < fGrooves; groove++) {
++			float y = top + 2 * groove * u;
++			fDrawingEngine->FillRect(BRect(x, y, end - u, y + u - 1),
++				palette.shadow);
++			fDrawingEngine->FillRect(BRect(x + u, y + u, end, y + 2 * u - 1),
++				palette.light);
++		}
++	}
++}
++
++
++void
++PlatinumDecorator::_DrawTitle(Decorator::Tab* tab, BRect rect)
++{
++	BRect title = _TitleRect(tab);
++	if (!title.IsValid())
++		return;
++
++	Palette palette;
++	_GetPalette(tab, palette);
++
++	// Its own ground first, a unit wider, so drawing it again does not
++	// thicken it; the grooves stop further away than that.
++	BRect ground = title.InsetByCopy(-fUnit, 0) & _BarInside(tab);
++	fDrawingEngine->FillRect(ground, palette.face);
++
++	font_height fontHeight;
++	fDrawState.Font().GetHeight(fontHeight);
++	float baseline = title.bottom - ceilf(fontHeight.descent);
++
++	fDrawingEngine->SetDrawingMode(B_OP_OVER);
++	fDrawingEngine->SetHighColor(palette.text);
++	fDrawingEngine->SetFont(fDrawState.Font());
++	fDrawingEngine->DrawString(tab->truncatedTitle.String(),
++		tab->truncatedTitleLength, BPoint(title.left, baseline));
++	fDrawingEngine->SetDrawingMode(B_OP_COPY);
++}
++
++
++void
++PlatinumDecorator::_DrawButtons(Decorator::Tab* tab, const BRect& invalid)
++{
++	// a window in the background shows no boxes
++	if (!tab->buttonFocus)
++		return;
++
++	if (tab->closeRect.IsValid() && invalid.Intersects(tab->closeRect))
++		_DrawClose(tab, false, tab->closeRect);
++	if (tab->zoomRect.IsValid() && invalid.Intersects(tab->zoomRect))
++		_DrawZoom(tab, false, tab->zoomRect);
++	if (tab->minimizeRect.IsValid() && invalid.Intersects(tab->minimizeRect))
++		_DrawMinimize(tab, false, tab->minimizeRect);
++}
++
++
++void
++PlatinumDecorator::_DrawClose(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawBox(tab, direct, rect, BOX_CLOSE, tab->closePressed);
++}
++
++
++void
++PlatinumDecorator::_DrawZoom(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawBox(tab, direct, rect, BOX_ZOOM, tab->zoomPressed);
++}
++
++
++void
++PlatinumDecorator::_DrawMinimize(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawBox(tab, direct, rect, BOX_COLLAPSE, tab->minimizePressed);
++}
++
++
++/*!	A box: sunk in a well, a dark outline, a bevel, and its sign -- none on
++	the close box, a smaller box in the top left corner on the zoom box, a
++	bar across the middle on the collapse box. Pressed, the face darkens and
++	the bevel turns round.
++*/
++void
++PlatinumDecorator::_DrawBox(Decorator::Tab* tab, bool direct, BRect rect,
++	Box box, bool pressed)
++{
++	if (!rect.IsValid() || !tab->buttonFocus)
++		return;
++
++	// Pressed feedback is drawn straight to the front buffer; the rest of
++	// the time the window's own update copies it, as DefaultDecorator does.
++	bool copyToFrontEnabled = fDrawingEngine->CopyToFrontEnabled();
++	fDrawingEngine->SetCopyToFrontEnabled(direct);
++
++	Palette palette;
++	_GetPalette(tab, palette);
++	const float u = fUnit;
++
++	// the well
++	fDrawingEngine->FillRect(rect, palette.face);
++	_Bevel(rect, palette.shadow, palette.light);
++
++	// the button
++	BRect button = rect.InsetByCopy(u, u);
++	_FillRing(button, u, palette.outline);
++	BRect face = button.InsetByCopy(u, u);
++	if (pressed) {
++		fDrawingEngine->FillRect(face,
++			tint_color(palette.face, B_DARKEN_2_TINT));
++		_Bevel(face, tint_color(palette.face, B_DARKEN_4_TINT),
++			tint_color(palette.face, B_DARKEN_1_TINT));
++	} else {
++		fDrawingEngine->FillRect(face, palette.face);
++		_Bevel(face, palette.light, palette.shadow);
++	}
++
++	// the sign, inside the bevel
++	BRect sign = face.InsetByCopy(u, u);
++	float cells = floorf((sign.Width() + 1) / u);
++	switch (box) {
++		case BOX_CLOSE:
++			break;
++
++		case BOX_ZOOM:
++		{
++			// a smaller window, at the top left
++			float side = ceilf(cells * 0.6f) * u;
++			_FillRing(BRect(sign.left, sign.top, sign.left + side - 1,
++				sign.top + side - 1), u, palette.outline);
++			break;
++		}
++
++		case BOX_COLLAPSE:
++		{
++			// a window rolled up to its title bar; a line on a small box,
++			// where a bar would look like the zoom box's window
++			float height = (cells >= 5 ? 3 : 1) * u;
++			float top = sign.top + floorf((cells * u - height) / (2 * u)) * u;
++			_FillRing(BRect(sign.left, top, sign.right, top + height - 1), u,
++				palette.outline);
++			break;
++		}
++	}
++
++	fDrawingEngine->SetCopyToFrontEnabled(copyToFrontEnabled);
++}
++
++
++// #pragma mark - state
++
++
++void
++PlatinumDecorator::_SetTitle(Decorator::Tab* tab, const char* string,
++	BRegion* updateRegion)
++{
++	_DoLayout();
++	_DoOutlineLayout();
++	if (updateRegion != NULL && fTitleBarRect.IsValid())
++		updateRegion->Include(fTitleBarRect | fTopBorder);
++}
++
++
++void
++PlatinumDecorator::_SetFocus(Decorator::Tab* tab)
++{
++	tab->buttonFocus = IsFocus(tab)
++		|| ((tab->look == B_FLOATING_WINDOW_LOOK
++			|| tab->look == kLeftTitledWindowLook)
++			&& (tab->flags & B_AVOID_FOCUS) != 0);
++
++	// The top tab of a stacked bar is the one with every box.
++	if (fTabList.CountItems() > 1) {
++		for (int32 i = 0; i < fTabList.CountItems(); i++) {
++			Decorator::Tab* other = fTabList.ItemAt(i);
++			_LayoutBoxes(other, other == fTopTab);
++		}
++	}
++}
++
++
++bool
++PlatinumDecorator::_SetTabLocation(Decorator::Tab* tab, float location,
++	bool isShifting, BRegion* updateRegion)
++{
++	// A bar has no sliding tab.
++	return false;
++}
++
++
++bool
++PlatinumDecorator::_MoveTab(int32 from, int32 to, bool isMoving,
++	BRegion* updateRegion)
++{
++	// Slices keep their order.
++	return false;
++}
++
++
++void
++PlatinumDecorator::_MoveBy(BPoint offset)
++{
++	TabDecorator::_MoveBy(offset);
++	for (int32 i = 0; i < fTabList.CountItems(); i++)
++		fTabList.ItemAt(i)->minimizeRect.OffsetBy(offset);
++}
++
++
++void
++PlatinumDecorator::_ResizeBy(BPoint offset, BRegion* dirty)
++{
++	// What repaints: the right and bottom strips where they were and where
++	// they go, the grow box likewise, the parts of the left strip the window
++	// grows into (it is never repainted otherwise), and the bar with the top
++	// border when the width changes, since the boxes and the title move.
++	// What the window shrinks away from is the desktop's to repaint.
++	if (dirty != NULL) {
++		dirty->Include(fRightBorder);
++		dirty->Include(fBottomBorder);
++		if (fResizeRect.IsValid())
++			dirty->Include(fResizeRect);
++	}
++
++	fFrame.right += offset.x;
++	fFrame.bottom += offset.y;
++	_DoLayout();
++	_DoOutlineLayout();
++
++	if (dirty != NULL) {
++		dirty->Include(fRightBorder);
++		dirty->Include(fBottomBorder);
++		if (fResizeRect.IsValid())
++			dirty->Include(fResizeRect);
++		if (offset.y > 0.0) {
++			dirty->Include(BRect(fLeftBorder.left,
++				fLeftBorder.bottom - offset.y, fLeftBorder.right,
++				fLeftBorder.bottom));
++		}
++		if (offset.x != 0.0) {
++			dirty->Include(fTopBorder);
++			if (fTitleBarRect.IsValid())
++				dirty->Include(fTitleBarRect);
++		}
++	}
++}
++
++
++void
++PlatinumDecorator::_GetFootprint(BRegion* region)
++{
++	if (region == NULL)
++		return;
++
++	region->MakeEmpty();
++	if (fTopTab->look == B_NO_BORDER_WINDOW_LOOK || fBorderWidth <= 0)
++		return;
++
++	region->Set(fBorderRect);
++	region->Exclude(fFrame);
++
++	if (fTopTab->look == B_DOCUMENT_WINDOW_LOOK
++		&& (fTopTab->flags & B_NOT_RESIZABLE) == 0) {
++		// the grow box reaches into the client area
++		float knob = fResizeKnobSize - fBorderWidth;
++		region->Include(BRect(fFrame.right - knob, fFrame.bottom - knob,
++			fFrame.right, fFrame.bottom));
++	}
++}
++
++
++// #pragma mark - the add-on
++
++
++class PlatinumDecorAddOn : public DecorAddOn {
++public:
++								PlatinumDecorAddOn(image_id id,
++									const char* name)
++									:
++									DecorAddOn(id, name)
++								{
++								}
++
++protected:
++	virtual	Decorator*			_AllocateDecorator(DesktopSettings& settings,
++									BRect rect, Desktop* desktop)
++								{
++									return new (std::nothrow)
++										PlatinumDecorator(settings, rect,
++											desktop);
++								}
++};
++
++
++extern "C" DecorAddOn*
++instantiate_decor_addon(image_id id, const char* name)
++{
++	return new (std::nothrow) PlatinumDecorAddOn(id, name);
++}
+diff --git a/src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.h b/src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.h
+new file mode 100644
+index 0000000000..c9de437694
+--- /dev/null
++++ b/src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.h
+@@ -0,0 +1,127 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ *
++ * Platinum: a window frame after the Mac OS 8.5 appearance of that name. A
++ * grey bevelled frame inside a dark outline; a title bar grooved with fine
++ * horizontal lines either side of the centred title; a square close box at
++ * the left, zoom and collapse boxes at the right (collapse minimizes). A
++ * window in the background loses its grooves and its boxes, as it did there,
++ * and a click where a box was only brings the window forward.
++ *
++ * It is pixel art: every line is a whole number of units, a unit being one
++ * pixel at the 12-point system font and two or more above it, so the frame
++ * stays crisp on a dense screen. The greys come from the system's window
++ * colours (the bevels are tints of the tab colour), so a theme can tint it.
++ *
++ * The layout is ProseDecorator's -- a full-width bar over a frame, built on
++ * SATDecorator, stacked windows sharing the bar as slices -- except that the
++ * top border is drawn as the lower part of the title bar: every border is
++ * as wide as BorderWidth() says, which stack and tile and
++ * BWindow::DecoratorFrame() count on.
++ */
++#ifndef PLATINUM_DECORATOR_H
++#define PLATINUM_DECORATOR_H
++
++
++#include "DecorManager.h"
++#include "SATDecorator.h"
++
++
++class PlatinumDecorator : public SATDecorator {
++public:
++								PlatinumDecorator(DesktopSettings& settings,
++									BRect frame, Desktop* desktop);
++	virtual						~PlatinumDecorator();
++
++	virtual	Region				RegionAt(BPoint where, int32& tab) const;
++	virtual	void				ExtendDirtyRegion(Region region,
++									BRegion& dirty);
++
++	virtual	void				Draw(BRect updateRect);
++	virtual	void				Draw();
++
++protected:
++	virtual	void				_DoLayout();
++
++	virtual	void				_DrawFrame(BRect invalid);
++	virtual	void				_DrawTab(Decorator::Tab* tab, BRect invalid);
++	virtual	void				_DrawTitle(Decorator::Tab* tab, BRect rect);
++	virtual	void				_DrawButtons(Decorator::Tab* tab,
++									const BRect& invalid);
++	virtual	void				_DrawClose(Decorator::Tab* tab, bool direct,
++									BRect rect);
++	virtual	void				_DrawZoom(Decorator::Tab* tab, bool direct,
++									BRect rect);
++	virtual	void				_DrawMinimize(Decorator::Tab* tab, bool direct,
++									BRect rect);
++
++	virtual	void				_SetTitle(Decorator::Tab* tab,
++									const char* string,
++									BRegion* updateRegion = NULL);
++	virtual	void				_SetFocus(Decorator::Tab* tab);
++	virtual	bool				_SetTabLocation(Decorator::Tab* tab,
++									float location, bool isShifting,
++									BRegion* updateRegion = NULL);
++	virtual	bool				_MoveTab(int32 from, int32 to, bool isMoving,
++									BRegion* updateRegion = NULL);
++
++	virtual	void				_MoveBy(BPoint offset);
++	virtual	void				_ResizeBy(BPoint offset, BRegion* dirty);
++
++	virtual	void				_GetFootprint(BRegion* region);
++
++private:
++			enum Box {
++				BOX_CLOSE,
++				BOX_ZOOM,
++				BOX_COLLAPSE
++			};
++
++			struct Palette {
++				rgb_color		face;
++				rgb_color		light;		// the lit edge of a bevel
++				rgb_color		shadow;		// its shaded edge; the grooves
++				rgb_color		outline;
++				rgb_color		text;
++				bool			active;
++			};
++
++			void				_LayoutBar();
++			void				_LayoutBoxes(Decorator::Tab* tab,
++									bool allBoxes);
++			BRect				_BarRect(Decorator::Tab* tab) const;
++			BRect				_BarInside(Decorator::Tab* tab) const;
++			void				_TitleRoom(Decorator::Tab* tab, float* left,
++									float* right) const;
++			BRect				_TitleRect(Decorator::Tab* tab);
++
++			void				_GetPalette(Decorator::Tab* tab,
++									Palette& palette);
++			rgb_color			_SideFace(Component component, Region region,
++									const rgb_color& plain);
++
++			void				_FillRing(BRect outer, float width,
++									const rgb_color& color);
++			void				_Bevel(BRect rect, const rgb_color& topLeft,
++									const rgb_color& bottomRight);
++			void				_DrawGrooves(Decorator::Tab* tab,
++									const Palette& palette);
++			void				_DrawBox(Decorator::Tab* tab, bool direct,
++									BRect rect, Box box, bool pressed);
++			void				_DrawGrowBox(const Palette& palette);
++
++			float				fUnit;
++			bool				fSmall;			// a floating window's bar
++			bool				fInnerBevel;	// frame rings, outside in:
++			bool				fInnerLine;		// outline, bevel, face,
++												// inner bevel, inner line
++			float				fBoxSize;		// a box with its well
++			float				fBoxInset;		// from the bar's inside
++			float				fBoxGap;
++			float				fTitleGap;		// grooves stop this far away
++			int32				fGrooves;
++};
++
++
++#endif	// PLATINUM_DECORATOR_H
+diff --git a/src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.rdef b/src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.rdef
+new file mode 100644
+index 0000000000..20c987b1a3
+--- /dev/null
++++ b/src/add-ons/decorators/PlatinumDecorator/PlatinumDecorator.rdef
+@@ -0,0 +1,15 @@
++resource("be:decor:info") message('deco') {
++	"name"				= "Platinum",
++	"authors"			= "The Prose project",
++	"short_descr"		= "Grey bevels and a grooved title bar, after Mac OS 8.5",
++	"long_descr"		= "A bevelled grey frame inside a dark outline; a title "
++		"bar grooved with fine lines either side of the centred title; a "
++		"square close box at the left, zoom and collapse boxes at the right. "
++		"A window in the background loses its grooves and its boxes. Drawn "
++		"in whole pixels that grow with the system font; the greys are the "
++		"system's window colours, so a theme can tint it.",
++	"lic_url"			= "https://opensource.org/license/mit",
++	"lic_name"			= "MIT",
++	"support_url"		= "https://github.com/albanread/Prose",
++	float "version"		= 1.0
++};

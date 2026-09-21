@@ -1,0 +1,274 @@
+From 8eb778e2607341462e9e5835548ba9dca9e1233a Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 15:46:44 +0100
+Subject: [PATCH] Desktop labels stand out against the wallpaper
+
+Tracker chose the desktop labels' colour by comparing the workspace's
+colour (BScreen::DesktopColor) with B_DESKTOP_COLOR -- two settings that
+need not agree, and a theme sets them apart: prosetheme changed only the
+second. So Prose Light drew white labels on the paper wallpaper and
+Prose Dark, switched to at run time, black labels on the ink one; both
+unreadable, measured in a guest before this change.
+
+The desktop now picks black or white against what the labels stand on:
+the wallpaper's average colour (a 64 x 64 grid of samples, taken when
+Tracker shows the picture) when there is one, the workspace's colour
+when there is not.
+
+prosetheme writes the wallpaper with the label outline on (the
+Backgrounds preferences' "Icon label outline"), as does the default a
+new machine gets, and its "desktop" key now sets the workspaces' own
+colour too -- B_DESKTOP_COLOR alone changes nothing on the screen.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0084-desktop-labels-stand-out-against-the-wallpaper.patch c36609166d0aca5bdc87f8a14864b53bffa7188815505d1294ca02a18abab1e1
+---
+ src/bin/prosetheme/prosetheme.cpp        | 20 ++++++-
+ src/kits/tracker/BackgroundImage.cpp     | 16 ++++++
+ src/kits/tracker/DesktopPoseView.cpp     | 72 +++++++++++++++++++++++-
+ src/kits/tracker/DesktopPoseView.h       |  7 +++
+ src/kits/tracker/TrackerInitialState.cpp |  4 +-
+ 5 files changed, 114 insertions(+), 5 deletions(-)
+
+diff --git a/src/bin/prosetheme/prosetheme.cpp b/src/bin/prosetheme/prosetheme.cpp
+index f6682c1467..a9f59f1dfa 100644
+--- a/src/bin/prosetheme/prosetheme.cpp
++++ b/src/bin/prosetheme/prosetheme.cpp
+@@ -41,6 +41,7 @@
+ #include <Messenger.h>
+ #include <Node.h>
+ #include <Path.h>
++#include <Screen.h>
+ #include <String.h>
+ 
+ #include <be_apps/Tracker/Background.h>
+@@ -373,7 +374,8 @@ apply_wallpaper(const char* imagePath)
+ 		info.AddString(B_BACKGROUND_IMAGE, imagePath);
+ 		info.AddInt32(B_BACKGROUND_WORKSPACES, (int32)0xffffffff);
+ 		info.AddInt32(B_BACKGROUND_MODE, B_BACKGROUND_MODE_SCALED);
+-		info.AddBool(B_BACKGROUND_ERASE_TEXT, false);
++		// the icons' labels outlined, so they read on any picture
++		info.AddBool(B_BACKGROUND_ERASE_TEXT, true);
+ 		info.AddPoint(B_BACKGROUND_ORIGIN, BPoint(0, 0));
+ 	}
+ 	ssize_t size = info.FlattenedSize();
+@@ -400,11 +402,22 @@ apply_theme(const Theme& theme)
+ 	int failures = 0;
+ 
+ 	int32 colors = 0;
++	bool desktopColor = false;
+ 	for (size_t i = 0; i < kColorKeyCount; i++) {
+ 		if (!theme.hasColor[i])
+ 			continue;
+ 		set_ui_color(kColorKeys[i].which, theme.color[i]);
+ 		colors++;
++
++		if (kColorKeys[i].which == B_DESKTOP_COLOR) {
++			// What the desktop shows is each workspace's own colour, which
++			// the Backgrounds preferences set; B_DESKTOP_COLOR alone
++			// changes nothing on the screen.
++			BScreen screen;
++			for (int32 j = 0; j < count_workspaces(); j++)
++				screen.SetDesktopColor(theme.color[i], j, true);
++			desktopColor = true;
++		}
+ 	}
+ 	printf("%s: %" B_PRId32 " colour%s", theme.name.String(), colors,
+ 		colors == 1 ? "" : "s");
+@@ -430,6 +443,11 @@ apply_theme(const Theme& theme)
+ 			printf(", %s: %s", what, strerror(status));
+ 			failures++;
+ 		}
++	} else if (desktopColor) {
++		// Tracker picks its labels' colour when the desktop is refreshed
++		BMessenger tracker(kTrackerSignature);
++		if (tracker.IsValid())
++			tracker.SendMessage(B_RESTORE_BACKGROUND_IMAGE);
+ 	}
+ 	printf("\n");
+ 
+diff --git a/src/kits/tracker/BackgroundImage.cpp b/src/kits/tracker/BackgroundImage.cpp
+index 8da516494b..d55510c05c 100644
+--- a/src/kits/tracker/BackgroundImage.cpp
++++ b/src/kits/tracker/BackgroundImage.cpp
+@@ -48,6 +48,7 @@ All rights reserved.
+ 
+ #include "Background.h"
+ #include "Commands.h"
++#include "DesktopPoseView.h"
+ #include "PoseView.h"
+ 
+ 
+@@ -191,6 +192,11 @@ BackgroundImage::Show(BackgroundImageInfo* info, BView* view)
+ 	if (poseView != NULL)
+ 		poseView->SetWidgetTextOutline(info->fTextWidgetOutline);
+ 
++	// PROSE fork: the desktop draws its labels to stand out against this
++	DesktopPoseView* desktopView = dynamic_cast<DesktopPoseView*>(view);
++	if (desktopView != NULL)
++		desktopView->WallpaperChanged(info->fBitmap);
++
+ 	if (info->fBitmap == NULL) {
+ 		view->ClearViewBitmap();
+ 		view->Invalidate();
+@@ -295,6 +301,11 @@ BackgroundImage::Remove()
+ 		// their background
+ 		if (poseView != NULL)
+ 			poseView->SetWidgetTextOutline(true);
++
++		// PROSE fork: no picture behind the desktop's labels any more
++		DesktopPoseView* desktopView = dynamic_cast<DesktopPoseView*>(fView);
++		if (desktopView != NULL)
++			desktopView->WallpaperChanged(NULL);
+ 	}
+ 
+ 	fShowingBitmap = NULL;
+@@ -350,6 +361,11 @@ BackgroundImage::WorkspaceActivated(BView* view, int32 workspace, bool state)
+ 			if (poseView != NULL)
+ 				poseView->SetWidgetTextOutline(true);
+ 
++			// PROSE fork: this workspace shows no picture
++			DesktopPoseView* desktopView = dynamic_cast<DesktopPoseView*>(view);
++			if (desktopView != NULL)
++				desktopView->WallpaperChanged(NULL);
++
+ 			view->ClearViewBitmap();
+ 			view->Invalidate();
+ 		}
+diff --git a/src/kits/tracker/DesktopPoseView.cpp b/src/kits/tracker/DesktopPoseView.cpp
+index 525c3eee0e..a74fa924e6 100644
+--- a/src/kits/tracker/DesktopPoseView.cpp
++++ b/src/kits/tracker/DesktopPoseView.cpp
+@@ -40,6 +40,9 @@ All rights reserved.
+ 
+ #include "DesktopPoseView.h"
+ 
++#include <new>
++
++#include <Bitmap.h>
+ #include <NodeMonitor.h>
+ #include <Path.h>
+ #include <Screen.h>
+@@ -61,7 +64,9 @@ All rights reserved.
+ 
+ DesktopPoseView::DesktopPoseView(Model* model, uint32 viewMode)
+ 	:
+-	BPoseView(model, viewMode)
++	BPoseView(model, viewMode),
++	fHasWallpaper(false),
++	fWallpaperColor(kBlack)
+ {
+ 	SetFlags(Flags() | B_DRAW_ON_CHILDREN);
+ }
+@@ -310,6 +315,67 @@ DesktopPoseView::AdaptToBackgroundColorChange()
+ 	// settings, it's expected that text will be black on white in Tracker
+ 	// folders, but white on blue on the desktop).
+ 
+-	int32 desktopBrightness = ui_color(B_DESKTOP_COLOR).Brightness();
+-	SetHighColor(LowColor().Brightness() <= desktopBrightness ? kWhite : kBlack);
++	// PROSE fork: black or white, whichever stands out against what the
++	// labels stand on -- the wallpaper when there is one, the desktop's
++	// colour when there is not. This compared the workspace's colour with
++	// B_DESKTOP_COLOR, two settings that need not agree (a theme sets them
++	// apart), and so drew white labels on a light wallpaper and black ones
++	// on a dark one.
++	rgb_color background = fHasWallpaper ? fWallpaperColor : LowColor();
++	SetHighColor(background.IsLight() ? kBlack : kWhite);
++}
++
++
++/*!	PROSE fork: the average colour of a picture, from a grid of samples. */
++static bool
++average_color(const BBitmap* bitmap, rgb_color& average)
++{
++	if (bitmap == NULL || !bitmap->IsValid())
++		return false;
++
++	// the translators give B_RGB32 or B_RGBA32; anything else is converted
++	BBitmap* converted = NULL;
++	if (bitmap->ColorSpace() != B_RGB32 && bitmap->ColorSpace() != B_RGBA32) {
++		converted = new(std::nothrow) BBitmap(bitmap->Bounds(), B_RGB32);
++		if (converted == NULL || converted->InitCheck() != B_OK
++			|| converted->ImportBits(bitmap) != B_OK) {
++			delete converted;
++			return false;
++		}
++		bitmap = converted;
++	}
++
++	const int32 kSamples = 64;
++	const uint8* bits = (const uint8*)bitmap->Bits();
++	int32 bytesPerRow = bitmap->BytesPerRow();
++	int32 width = bitmap->Bounds().IntegerWidth() + 1;
++	int32 height = bitmap->Bounds().IntegerHeight() + 1;
++	uint64 red = 0;
++	uint64 green = 0;
++	uint64 blue = 0;
++	for (int32 y = 0; y < kSamples; y++) {
++		const uint8* row = bits
++			+ (int64)((2 * y + 1) * height / (2 * kSamples)) * bytesPerRow;
++		for (int32 x = 0; x < kSamples; x++) {
++			// B_RGB32 and B_RGBA32 are blue, green, red, alpha in memory
++			const uint8* pixel = row + ((2 * x + 1) * width / (2 * kSamples)) * 4;
++			blue += pixel[0];
++			green += pixel[1];
++			red += pixel[2];
++		}
++	}
++	delete converted;
++
++	const uint64 count = kSamples * kSamples;
++	average = make_color(red / count, green / count, blue / count);
++	return true;
++}
++
++
++void
++DesktopPoseView::WallpaperChanged(const BBitmap* wallpaper)
++{
++	fHasWallpaper = average_color(wallpaper, fWallpaperColor);
++	AdaptToBackgroundColorChange();
++	Invalidate();
+ }
+diff --git a/src/kits/tracker/DesktopPoseView.h b/src/kits/tracker/DesktopPoseView.h
+index 415c4fce47..c8ccc416b1 100644
+--- a/src/kits/tracker/DesktopPoseView.h
++++ b/src/kits/tracker/DesktopPoseView.h
+@@ -60,6 +60,10 @@ public:
+ 	void StartSettingsWatch();
+ 	void StopSettingsWatch();
+ 
++	void WallpaperChanged(const BBitmap* wallpaper);
++		// PROSE fork: the labels are drawn to stand out against it; NULL
++		// when the desktop shows no picture
++
+ protected:
+ 	virtual EntryListBase* InitDirentIterator(const entry_ref*);
+ 
+@@ -76,6 +80,9 @@ protected:
+ 	void AdaptToBackgroundColorChange();
+ 
+ private:
++	bool fHasWallpaper;
++	rgb_color fWallpaperColor;
++		// PROSE fork: the wallpaper's average colour
+ 
+ 	typedef BPoseView _inherited;
+ };
+diff --git a/src/kits/tracker/TrackerInitialState.cpp b/src/kits/tracker/TrackerInitialState.cpp
+index 18bcffc23e..8788494e13 100644
+--- a/src/kits/tracker/TrackerInitialState.cpp
++++ b/src/kits/tracker/TrackerInitialState.cpp
+@@ -771,9 +771,11 @@ TTracker::InstallTemporaryBackgroundImages()
+ 		attr_info info;
+ 		if (dir.GetAttrInfo(kBackgroundImageInfo, &info) != B_OK) {
+ 			BMessage message;
++			// PROSE fork: the labels outlined (the last argument), as a
++			// picture behind them asks for
+ 			AddTemporaryBackgroundImages(&message,
+ 				(BString(path.Path()) << defaultBackgroundImage).String(),
+-				BackgroundImage::kScaledToFit, BPoint(0, 0), 0xffffffff, false);
++				BackgroundImage::kScaledToFit, BPoint(0, 0), 0xffffffff, true);
+ 			::InstallTemporaryBackgroundImages(&dir, &message);
+ 
+ 			// PROSE fork: the Desktop window is built in the constructor and
