@@ -27,6 +27,13 @@ Haiku without the booting and hardware-compatibility issues of physical PCs.
    on acceleration features one at a time.
 4. **Everything versioned here**: build scripts, QEMU wrappers, patched
    sources, and documentation of what works on which host.
+5. **Native, not alien**: the machine runs Haiku's own applications and
+   frameworks. Codecs are the one exception — there is no point reinventing
+   those — and they are taken as libraries, never as somebody else's
+   application layer. A port that would bring SDL, X11, GTK or Qt with it is
+   not taken: an entire macOS machine is present outside the VM to run that
+   sort of software, and a Haiku that is a frame around another world's
+   toolkit is not worth having.
 
 ## Roadmap Sketch
 
@@ -44,3 +51,5 @@ Haiku without the booting and hardware-compatibility issues of physical PCs.
 - Running Haiku x86_64 under emulation.
 - Supporting hosts other than Apple Silicon macOS and Snapdragon Windows-on-ARM
   (others may work, but are not priorities).
+- Porting software that needs a foreign framework to run — SDL, X11, GTK, Qt.
+  What needs those can run on the Mac that is hosting the machine.

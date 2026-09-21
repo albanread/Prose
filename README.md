@@ -109,6 +109,14 @@ their work produced, and everything that makes it good is theirs.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
 
+**Native, not alien.** What runs in the machine is Haiku's own: its
+applications, its kits, its look. Codecs are the one exception — there is no
+point reinventing those, so ffmpeg and the codec libraries are built and
+taken as libraries. Software that would bring SDL, X11, GTK or Qt with it is
+not ported here, however easy the port: there is an entire macOS machine
+outside the window to run that, and a Haiku wrapped around another world's
+toolkit is not the thing I wanted to run.
+
 ### The display
 
 Three buffers, and the guest owns two of them.
