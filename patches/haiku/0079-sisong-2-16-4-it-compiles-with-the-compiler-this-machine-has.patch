@@ -1,0 +1,35 @@
+From e552882a6fc4e325608bc6852e43e6b071221976 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 08:43:23 +0100
+Subject: [PATCH] Sisong 2.16-4: it compiles with the compiler this machine has
+
+Run > Compile This File ran "g++" and told its reader "there is no
+compiler on this machine" while clang and lld sat in /boot/system/bin
+(patch 0077). The editor now builds with clang++ for C++ and clang for
+C, moves an old g++ default in a settings file on, and says which
+compilers the machine has when a command really is missing. It also
+gains File > Examples, which copies one of the examples (patch 0078)
+into ~/examples and opens it, because they ship on a read-only volume
+and the compiler must be able to write beside the source.
+
+ProseApps a38255f8ee28c4895c32741c111571a8b5a71392.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0079-sisong-2-16-4-it-compiles-with-the-compiler-this-machine-has.patch aa92fcd38414f5d0d5b8414922c89ed52b04201a81922fe8ff64fe8e2b9777e9
+---
+ build/jam/repositories/HaikuPorts/arm64 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index ea159a2300..323328e353 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -191,7 +191,7 @@ RemotePackageRepository HaikuPorts
+ 	samedi-1.2-1
+ 	shredder-1.0.0-3
+ 	prosewriter-0.1-2
+-	sisong-2.16-3
++	sisong-2.16-4
+ 	slayer-1.0-2
+ 	speex-1.2.1-2
+ 	speex_devel-1.2.1-2

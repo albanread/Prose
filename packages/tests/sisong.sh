@@ -122,6 +122,34 @@ else
 	wait $pid 2>/dev/null; status=$?
 	say "EXITED at once (status $status): $(head -c 400 /tmp/sisong.out | tr '\n' ' ')"; fail=1
 fi
+# What Run > Compile This File does, checked without the menu: the default
+# build command must name a compiler this machine has. It shipped naming g++,
+# which Prose does not have, and every test here passed while the editor told
+# its reader "there is no compiler on this machine".
+if grep -a -q -- '%c -g -Wall -o %e %f -lbe' "$APP"; then
+	say "default build command: %c, the compiler for the file"
+else
+	say "DEFAULT BUILD COMMAND is not the one that uses %c"; fail=1
+fi
+if grep -a -q prose-examples "$APP"; then say "File > Examples is in"; else say "NO examples menu"; fail=1; fi
+
+ex=/boot/system/data/prose-examples/01-hello/hello.c
+if [ -e "$ex" ]; then
+	# the command the editor builds, with the same flags and order
+	cc=clang
+	if "$cc" -g -Wall -o $dir/hello "$ex" -lbe > $dir/cc.out 2>&1; then
+		out=$($dir/hello 2>&1)
+		case "$out" in
+		*"Hello from Prose"*) say "compiled and ran an example with $cc: $out" ;;
+		*) say "COMPILED BUT RAN WRONG: '$out'"; fail=1 ;;
+		esac
+	else
+		say "COMPILE FAILED with $cc: $(head -c 300 $dir/cc.out | tr '\n' ' ')"; fail=1
+	fi
+else
+	say "NO example at $ex"; fail=1
+fi
+
 for r in /boot/home/Desktop/Sisong-*-debug-*.report; do
 	[ -e "$r" ] && { say "CRASH REPORT: $r"; fail=1; }
 done
