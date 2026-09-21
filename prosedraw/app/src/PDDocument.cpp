@@ -172,6 +172,24 @@ PDDocument::SetShapeStyle(int32 id, const PDStyle& style)
 }
 
 void
+PDDocument::SetShapeFlags(int32 id, bool arrowEnd, bool arrowStart,
+	bool orthogonal)
+{
+	PDShape* s = ShapeById(id);
+	if (s == NULL || s->kind != PD_CONNECTOR)
+		return;
+	if (s->arrowEnd == arrowEnd && s->arrowStart == arrowStart
+		&& s->orthogonal == orthogonal) {
+		return;
+	}
+	Snapshot();
+	s->arrowEnd = arrowEnd;
+	s->arrowStart = arrowStart;
+	s->orthogonal = orthogonal;
+	fModified = true;
+}
+
+void
 PDDocument::MoveZ(int32 id, bool toFront)
 {
 	int32 i = IndexOf(id);
@@ -290,6 +308,31 @@ PDDocument::AnchorPoint(const PDShape& from, const PDShape& to)
 	return BPoint(fc.x + dx * k, fc.y + dy * k);
 }
 
+void
+PDDocument::ConnectorWaypoints(const PDShape& from, const PDShape& to,
+	const PDShape& connector, std::vector<BPoint>& pts)
+{
+	pts.clear();
+	BPoint a = AnchorPoint(from, to);
+	BPoint b = AnchorPoint(to, from);
+	pts.push_back(a);
+	if (connector.orthogonal) {
+		// one elbow: split the dominant axis at its midpoint. Crisp
+		// flowchart lines; obstacle avoidance is Sprint 4, said so.
+		float dx = b.x - a.x, dy = b.y - a.y;
+		if (fabsf(dx) >= fabsf(dy)) {
+			float mx = a.x + dx / 2;
+			pts.push_back(BPoint(mx, a.y));
+			pts.push_back(BPoint(mx, b.y));
+		} else {
+			float my = a.y + dy / 2;
+			pts.push_back(BPoint(a.x, my));
+			pts.push_back(BPoint(b.x, my));
+		}
+	}
+	pts.push_back(b);
+}
+
 int32
 PDDocument::ShapeAtPoint(BPoint p) const
 {
@@ -304,26 +347,28 @@ PDDocument::ShapeAtPoint(BPoint p) const
 int32
 PDDocument::ConnectorAtPoint(BPoint p) const
 {
+	std::vector<BPoint> pts;
 	for (int32 i = (int32)fShapes.size() - 1; i >= 0; i--) {
 		const PDShape& c = fShapes[i];
 		if (c.kind != PD_CONNECTOR)
 			continue;
-		const PDShape* from = const_cast<PDDocument*>(this)->ShapeById(
-			c.fromId);
-		const PDShape* to = const_cast<PDDocument*>(this)->ShapeById(c.toId);
+		const PDShape* from = ShapeById(c.fromId);
+		const PDShape* to = ShapeById(c.toId);
 		if (from == NULL || to == NULL)
 			continue;
-		BPoint a = AnchorPoint(*from, *to);
-		BPoint b = AnchorPoint(*to, *from);
-		// distance from p to segment ab
-		float abx = b.x - a.x, aby = b.y - a.y;
-		float len2 = abx * abx + aby * aby;
-		float t = len2 > 0 ? ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2
-			: 0;
-		t = std::max(0.0f, std::min(1.0f, t));
-		BPoint q(a.x + abx * t, a.y + aby * t);
-		if (fabsf(p.x - q.x) + fabsf(p.y - q.y) < 6)
-			return c.id;
+		ConnectorWaypoints(*from, *to, c, pts);
+		// distance from p to each segment of the route
+		for (size_t k = 1; k < pts.size(); k++) {
+			BPoint a = pts[k - 1], b = pts[k];
+			float abx = b.x - a.x, aby = b.y - a.y;
+			float len2 = abx * abx + aby * aby;
+			float t = len2 > 0
+				? ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2 : 0;
+			t = std::max(0.0f, std::min(1.0f, t));
+			BPoint q(a.x + abx * t, a.y + aby * t);
+			if (fabsf(p.x - q.x) + fabsf(p.y - q.y) < 6)
+				return c.id;
+		}
 	}
 	return 0;
 }
@@ -393,6 +438,8 @@ PDDocument::SaveToMessage(BMessage* msg) const
 		m.AddInt32("to", s.toId);
 		m.AddBool("ae", s.arrowEnd);
 		m.AddBool("as", s.arrowStart);
+		if (s.orthogonal)
+			m.AddBool("ort", true);
 		msg->AddMessage("shape", &m);
 	}
 	return B_OK;
@@ -429,6 +476,7 @@ PDDocument::LoadFromMessage(const BMessage* msg)
 		m.FindInt32("to", &s.toId);
 		m.FindBool("ae", &s.arrowEnd);
 		m.FindBool("as", &s.arrowStart);
+		m.FindBool("ort", &s.orthogonal);
 		fShapes.push_back(s);
 		fNextId = std::max(fNextId, s.id + 1);
 	}

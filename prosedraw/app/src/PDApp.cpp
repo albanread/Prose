@@ -109,6 +109,7 @@ public:
 		PAPER_MSG = 'pdPp', ORIENT_MSG = 'pdOr',
 		GRID_SHOW_MSG = 'pdGs', GRID_SNAP_MSG = 'pdGn',
 		ALIGN_MSG = 'pdAl', ZORDER_MSG = 'pdZo',
+		ZOOM_MSG = 'pdZm',
 		STATUS_MSG = 'pdUp', FOCUS_LABEL_MSG = 'pdIl'
 	};
 
@@ -138,7 +139,9 @@ private:
 	BMenuField*	fStrokeField;
 	BMenuField*	fWidthField;
 	BCheckBox*	fDashed;
+	BCheckBox*	fArrowEnd, *fArrowStart, *fElbow;
 	BMenuField*	fTextSizeField;
+	BMenu*		fZoomMenu = NULL;
 	BMenuItem*	fUndoItem, *fRedoItem, *fSaveItem;
 	int32		fPaperIndex = 0;
 	BString		fFilePath;
@@ -341,6 +344,23 @@ PDWindow::BuildMenus()
 		new BMessage(GRID_SNAP_MSG));
 	snap->SetMarked(true);
 	menu->AddItem(snap);
+	menu->AddSeparatorItem();
+	fZoomMenu = new BMenu("Zoom");
+	const float zooms[5] = { 0.5f, 0.75f, 1.0f, 1.5f, 2.0f };
+	for (int32 i = 0; i < 5; i++) {
+		BMessage* m = new BMessage(ZOOM_MSG);
+		m->AddFloat("zoom", zooms[i]);
+		char label[12];
+		snprintf(label, sizeof(label), "%.0f%%", zooms[i] * 100);
+		BMenuItem* it = new BMenuItem(label, m);
+		if (zooms[i] == 1.0f) {
+			it->SetMarked(true);
+			it->SetShortcut('0', B_COMMAND_KEY);
+		}
+		fZoomMenu->AddItem(it);
+	}
+	fZoomMenu->SetRadioMode(true);
+	menu->AddItem(fZoomMenu);
 	fMenuBar->AddItem(menu);
 }
 
@@ -433,6 +453,20 @@ PDWindow::BuildInspector()
 		"Text:", sizeMenu);
 	fTextSizeField->SetDivider(42);
 	fInspector->AddChild(fTextSizeField);
+
+	// connector-only controls; RefreshInspector enables them when the
+	// selection actually holds a connector
+	const char* checks[3] = { "Arrow at end", "Arrow at start",
+		"Elbow route" };
+	BCheckBox** boxes[3] = { &fArrowEnd, &fArrowStart, &fElbow };
+	for (int32 i = 0; i < 3; i++) {
+		BMessage* m = new BMessage(INSPECTOR_MSG);
+		m->AddInt32("field", 10 + i);
+		*boxes[i] = new BCheckBox(BRect(8, 286 + i * 22, 200, 306 + i * 22),
+			"conn", checks[i], m);
+		fInspector->AddChild(*boxes[i]);
+	}
+	fInspector->ResizeTo(208, 360);
 }
 
 void
@@ -500,10 +534,11 @@ PDWindow::UpdateStatus()
 			paperName = kPapers[i].name;
 	bool landscape = p.width > p.height;
 	s.SetToFormat("%d shapes, %d selected   %s %s (%.0fx%.0f)   "
-		"grid %.0f pt%s", (int)fDoc.Count(),
+		"grid %.0f pt%s   zoom %.0f%%", (int)fDoc.Count(),
 		(int)fCanvas->Selection().size(), paperName,
 		landscape ? "landscape" : "portrait", p.width, p.height,
-		fDoc.Grid(), fDoc.SnapEnabled() ? "" : ", snap off");
+		fDoc.Grid(), fDoc.SnapEnabled() ? "" : ", snap off",
+		fCanvas->Zoom() * 100);
 	fStatus->SetText(s.String());
 	BString name("Untitled");
 	if (fFilePath.Length()) {
@@ -538,6 +573,24 @@ PDWindow::RefreshInspector()
 		if (s != NULL)
 			fLabel->SetText(s->label.String());
 	}
+	// connector flags: read from the first selected connector
+	const PDShape* conn = NULL;
+	for (int32 id : sel) {
+		const PDShape* s = fDoc.ShapeById(id);
+		if (s != NULL && s->kind == PD_CONNECTOR) {
+			conn = s;
+			break;
+		}
+	}
+	fArrowEnd->SetEnabled(conn != NULL);
+	fArrowStart->SetEnabled(conn != NULL);
+	fElbow->SetEnabled(conn != NULL);
+	fArrowEnd->SetValue(conn != NULL && conn->arrowEnd
+		? B_CONTROL_ON : B_CONTROL_OFF);
+	fArrowStart->SetValue(conn != NULL && conn->arrowStart
+		? B_CONTROL_ON : B_CONTROL_OFF);
+	fElbow->SetValue(conn != NULL && conn->orthogonal
+		? B_CONTROL_ON : B_CONTROL_OFF);
 	fRefreshingInspector = false;
 }
 
@@ -559,6 +612,13 @@ PDWindow::ApplyInspector(int32 field)
 		if (field == 3) b.right = b.left + v;
 		if (field == 4) b.bottom = b.top + v;
 		fCanvas->SetSelectionRect(b);
+	} else if (field >= 10 && field <= 12) {
+		// connector flags apply to every selected connector
+		bool end = fArrowEnd->Value() == B_CONTROL_ON;
+		bool start = fArrowStart->Value() == B_CONTROL_ON;
+		bool elbow = fElbow->Value() == B_CONTROL_ON;
+		for (int32 id : sel)
+			fDoc.SetShapeFlags(id, end, start, elbow);
 	} else if (field >= 5) {
 		// style fields apply the shared style of the first selection
 		PDShape* s = fDoc.ShapeById(sel[0]);
@@ -838,6 +898,25 @@ PDWindow::MessageReceived(BMessage* message)
 			}
 			break;
 		}
+		case ZOOM_MSG:
+		{
+			float z = 1.0f;
+			message->FindFloat("zoom", &z);
+			fCanvas->SetZoom(z);
+			// radio marks follow; a scripted zoom between presets
+			// legitimately marks nothing
+			if (fZoomMenu != NULL) {
+				for (int32 i = 0; i < fZoomMenu->CountItems(); i++) {
+					float itemZoom = 0;
+					fZoomMenu->ItemAt(i)->Message()
+						->FindFloat("zoom", &itemZoom);
+					fZoomMenu->ItemAt(i)->SetMarked(
+						itemZoom == fCanvas->Zoom());
+				}
+			}
+			UpdateStatus();
+			break;
+		}
 		case OPEN_PANEL_MSG:
 			if (fOpenPanel == NULL)
 				fOpenPanel = new BFilePanel(B_OPEN_PANEL,
@@ -935,6 +1014,11 @@ static property_info sPDProperties[] = {
 		{ B_GET_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"number of shapes in the diagram", 0, { B_INT32_TYPE } },
+	{ "Zoom",
+		{ B_GET_PROPERTY, B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"canvas zoom percent (set: 50..400)", 0,
+		{ B_INT32_TYPE, B_INT32_TYPE } },
 	{ "Activate",
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
@@ -1001,10 +1085,38 @@ HandleScriptingForWindow(PDWindow* window, BMessage* message,
 	PDDocument& doc = *window->Document();
 	BString prop = property;
 	bool isGet = message->what == B_GET_PROPERTY;
+	bool isSet = message->what == B_SET_PROPERTY;
 	bool isExec = message->what == B_EXECUTE_PROPERTY;
 
 	if (prop == "ShapeCount" && isGet) {
 		ReplyInt(message, doc.Count());
+		return true;
+	}
+	if (prop == "Zoom" && isGet) {
+		ReplyInt(message, (int32)roundf(window->Canvas()->Zoom() * 100));
+		return true;
+	}
+	if (prop == "Zoom" && isSet) {
+		// one value, two conventions: a factor (2, 0.5) or a percent
+		// (200). hey sends ints, pwquery strings — take whichever
+		// field arrives and disambiguate by range.
+		float z = -1.0f;
+		float f = 0.0f;
+		int32 i = 0;
+		BString s;
+		if (message->FindFloat("data", &f) == B_OK)
+			z = f;
+		else if (message->FindInt32("data", &i) == B_OK)
+			z = i;
+		else if (message->FindString("data", &s) == B_OK)
+			z = atof(s.String());
+		if (z > 4.0f && z <= 400.0f)
+			z /= 100.0f;	// percent
+		BMessage zoom(PDWindow::ZOOM_MSG);
+		zoom.AddFloat("zoom", z);
+		window->PostMessage(&zoom);
+		z = fminf(4.0f, fmaxf(0.25f, z));
+		ReplyInt(message, (int32)roundf(z * 100));
 		return true;
 	}
 	if (prop == "Activate" && isExec) {
@@ -1019,8 +1131,8 @@ HandleScriptingForWindow(PDWindow* window, BMessage* message,
 			ReplyError(message, "data: shape spec required");
 			return true;
 		}
-		if (data == "connect") {
-			window->Canvas()->QueueConnector();
+		if (data.IStartsWith("connect")) {
+			window->Canvas()->QueueConnector(data.IFindFirst("elbow") >= 0);
 			ReplyString(message, "");
 			return true;
 		}
@@ -1515,6 +1627,69 @@ SelfTest()
 		CHECK("recent missing file", none.Load("/tmp/pd-none-recent")
 			!= B_OK && none.Items().empty());
 		remove(rp);
+	}
+
+	printf("block: routing\n"); fflush(stdout);
+	{
+		// ids, never PDShape*: AddShape reallocs the vector, so a
+		// pointer from an earlier add dangles (the Sprint 1 lesson,
+		// paid for once more here — NULL->kind through a stale id)
+		PDDocument doc;
+		int32 aId = doc.AddShape(PD_RECT, BRect(0, 0, 100, 50), "A")->id;
+		int32 bId = doc.AddShape(PD_RECT, BRect(200, 80, 300, 130), "B")->id;
+		int32 cId = doc.AddShape(PD_CONNECTOR, BRect(0, 0, 0, 0))->id;
+		doc.ShapeById(cId)->fromId = aId;
+		doc.ShapeById(cId)->toId = bId;
+
+		std::vector<BPoint> wps;
+		PDDocument::ConnectorWaypoints(*doc.ShapeById(aId),
+			*doc.ShapeById(bId), *doc.ShapeById(cId), wps);
+		CHECK("straight is two points", wps.size() == 2);
+		doc.ShapeById(cId)->orthogonal = true;
+		PDDocument::ConnectorWaypoints(*doc.ShapeById(aId),
+			*doc.ShapeById(bId), *doc.ShapeById(cId), wps);
+		CHECK("elbow is four points", wps.size() == 4);
+		CHECK("elbow segments are axis-aligned",
+			((wps[0].x == wps[1].x) || (wps[0].y == wps[1].y))
+			&& ((wps[1].x == wps[2].x) || (wps[1].y == wps[2].y))
+			&& ((wps[2].x == wps[3].x) || (wps[2].y == wps[3].y)));
+		CHECK("elbow endpoints are the anchors",
+			wps.front() == PDDocument::AnchorPoint(*doc.ShapeById(aId),
+				*doc.ShapeById(bId))
+			&& wps.back() == PDDocument::AnchorPoint(*doc.ShapeById(bId),
+				*doc.ShapeById(aId)));
+
+		// a point on the elbow's mid-segment, far off the straight
+		// diagonal — only the polyline hit test finds the connector
+		BPoint mid((wps[1].x + wps[2].x) / 2, (wps[1].y + wps[2].y) / 2);
+		CHECK("elbow hit test follows the route",
+			doc.ConnectorAtPoint(mid) == cId);
+
+		// flags persist
+		doc.ShapeById(cId)->arrowStart = true;
+		BMessage msg;
+		doc.SaveToMessage(&msg);
+		PDDocument loaded;
+		loaded.LoadFromMessage(&msg);
+		const PDShape* lc = loaded.Count() == 3 ? loaded.ShapeAt(2) : NULL;
+		CHECK("elbow persists", lc != NULL && lc->orthogonal);
+		CHECK("arrow flags persist",
+			lc != NULL && lc->arrowStart && lc->arrowEnd);
+
+		// SetShapeFlags snapshots once, ignores non-connectors
+		doc.SetShapeFlags(aId, false, true, false);
+		CHECK("flags ignored on boxes",
+			doc.ShapeById(aId)->kind == PD_RECT);
+		// clear the raw-set flags: a real change, so this snapshot is
+		// the one Undo takes (AddShape snapshots too — undoing the add
+		// would remove the connector; that's correct, not for this test)
+		doc.SetShapeFlags(cId, false, false, false);
+		CHECK("flags applied", !doc.ShapeById(cId)->orthogonal
+			&& !doc.ShapeById(cId)->arrowStart);
+		doc.Undo();
+		const PDShape* undone = doc.ShapeById(cId);
+		CHECK("flags undo", undone != NULL && undone->orthogonal
+			&& undone->arrowStart && doc.Count() == 3);
 	}
 
 	#undef CHECK

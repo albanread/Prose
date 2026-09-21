@@ -183,14 +183,13 @@ EmitLabel(PdfPen& p, const BString& label, const PDStyle& style,
 		<< PdfText(label.String()) << ") Tj ET\n";
 }
 
-// The connector's end arrowhead — identical geometry to the canvas
+// An arrowhead pointing tip-ward — identical geometry to the canvas
 // (head = 8 + 2*penWidth, half-width 0.4*head), so print matches screen.
 static void
-EmitArrowhead(PdfPen& p, BPoint a, BPoint b, const PDStyle& style)
+EmitArrowhead(PdfPen& p, BPoint tail, BPoint tip, const PDStyle& style)
 {
-	float ang = atan2f(b.y - a.y, b.x - a.x);
+	float ang = atan2f(tip.y - tail.y, tip.x - tail.x);
 	const float head = 8.0f + style.strokeWidth * 2;
-	BPoint tip = b;
 	BPoint back(tip.x - head * cosf(ang), tip.y - head * sinf(ang));
 	BPoint n(head * 0.4f * sinf(ang), -head * 0.4f * cosf(ang));
 	p.s << "q " << PdfColor(style.stroke) << " rg "
@@ -206,17 +205,19 @@ EmitConnector(PdfPen& p, const PDShape& s, const PDDocument& doc)
 	const PDShape* to = doc.ShapeById(s.toId);
 	if (from == NULL || to == NULL)
 		return;
-	BPoint a = PDDocument::AnchorPoint(*from, *to);
-	BPoint b = PDDocument::AnchorPoint(*to, *from);
+	std::vector<BPoint> wps;
+	PDDocument::ConnectorWaypoints(*from, *to, s, wps);
 	p.s << "q " << PdfColor(s.style.stroke) << " RG "
 		<< p.N(s.style.strokeWidth) << " w "
 		<< (s.style.dashed ? "[2 2] 0 d" : "[] 0 d") << "\n"
-		<< p.N(a.x) << " " << p.N(p.Y(a.y)) << " m "
-		<< p.N(b.x) << " " << p.N(p.Y(b.y)) << " l S\nQ\n";
+		<< p.N(wps[0].x) << " " << p.N(p.Y(wps[0].y)) << " m";
+	for (size_t k = 1; k < wps.size(); k++)
+		p.s << " " << p.N(wps[k].x) << " " << p.N(p.Y(wps[k].y)) << " l";
+	p.s << " S\nQ\n";
 	if (s.arrowEnd)
-		EmitArrowhead(p, a, b, s.style);
+		EmitArrowhead(p, wps[wps.size() - 2], wps.back(), s.style);
 	if (s.arrowStart)
-		EmitArrowhead(p, b, a, s.style);
+		EmitArrowhead(p, wps[1], wps.front(), s.style);
 }
 
 static void

@@ -145,20 +145,47 @@ label=$("$GUEST" run 'grep -ac "Tj" /tmp/pd-smoke.pdf' 2>/dev/null \
 	&& ok "pdf export (A4, vector, labelled)" \
 	|| bad "pdf ($magic/$box/ops=$ops labels=$label)"
 
-# 9 - clean quit (unmodified document) exits the app
+# 9 - elbow connectors + zoom: an orthogonal route through scripting
+#     (more line ops in the PDF than the straight connector), and the
+#     Zoom property round trip
 n=9
+"$GUEST" run "$PWQ $SIG AddShape X do 'rect 80 500 120 60|Source'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG AddShape X do 'rect 320 560 120 60|Sink'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG AddShape X do 'connect elbow'" >/dev/null 2>&1
+sleep 1
+c=$(count)
+"$GUEST" run "$PWQ $SIG Save X do /tmp/pd-elbow.draw" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG PDF X do /tmp/pd-elbow.pdf" >/dev/null 2>&1
+sleep 1
+# the connector paths are emitted one-per-line: an elbow route is the
+# only line with three or more " l " segment ops on it
+elbows=$("$GUEST" run 'grep -acE " l .* l .* l " /tmp/pd-elbow.pdf' \
+	2>/dev/null | head -1 | tr -d '\0\r\n')
+z1=$("$GUEST" run "hey $SIG set Zoom to 2" 2>/dev/null | grep -a result \
+	| sed -n 's/.*: \([0-9]*\).*/\1/p')
+z0=$("$GUEST" run "hey $SIG set Zoom to 1" 2>/dev/null | grep -a result \
+	| sed -n 's/.*: \([0-9]*\).*/\1/p')
+zq=$("$GUEST" run "hey $SIG get Zoom" 2>/dev/null | grep -a result \
+	| sed -n 's/.*: \([0-9]*\).*/\1/p')
+[ "$c" = "7" ] && [ "$elbows" -ge 1 ] && [ "$z1" = "200" ] && [ "$z0" = "100" ] \
+	&& [ "$zq" = "100" ] \
+	&& ok "elbow route + zoom" \
+	|| bad "elbow/zoom (c=$c elbows=$elbows z=$z1/$z0/$zq)"
+
+# 10 - clean quit (unmodified document) exits the app
+n=10
 "$GUEST" run "$PWQ $SIG Quit X do" >/dev/null 2>&1
 sleep 2
 left=$("$GUEST" run 'ps' 2>/dev/null | grep -ac "apps/ProseDraw")
 [ "$left" = "0" ] && ok "clean quit exits" || bad "quit (teams left: $left)"
 
-# 10 - Open Recent persisted: the settings file exists, lists the
-#      documents this run opened, most recent first
-n=10
+# 11 - Open Recent persisted: the settings file exists, lists the
+#      documents this run opened, most recent first (the elbow save)
+n=11
 recent=$("$GUEST" run 'cat /boot/home/config/settings/ProseDraw/recent_files' \
 	2>/dev/null | tr -d '\r')
 first=$(echo "$recent" | head -1 | tr -d '\0')
-echo "$recent" | grep -aq "pd-smoke.draw" && echo "$first" | grep -aq "pd-noext" \
+echo "$recent" | grep -aq "pd-smoke.draw" && echo "$first" | grep -aq "pd-elbow.draw" \
 	&& ok "recent files persisted" || bad "recent ($first)"
 
 "$QMP" shot "$OUT/pd-smoke-desk.png" >/dev/null 2>&1

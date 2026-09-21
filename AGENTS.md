@@ -22,6 +22,13 @@ will be written here. The discipline that keeps it working:
   session lost an hour to "the fix didn't work" against an hour-stale
   deployed copy plus three zombie teams blocked in modal alerts; kill the
   zombies, redeploy, retest. Smoke scripts deploy-verify in step 1.
+- **A crashed app's team is debugger-suspended and ignores `kill -9`** —
+  the debug_server holds it in a crash alert that waits forever headless,
+  and one zombie poisons the roster for every later `hey` (scripting goes
+  to dead instances and everything "fails"). If teams survive a kill
+  sweep, `qmp.py` a `system_reset` (disk persists, RAM clears) and sync
+  after deploys: `guest.sh put` verifies against the guest's page cache,
+  so an unflushed deploy is lost to a reset.
 - **API facts that have bitten us:** `BString::IFindLast` returns `int32`
   (B_ERROR when absent — never compare it to NULL); `BFile::Write` returns
   bytes written (a positive return is NOT B_OK); `B_DELETE` is 0x7F and

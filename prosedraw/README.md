@@ -21,12 +21,20 @@ prosedraw/
 ## What works (Sprint 1)
 
 - **Shapes:** rectangle, rounded rectangle, ellipse, diamond, text;
-  connectors between shapes (press on A, release on B) with an
-  arrowhead; deleting a shape deletes its connectors.
+  connectors between shapes (press on A, release on B); deleting a
+  shape deletes its connectors.
+- **Connectors (Sprint 3):** straight or elbow (orthogonal) routes and
+  arrows at either end — per connector, set in the inspector or via
+  `AddShape do "connect elbow"`; screen, hit-testing and PDF all share
+  one router.
 - **Grid:** 8 pt grid drawn on the page, snapping on by default
   (View ▸ toggles), snap-delta drags so existing shapes keep alignment.
+- **Zoom (Sprint 3):** 25%–400%, View ▸ Zoom presets or the `Zoom`
+  scripting property (factor or percent); everything scales, PDF
+  export stays 1:1 vector.
 - **Inspector:** label, X/Y/W/H, fill (none + 9 colours), stroke,
-  line width, dashed, text size — applies to the selection live.
+  line width, dashed, text size, connector arrows/route — applies to
+  the selection live.
 - **Arrange:** 6 alignments + 2 distributions, front/back z-order,
   duplicate (offset), delete, arrow-key nudge, full undo/redo.
 - **Paper:** A4/Letter/Legal/A5/A3, portrait/landscape, page metrics
@@ -41,28 +49,28 @@ prosedraw/
   (A4/Letter/Legal/A5/A3, portrait/landscape). Via File ▸ Print to
   PDF… or the `PDF` scripting property; exported files are typed
   `application/pdf`.
-- **Scripting:** `Activate`, `ShapeCount` (get), `AddShape` (do, data
-  `"kind x y w h|label"` or `"connect"`), `Save`, `Open`, `PDF`,
-  `Quit` — this is the smoke-test surface.
-- **Selftest:** `ProseDraw --selftest` — 61 checks (paper metrics,
-  snapping, connector anchor math, align, undo, persistence, sniffing,
-  PDF structure, recent list).
+- **Scripting:** `Activate`, `ShapeCount`/`Zoom` (get/set), `AddShape`
+  (do, data `"kind x y w h|label"`, `"connect"`, `"connect elbow"`),
+  `Save`, `Open`, `PDF`, `Quit` — this is the smoke-test surface.
+- **Selftest:** `ProseDraw --selftest` — 71 checks (paper metrics,
+  snapping, connector anchor math and routing, align, undo,
+  persistence, sniffing, PDF structure, recent list).
 
 ## Test status
 
 | ID | Test | Result |
 |---|---|---|
-| D01 | selftest | PASS 61/61 |
+| D01 | selftest | PASS 71/71 |
 | D02 | launch + render (screenshot) | PASS |
 | D03 | scripted shapes + connector (screenshot) | PASS |
 | D04 | save → relaunch-with-file round trip | PASS |
-| D05 | `tests/guest-smoke.sh` | PASS 10/10 |
+| D05 | `tests/guest-smoke.sh` | PASS 11/11 |
 | D06 | PDF export (guest checks + host eyeball) | PASS |
 | D07 | recent files persisted | PASS |
+| D08 | elbow routing + zoom (PDF eyeball + scripting) | PASS |
 
 ## Not yet (planned — see docs/plan.md)
 
 BPrintJob for real printers (no printer on the test guest to verify
-against — PDF is the printable path); zoom (canvas is 1:1); Sprint 3:
-orthogonal connector routing, arrowheads per end (modelled, exposed
-next), image shapes, multi-page, layers.
+against — PDF is the printable path); image shapes, multi-page
+documents, layers, obstacle-avoiding connector routing.

@@ -124,6 +124,48 @@ mouse, palette drags, inspector edits by mouse.
 Arrowheads per end, connector routing (orthogonal), image shapes,
 multi-page documents, layers.
 
+**Delivered — 2026-09-21 (routing, arrow controls, zoom; images/
+multi-page/layers remain future work).**
+
+- **Elbow connectors:** per-connector `orthogonal` flag; the route
+  (straight `[a,b]` or one-bend elbow `[a, m1, m2, b]`, dominant-axis
+  midpoint split — no obstacle avoidance, Sprint 4 says so) lives in
+  one place, `PDDocument::ConnectorWaypoints`, shared by canvas,
+  hit-testing and PDF. Toggle via the inspector ("Elbow route") or
+  scripting (`AddShape do "connect elbow"`). Eyeballed in the
+  exported PDF: Source→Sink leaves horizontally, bends down, enters
+  horizontally.
+- **Arrow controls:** "Arrow at end" / "Arrow at start" inspector
+  checkboxes (enabled when the selection holds a connector); both
+  flags render on screen and in PDF along the meeting segment.
+  Duplicate copies all flags now.
+- **Zoom:** 25%–400%, one mapping point (DocToView/ViewToDoc) —
+  every interaction, the grid, pen widths, corner radii and label
+  sizes scale; PDF export is doc-space and unaffected. View ▸ Zoom
+  presets (50–200%, radio marks) and a `Zoom` get/set scripting
+  property that accepts a factor (2) or a percent (200) — hey sends
+  ints, pwquery strings, both work.
+- Selftest 61 → 71 (routing block: waypoints, axis-aligned segments,
+  polyline hit test on the mid-segment, persistence, flag undo);
+  smoke 10 → 11 steps (elbow PDF structure + zoom round trip).
+
+**Session findings (two traps worth their price):**
+
+- A hung selftest was my own new test repeating the Sprint 1
+  dangling-pointer lesson: `PDShape*` held across `AddShape`
+  reallocs, then `ShapeById(garbage)->kind` → NULL deref → the
+  Haiku crash alert, which waits forever headless. Worse: a
+  debugger-suspended team **ignores kill -9** — five zombies later
+  the roster sent scripting to dead instances and everything
+  "failed". Cure: QEMU system_reset (disk persists, RAM clears).
+  Both lessons now in AGENTS.md.
+- The same reset exposed a deploy hazard: `guest.sh put` verifies
+  against the guest's page cache, not the drive — an unflushed
+  deploy is lost to a reset. Sync after deploying (AGENTS.md).
+
+**Still human-owed:** inspector checkboxes and the View ▸ Zoom menu
+by mouse; palette drags.
+
 ## Test definitions
 
 | ID | Test | Method | Pass |
@@ -132,6 +174,7 @@ multi-page documents, layers.
 | D02 | launch + render | launch, screenshot | PASS |
 | D03 | scripted shapes | `AddShape` ×3 + connector, screenshot | PASS |
 | D04 | round trip | Save → relaunch with file → screenshot + ShapeCount | PASS |
-| D05 | smoke | `prosedraw/tests/guest-smoke.sh` | PASS 10/10 |
+| D05 | smoke | `prosedraw/tests/guest-smoke.sh` | PASS 11/11 |
 | D06 | PDF export | `PDF do` → magic/MediaBox/vector ops in guest; fetched PDF eyeballed on host | PASS |
 | D07 | recent files | settings file lists opened docs, most recent first | PASS |
+| D08 | elbow + zoom | orthogonal route in PDF (eyeballed), zoom scripting round trip, 200% screenshot | PASS |

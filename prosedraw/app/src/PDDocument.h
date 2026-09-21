@@ -57,6 +57,7 @@ struct PDShape {
 	int32		toId = 0;
 	bool		arrowEnd = true;
 	bool		arrowStart = false;
+	bool		orthogonal = false;	// elbow route instead of straight
 };
 
 // Papers in points at 72 dpi — one table, one truth (layout, canvas,
@@ -86,6 +87,9 @@ public:
 	void		SetShapeRect(int32 id, BRect rect);
 	void		SetShapeLabel(int32 id, const char* label);
 	void		SetShapeStyle(int32 id, const PDStyle& style);
+	// connector flags (arrows per end, routing), one snapshot
+	void		SetShapeFlags(int32 id, bool arrowEnd, bool arrowStart,
+					bool orthogonal);
 	// z-order: front = drawn last = top of the stack
 	void		MoveZ(int32 id, bool toFront);
 
@@ -97,6 +101,11 @@ public:
 	// Where a connector from `from' to `to' attaches on each border —
 	// the intersection of the centre-centre line with the shape box.
 	static BPoint	AnchorPoint(const PDShape& from, const PDShape& to);
+	// The route a connector takes, doc space: [start, ...elbows...,
+	// end]. Straight connectors get [a, b]; orthogonal ones get one
+	// mid-segment (a classic elbow — no obstacle avoidance, honestly).
+	static void	ConnectorWaypoints(const PDShape& from, const PDShape& to,
+				const PDShape& connector, std::vector<BPoint>& pts);
 	// id of the topmost non-connector shape whose box contains p
 	int32		ShapeAtPoint(BPoint p) const;
 	// connector hit test: distance from p to the drawn segment

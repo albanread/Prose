@@ -34,10 +34,23 @@ PDCanvas::MakeFocus(bool focus)
 }
 
 void
+PDCanvas::SetZoom(float zoom)
+{
+	if (zoom < 0.25f)
+		zoom = 0.25f;
+	if (zoom > 4.0f)
+		zoom = 4.0f;
+	if (zoom == fZoom)
+		return;
+	fZoom = zoom;
+	DocumentChangedSize();
+}
+
+void
 PDCanvas::DocumentChangedSize()
 {
-	ResizeTo(fDoc->Page().width + 2 * kMargin,
-		fDoc->Page().height + 2 * kMargin);
+	ResizeTo((fDoc->Page().width + 2 * kMargin) * fZoom,
+		(fDoc->Page().height + 2 * kMargin) * fZoom);
 	BScrollView* sc = dynamic_cast<BScrollView*>(Parent());
 	if (sc != NULL && sc->ScrollBar(B_VERTICAL) != NULL)
 		sc->ScrollBar(B_VERTICAL)->SetRange(0,
@@ -50,13 +63,13 @@ void
 PDCanvas::Draw(BRect)
 {
 	const PDPageSetup& page = fDoc->Page();
-	BRect pageRect(kMargin, kMargin, kMargin + page.width,
-		kMargin + page.height);
+	BRect pageRect(DocToView(BPoint(0, 0)),
+		DocToView(BPoint(page.width, page.height)));
 
 	// desk, shadow, page — the ProseWriter look
 	SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR),
 		B_DARKEN_2_TINT));
-	FillRect(pageRect.OffsetByCopy(3, 3));
+	FillRect(pageRect.OffsetByCopy(3 * fZoom, 3 * fZoom));
 	SetHighColor(255, 255, 255, 255);
 	FillRect(pageRect);
 	if (fDoc->ShowGrid())
@@ -110,7 +123,7 @@ PDCanvas::DrawGrid(BRect pageRect)
 		B_DARKEN_1_TINT));
 	// blend white 12% -> light lines on the page only
 	SetHighColor(230, 230, 230, 255);
-	float g = fDoc->Grid();
+	float g = fDoc->Grid() * fZoom;
 	for (float x = pageRect.left + g; x < pageRect.right - 0.5f; x += g)
 		StrokeLine(BPoint(x, pageRect.top + 1), BPoint(x, pageRect.bottom - 1));
 	for (float y = pageRect.top + g; y < pageRect.bottom - 0.5f; y += g)
@@ -156,16 +169,23 @@ PDCanvas::DrawShape(const PDShape& s)
 		const PDShape* to = fDoc->ShapeById(s.toId);
 		if (from == NULL || to == NULL)
 			return;
-		BPoint a = DocToView(PDDocument::AnchorPoint(*from, *to));
-		BPoint b = DocToView(PDDocument::AnchorPoint(*to, *from));
+		// the route in doc space (straight or elbow), mapped to view
+		std::vector<BPoint> wps;
+		PDDocument::ConnectorWaypoints(*from, *to, s, wps);
+		std::vector<BPoint> v;
+		v.reserve(wps.size());
+		for (BPoint wp : wps)
+			v.push_back(DocToView(wp));
 		SetHighColor(s.style.stroke);
-		SetPenSize(s.style.strokeWidth);
+		SetPenSize(s.style.strokeWidth * fZoom);
 		SetDrawingMode(B_OP_COPY);
-		StrokeLine(a, b, s.style.dashed ? kDash : B_SOLID_HIGH);
-		// arrowheads along the line, per the shape's flags
-		float ang = atan2f(b.y - a.y, b.x - a.x);
-		const float head = 8.0f + s.style.strokeWidth * 2;
-		auto drawHead = [&](BPoint tip, float dirAng) {
+		for (size_t k = 1; k < v.size(); k++)
+			StrokeLine(v[k - 1], v[k],
+				s.style.dashed ? kDash : B_SOLID_HIGH);
+		// arrowheads per end, along the segment that meets it
+		const float head = (8.0f + s.style.strokeWidth * 2) * fZoom;
+		auto drawHead = [&](BPoint tip, BPoint tail) {
+			float dirAng = atan2f(tip.y - tail.y, tip.x - tail.x);
 			BPoint back(tip.x - head * cosf(dirAng),
 				tip.y - head * sinf(dirAng));
 			BPoint n(head * 0.4f * sinf(dirAng),
@@ -175,9 +195,9 @@ PDCanvas::DrawShape(const PDShape& s)
 			FillPolygon(tri, 3);
 		};
 		if (s.arrowEnd)
-			drawHead(b, ang);
+			drawHead(v.back(), v[v.size() - 2]);
 		if (s.arrowStart)
-			drawHead(a, ang + 3.14159265f);
+			drawHead(v.front(), v[1]);
 		SetPenSize(1.0f);
 		return;
 	}
@@ -186,22 +206,23 @@ PDCanvas::DrawShape(const PDShape& s)
 	if (s.kind == PD_TEXT) {
 		if (s.label.Length() > 0) {
 			BFont font(be_plain_font);
-			font.SetSize(s.style.textSize);
+			font.SetSize(s.style.textSize * fZoom);
 			SetFont(&font);
 			SetHighColor(s.style.textColor);
 			DrawString(s.label.String(), r.LeftTop()
-				+ BPoint(0, s.style.textSize));
+				+ BPoint(0, s.style.textSize * fZoom));
 		}
 		return;
 	}
 
-	SetPenSize(s.style.strokeWidth);
+	const float radius = 8.0f * fZoom;
+	SetPenSize(s.style.strokeWidth * fZoom);
 	if (s.style.fillOn) {
 		SetHighColor(s.style.fill);
 		if (s.kind == PD_RECT)
 			FillRect(r);
 		else if (s.kind == PD_RRECT)
-			FillRoundRect(r, 8, 8);
+			FillRoundRect(r, radius, radius);
 		else if (s.kind == PD_ELLIPSE)
 			FillEllipse(r);
 		else if (s.kind == PD_DIAMOND) {
@@ -219,7 +240,7 @@ PDCanvas::DrawShape(const PDShape& s)
 		if (s.kind == PD_RECT)
 			StrokeRect(r, p);
 		else if (s.kind == PD_RRECT)
-			StrokeRoundRect(r, 8, 8, p);
+			StrokeRoundRect(r, radius, radius, p);
 		else if (s.kind == PD_ELLIPSE)
 			StrokeEllipse(r, p);
 		else if (s.kind == PD_DIAMOND) {
@@ -236,7 +257,7 @@ PDCanvas::DrawShape(const PDShape& s)
 	// the label, centred in the shape
 	if (s.label.Length() > 0) {
 		BFont font(be_plain_font);
-		font.SetSize(s.style.textSize);
+		font.SetSize(s.style.textSize * fZoom);
 		SetFont(&font);
 		float w = font.StringWidth(s.label.String());
 		font_height fh;
@@ -323,6 +344,8 @@ PDCanvas::DuplicateSelection()
 			c->toId = remap[s->toId];
 			c->style = s->style;
 			c->arrowEnd = s->arrowEnd;
+			c->arrowStart = s->arrowStart;
+			c->orthogonal = s->orthogonal;
 			fresh.push_back(c->id);
 		}
 	}
@@ -356,7 +379,7 @@ PDCanvas::SetSelectionRect(BRect rect)
 }
 
 void
-PDCanvas::QueueConnector()
+PDCanvas::QueueConnector(bool elbow)
 {
 	// scripted: connect the two most recently added non-connector shapes
 	std::vector<int32> ids;
@@ -369,6 +392,7 @@ PDCanvas::QueueConnector()
 		PDShape* c = fDoc->AddShape(PD_CONNECTOR, BRect(0, 0, 0, 0));
 		c->fromId = ids[1];
 		c->toId = ids[0];
+		c->orthogonal = elbow;
 		fSelection.clear();
 		fSelection.push_back(c->id);
 		Invalidate();

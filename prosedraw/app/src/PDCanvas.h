@@ -29,6 +29,12 @@ public:
 	void	SetTool(PDTool tool) { fTool = tool; }
 	PDTool	Tool() const { return fTool; }
 
+	// zoom: 0.25..4, one place maps doc<->view, every interaction and
+	// the whole render scale with it (PDF export is unaffected — it
+	// reads doc space)
+	void	SetZoom(float zoom);
+	float	Zoom() const { return fZoom; }
+
 	// the current selection (ids); empty = none
 	const std::vector<int32>&	Selection() const { return fSelection; }
 	void	Select(const std::vector<int32>& ids);
@@ -40,14 +46,20 @@ public:
 	// geometry shared with the inspector: the selection's union, snapped
 	BRect	SelectionBounds() const;
 	void	SetSelectionRect(BRect rect);		// single selection only
-	void	QueueConnector();					// scripted: connect last two
+	void	QueueConnector(bool elbow = false);	// scripted: connect last two
 
 	// the page grew or shrank: resize the data extent
 	void	DocumentChangedSize();
 
-	BPoint	DocToView(BPoint p) const { return p + BPoint(kMargin, kMargin); }
+	BPoint	DocToView(BPoint p) const
+	{
+		return BPoint((kMargin + p.x) * fZoom,
+			(kMargin + p.y) * fZoom);
+	}
 	BPoint	ViewToDoc(BPoint p) const
-				{ return p - BPoint(kMargin, kMargin); }
+	{
+		return BPoint(p.x / fZoom - kMargin, p.y / fZoom - kMargin);
+	}
 	static const float	kMargin;	// desk margin around the page, px
 
 private:
@@ -64,6 +76,7 @@ private:
 
 	PDDocument*	fDoc;
 	PDTool		fTool = PD_TOOL_SELECT;
+	float		fZoom = 1.0f;
 	std::vector<int32>	fSelection;
 	DragMode	fDrag = DRAG_NONE;
 	BPoint		fDragStart;		// doc space
