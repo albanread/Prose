@@ -80,7 +80,9 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | einsteinium | 1.4.1a-4 | failed | libxml2 failed: python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) (log: /Volumes/HaikuSrc/prose-package |
 | emailviews | 1.2.0-1 | built | emailviews-1.2.0-1-arm64.hpkg |
 | fairtrade | 1.0.0~git-4 | built | fairtrade-1.0.0~git-4-arm64.hpkg |
+| fdk_aac | 2.0.2-4 | built | fdk_aac-2.0.2-4-arm64.hpkg, fdk_aac_devel-2.0.2-4-arm64.hpkg |
 | feedgator | 2.4.release-1 | built | feedgator-2.4.release-1-any.hpkg |
+| ffmpeg6 | 6.1.6-1 | built | ffmpeg6-6.1.6-1-arm64.hpkg, ffmpeg6_avdevice-6.1.6-1-arm64.hpkg, ffmpeg6_devel-6.1.6-1-arm64.hpkg, ffmpeg6_tools-6.1.6-1-arm64.hpkg |
 | filecropper | 1-3 | built | filecropper-1-3-arm64.hpkg |
 | filer | 1.4.0-2 | built | filer-1.4.0-2-arm64.hpkg |
 | firacode | 4-1 | built | firacode-4-1-any.hpkg |
@@ -90,6 +92,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | foldershaper | 1.0-4 | built | foldershaper-1.0-4-arm64.hpkg |
 | font_check | 1.0-1 | built | font_check-1.0-1-arm64.hpkg |
 | fontboy | 0.9.8-1 | built | fontboy-0.9.8-1-arm64.hpkg |
+| fontconfig | 2.18.2-2 | failed | libxml2 failed: python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) (log: /Volumes/HaikuSrc/prose-package |
 | fortuna | 1.0.0-3 | built | fortuna-1.0.0-3-arm64.hpkg |
 | friss | 0.9.0-1 | failed | BUILD phase failed (exit 1) |
 | ftppositive | 1.2.2-8 | built | ftppositive-1.2.2-8-arm64.hpkg |
@@ -133,6 +136,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | lcms | 2.19.1-1 | built | lcms-2.19.1-1-arm64.hpkg, lcms_devel-2.19.1-1-arm64.hpkg, lcms_tools-2.19.1-1-arm64.hpkg |
 | lexilla | 5.4.6-1 | built | lexilla-5.4.6-1-arm64.hpkg, lexilla_devel-5.4.6-1-arm64.hpkg |
 | lib3ds | 2.0.0-2 | failed | cannot download d477b7dc451ec88a739cc28e6d9a7564123569d0.tar.gz |
+| libass | 0.17.5-2 | failed | fontconfig failed: libxml2 failed: python3.14 failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/python3.14.log) (log: /Volumes/Hai |
 | libbson | 1.1.10-4 | failed | pkgconfig failed: BUILD phase failed (exit 1) (log: /Volumes/HaikuSrc/prose-packages/logs/pkgconfig.log) |
 | libburndevice | 1.0-2 | built | libburndevice-1.0-2-arm64.hpkg, libburndevice_devel-1.0-2-arm64.hpkg |
 | libcss | 0.9.2-1 | built | libcss-0.9.2-1-arm64.hpkg, libcss_devel-0.9.2-1-arm64.hpkg |
@@ -152,6 +156,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | libnspsl | 0.1.7-1 | built | libnspsl-0.1.7-1-arm64.hpkg, libnspsl_devel-0.1.7-1-arm64.hpkg |
 | libnsutils | 0.1.1-1 | built | libnsutils-0.1.1-1-arm64.hpkg, libnsutils_devel-0.1.1-1-arm64.hpkg |
 | libogg | 1.3.6-2 | built | libogg-1.3.6-2-arm64.hpkg, libogg_devel-1.3.6-2-arm64.hpkg |
+| libopenmpt | 0.8.3-1 | built | libopenmpt-0.8.3-1-arm64.hpkg, libopenmpt_devel-0.8.3-1-arm64.hpkg |
 | libparserutils | 0.2.5-1 | built | libparserutils-0.2.5-1-arm64.hpkg, libparserutils_devel-0.2.5-1-arm64.hpkg |
 | libpcre | 8.45-3 | built | libpcre-8.45-3-arm64.hpkg, libpcre_devel-8.45-3-arm64.hpkg |
 | libpng16 | 1.6.53-1 | built | libpng16-1.6.53-1-arm64.hpkg, libpng16_devel-1.6.53-1-arm64.hpkg |
@@ -160,6 +165,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | libsamplerate | 0.2.2-2 | built | libsamplerate-0.2.2-2-arm64.hpkg, libsamplerate_devel-0.2.2-2-arm64.hpkg |
 | libsanta | 3.0.2-1 | failed | BUILD phase failed (exit 2) |
 | libsdl | 1.2.15-19 | failed | mesa failed earlier in this run |
+| libsdl2 | 2.32.10-3 | failed | mesa failed: llvm12 failed: setuptools failed: INSTALL phase failed (exit 127) (log: /Volumes/HaikuSrc/prose-packages/logs/setuptools.log) (log: /Volumes/HaikuS |
 | libsndfile | 1.2.2-2 | built | libsndfile-1.2.2-2-arm64.hpkg, libsndfile_devel-1.2.2-2-arm64.hpkg, libsndfile_tools-1.2.2-2-arm64.hpkg |
 | libssh2 | 1.11.1-1 | built | libssh2-1.11.1-1-arm64.hpkg, libssh2_devel-1.11.1-1-arm64.hpkg |
 | libsvgtiny | 0.1.8-1 | built | libsvgtiny-0.1.8-1-arm64.hpkg, libsvgtiny_devel-0.1.8-1-arm64.hpkg |
@@ -253,8 +259,9 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | sequitur | 2.2.0-4 | failed | BUILD phase failed (exit 2) |
 | setuptools | 82.0.1-1 | failed | INSTALL phase failed (exit 127) |
 | shredder | 1.0.0-3 | built | shredder-1.0.0-3-arm64.hpkg |
-| sisong | 2.16-3 | built | sisong-2.16-3-arm64.hpkg |
+| sisong | 2.16-4 | built | sisong-2.16-4-arm64.hpkg |
 | slayer | 1.0-2 | built | slayer-1.0-2-arm64.hpkg |
+| soxr | 0.1.3-2 | built | soxr-0.1.3-2-arm64.hpkg, soxr_devel-0.1.3-2-arm64.hpkg |
 | speex | 1.2.1-2 | built | speex-1.2.1-2-arm64.hpkg, speex_devel-1.2.1-2-arm64.hpkg |
 | speexdsp | 1.2.1-1 | built | speexdsp-1.2.1-1-arm64.hpkg, speexdsp_devel-1.2.1-1-arm64.hpkg |
 | sqlite | 3.53.4.0-1 | built | sqlite-3.53.4.0-1-arm64.hpkg, sqlite_devel-3.53.4.0-1-arm64.hpkg |

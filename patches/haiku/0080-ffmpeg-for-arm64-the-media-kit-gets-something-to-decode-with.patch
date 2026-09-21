@@ -1,0 +1,82 @@
+From da51fdcd9cf09be44cc518fda73ff53b712fec96 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 09:56:11 +0100
+Subject: [PATCH] ffmpeg for arm64: the Media Kit gets something to decode with
+
+The image had the codec libraries -- mpg123, lame, flac, vorbis, opus --
+and no way to reach them: /boot/system/add-ons/media/plugins held
+http_streamer and raw_decoder, and nothing else. Haiku decodes MP3, AAC
+and video through its ffmpeg plugin, which build/jam/BuildFeatures
+builds only when ffmpeg6_devel is available, and for arm64 it never was.
+The build said so on every run ("package ffmpeg6 not available!") and
+MediaPlayer could open nothing.
+
+ffmpeg 6.1.6 is now built by prosepkg (our overlay recipe: no SDL2, no
+subtitle stack, every codec, NEON assembly in -- 931 neon symbols in
+libavcodec), and listed here with the libraries it wants: fdk_aac,
+game_music_emu, gmp, libopenmpt, soxr. The plugin follows from the build
+feature; ffmpeg6_tools brings ffmpeg and ffprobe with it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0080-ffmpeg-for-arm64-the-media-kit-gets-something-to-decode-with.patch 4e0ba8fa8b3bbd63224aef2852f5a74c1743cde02c866ebf265ad7608af50dda
+---
+ build/jam/DefaultBuildProfiles          |  6 ++++++
+ build/jam/repositories/HaikuPorts/arm64 | 14 ++++++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 3ebdb69470..d27141b234 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -230,6 +230,12 @@ rule DefineDefaultBuildProfiles
+ 				jetbrains_mono
+ 				firacode
+ 				openssl3
++				# ffmpeg's own programs. The library and its plugin come in
++				# anyway, as the ffmpeg build feature (build/jam/BuildFeatures)
++				# is what builds the Media Kit's decoder; these two are the
++				# command line, and avdevice is what they link against.
++				ffmpeg6_avdevice
++				ffmpeg6_tools
+ 				pe
+ 				vision
+ 				xz_utils
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 323328e353..816d9454f5 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -82,6 +82,16 @@ RemotePackageRepository HaikuPorts
+ 	curl-8.22.0-3
+ 	dav1d-1.5.4-2
+ 	dav1d_devel-1.5.4-2
++	fdk_aac-2.0.2-4
++	fdk_aac_devel-2.0.2-4
++	ffmpeg6-6.1.6-1
++	ffmpeg6_avdevice-6.1.6-1
++	ffmpeg6_devel-6.1.6-1
++	ffmpeg6_tools-6.1.6-1
++	game_music_emu-0.6.5-1
++	game_music_emu_devel-0.6.5-1
++	gmp-6.3.0-1
++	gmp_devel-6.3.0-1
+ 	debugmonitor-0.1.1~20181227-1
+ 	deskbareyes-0.1.1-2
+ 	desknotes-1.2.1-1
+@@ -150,6 +160,8 @@ RemotePackageRepository HaikuPorts
+ 	libvorbis_devel-1.3.7-1
+ 	libvpx-1.13.1-1
+ 	libvpx_devel-1.13.1-1
++	libopenmpt-0.8.3-1
++	libopenmpt_devel-0.8.3-1
+ 	libwapcaplet-0.4.3-2
+ 	libwebp-1.6.0-3
+ 	libwebp_devel-1.6.0-3
+@@ -162,6 +174,8 @@ RemotePackageRepository HaikuPorts
+ 	moe-1.1.2-7
+ 	mpg123-1.32.9-1
+ 	mpg123_devel-1.32.9-1
++	soxr-0.1.3-2
++	soxr_devel-0.1.3-2
+ 	mrpeeps-1.2-4
+ 	netpulse-0.2.3-9
+ 	netsurf-3.11-3

@@ -1,0 +1,380 @@
+# PROSE fork: the community recipe with ffplay taken out.
+#
+# ffplay is the only part of ffmpeg that needs SDL2, and SDL2 on Haiku wants
+# mesa, which wants llvm12, which wants a Python that does not cross-build
+# here: five hours of builds for a player nobody asked for, and a frame of
+# somebody else's making around a system that has its own. Prose does not
+# take SDL2. ffmpeg and ffprobe stay.
+#
+# Subtitle rendering goes the same way and for the same kind of reason:
+# libass wants fontconfig, harfbuzz, fribidi and unibreak, and fontconfig
+# wants libxml2, which builds a Python module -- six ports and an
+# interpreter so that ffmpeg can draw text it is never asked to draw here,
+# because the Media Kit renders subtitles itself. LADSPA (audio plug-ins
+# Prose has no host for) and snappy (the HAP video codec, whose test
+# dependencies are another two ports) go with them.
+#
+# What is left is the codecs, which is what this is for: AAC through
+# fdk-aac, AV1 through dav1d, VP8/VP9, WebP, JPEG 2000, Opus, Vorbis,
+# Theora, MP3, Speex, game and tracker music, soxr resampling, and
+# everything ffmpeg decodes natively -- MP3 and AAC among them. The NEON
+# assembly is the recipe's own: --disable-asm is only taken on x86_gcc2,
+# and prosepkg builds everything at the Apple-silicon floor.
+#
+# Everything else is the community's recipe, unchanged.
+
+SUMMARY="Audio and video recording, conversion, and streaming library"
+DESCRIPTION="FFmpeg is a complete, cross-platform solution to record, convert \
+and stream audio and video. It includes libavcodec - the leading audio/video \
+codec library."
+HOMEPAGE="https://ffmpeg.org/"
+COPYRIGHT="2000-2003 Fabrice Bellard
+	2003-2026 the FFmpeg developers"
+LICENSE="GNU LGPL v3"
+REVISION="1"
+SOURCE_URI="https://ffmpeg.org/releases/ffmpeg-$portVersion.tar.xz"
+CHECKSUM_SHA256="d4fcb164028dd3beee5d92c0ac72e46aac6973c75ea12dc14de07bf8f407370a"
+PATCHES="ffmpeg-$portVersion.patchset"
+SOURCE_DIR="ffmpeg-$portVersion"
+ADDITIONAL_FILES="gcc_runtime.c"
+
+ARCHITECTURES="all"
+SECONDARY_ARCHITECTURES="x86_gcc2 x86"
+
+ffmpegLibs="\
+	libavcodec \
+	libavdevice \
+	libavfilter \
+	libavformat \
+	libavutil \
+	libswresample \
+	libswscale \
+	"
+# Do not sort alphabetically
+libavutilVersion="58.29.100"
+libavcodecVersion="60.31.102"
+libavformatVersion="60.16.101"
+libavdeviceVersion="60.3.100"
+libavfilterVersion="9.12.100"
+libswscaleVersion="7.5.100"
+libswresampleVersion="4.12.100"
+portVersionCompat="$portVersion compat >= 5"
+for i in $ffmpegLibs; do
+	eval "${i}VersionCompat=\"\$${i}Version compat >= \${${i}Version%%.*}\""
+done
+
+PROVIDES="
+	ffmpeg6$secondaryArchSuffix = $portVersionCompat
+	lib:libavcodec$secondaryArchSuffix = $libavcodecVersionCompat
+	lib:libavfilter$secondaryArchSuffix = $libavfilterVersionCompat
+	lib:libavformat$secondaryArchSuffix = $libavformatVersionCompat
+	lib:libavutil$secondaryArchSuffix = $libavutilVersionCompat
+	lib:libswresample$secondaryArchSuffix = $libswresampleVersionCompat
+	lib:libswscale$secondaryArchSuffix = $libswscaleVersionCompat
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	lib:libbz2$secondaryArchSuffix
+	lib:libiconv$secondaryArchSuffix
+	lib:libmp3lame$secondaryArchSuffix
+	lib:libopus$secondaryArchSuffix
+	lib:libspeex$secondaryArchSuffix
+	lib:libssl$secondaryArchSuffix
+	lib:libtheoradec$secondaryArchSuffix
+	lib:libtheoraenc$secondaryArchSuffix
+	lib:libvorbis$secondaryArchSuffix
+	lib:libvorbisenc$secondaryArchSuffix
+	lib:libz$secondaryArchSuffix
+	"
+# lib:libgme is declared here and commented out upstream, while the build
+# still passes --enable-libgme: libavcodec.so then needs a library the
+# package never asks for, packagefs leaves game_music_emu out,
+# load_add_on() fails for the media plugin, and the Media Kit answers
+# "No handler" for every file it is given. (These lists are shell
+# strings, so a comment inside one is not a comment.)
+if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+	REQUIRES+="
+		lib:libdav1d$secondaryArchSuffix
+		lib:libfdk_aac$secondaryArchSuffix
+		lib:libgme$secondaryArchSuffix
+		lib:libgmp$secondaryArchSuffix
+		lib:libopenjp2$secondaryArchSuffix
+		lib:libopenmpt$secondaryArchSuffix
+		lib:libsoxr$secondaryArchSuffix
+		lib:libvpx$secondaryArchSuffix
+		lib:libwebp$secondaryArchSuffix
+#		lib:libx264$secondaryArchSuffix
+#		lib:libx265$secondaryArchSuffix
+		lib:liblzma$secondaryArchSuffix
+		"
+fi
+
+PROVIDES_avdevice="
+	ffmpeg6${secondaryArchSuffix}_avdevice = $portVersionCompat
+	lib:libavdevice$secondaryArchSuffix = $libavdeviceVersionCompat
+	"
+REQUIRES_avdevice="
+	haiku$secondaryArchSuffix
+	lib:libavcodec$secondaryArchSuffix == $libavcodecVersion
+	lib:libavfilter$secondaryArchSuffix == $libavfilterVersion
+	lib:libavformat$secondaryArchSuffix == $libavformatVersion
+	lib:libavutil$secondaryArchSuffix == $libavutilVersion
+	"
+
+PROVIDES_tools="
+	ffmpeg6${secondaryArchSuffix}_tools = $portVersion
+	cmd:ffmpeg$secondaryArchSuffix = $portVersionCompat
+	cmd:ffprobe$secondaryArchSuffix = $portVersionCompat
+	"
+REQUIRES_tools="
+	haiku$secondaryArchSuffix
+	lib:libavcodec$secondaryArchSuffix == $libavcodecVersion
+	lib:libavdevice$secondaryArchSuffix == $libavdeviceVersion
+	lib:libavfilter$secondaryArchSuffix == $libavfilterVersion
+	lib:libavformat$secondaryArchSuffix == $libavformatVersion
+	lib:libavutil$secondaryArchSuffix == $libavutilVersion
+	"
+CONFLICTS_tools="
+	ffmpeg${secondaryArchSuffix}_tools
+	ffmpeg5${secondaryArchSuffix}_tools
+	"
+
+PROVIDES_devel="
+	ffmpeg6${secondaryArchSuffix}_devel = $portVersionCompat
+	devel:libavcodec$secondaryArchSuffix = $libavcodecVersionCompat
+	devel:libavdevice$secondaryArchSuffix = $libavdeviceVersionCompat
+	devel:libavfilter$secondaryArchSuffix = $libavfilterVersionCompat
+	devel:libavformat$secondaryArchSuffix = $libavformatVersionCompat
+	devel:libavutil$secondaryArchSuffix = $libavutilVersionCompat
+	devel:libswresample$secondaryArchSuffix = $libswresampleVersionCompat
+	devel:libswscale$secondaryArchSuffix = $libswscaleVersionCompat
+	"
+REQUIRES_devel="
+	ffmpeg6$secondaryArchSuffix == $portVersion base
+	ffmpeg6${secondaryArchSuffix}_avdevice == $portVersion
+	devel:libspeex$secondaryArchSuffix
+	"
+CONFLICTS_devel="
+	ffmpeg${secondaryArchSuffix}_devel
+	ffmpeg5${secondaryArchSuffix}_devel
+	"
+
+# -- HACK! --
+# ffmpeg ~0.10 has perpetually had & caused problems when compiled with GCC 2.
+# (Later versions do not compile with GCC 2 at all.) So instead, we now compile
+# FFmpeg for x86_gcc2 with a modern GCC.
+#
+# This works because GCC's C ABI has not changed between 2 and now; only the C++
+# ABI has, and no BeOS applications expect a system FFmpeg at all, so we can
+# break its ABI all we like.
+if [ "$effectiveTargetArchitecture" = x86_gcc2 ] && \
+		[ "$targetArchitecture" = x86_gcc2 ]; then
+	gccSuffix="_x86"
+elif [ "$effectiveTargetArchitecture" = x86_gcc2 ] && \
+		[ "$targetArchitecture" = x86 ]; then
+	gccSuffix=""
+else
+	gccSuffix="$secondaryArchSuffix"
+fi
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	devel:libbz2$secondaryArchSuffix
+	devel:libiconv$secondaryArchSuffix
+	devel:libmp3lame$secondaryArchSuffix
+	devel:libogg$secondaryArchSuffix
+	devel:libopus$secondaryArchSuffix
+	devel:libspeex$secondaryArchSuffix
+	devel:libssl$secondaryArchSuffix >= 3
+	devel:libtheora$secondaryArchSuffix
+	devel:libvorbis$secondaryArchSuffix
+	devel:libz$secondaryArchSuffix
+	"
+if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+	BUILD_REQUIRES+="
+		devel:libdav1d$secondaryArchSuffix
+		devel:libfdk_aac$secondaryArchSuffix
+		devel:libgme$secondaryArchSuffix
+		devel:libgmp$secondaryArchSuffix
+		devel:libopenjp2$secondaryArchSuffix
+		devel:libopenmpt$secondaryArchSuffix
+		devel:libsoxr$secondaryArchSuffix
+		devel:libvpx$secondaryArchSuffix
+		devel:libwebp$secondaryArchSuffix
+#		devel:libx264$secondaryArchSuffix
+#		devel:libx265$secondaryArchSuffix
+		devel:liblzma$secondaryArchSuffix
+		"
+fi
+BUILD_PREREQUIRES="
+	cmd:awk
+	cmd:cmp
+	cmd:gcc$gccSuffix >= 7
+	cmd:g++$secondaryArchSuffix
+	cmd:ld$gccSuffix
+	cmd:grep
+	cmd:make
+	cmd:perl
+	cmd:pkg_config$secondaryArchSuffix
+	cmd:sed
+	cmd:texi2html
+	cmd:yasm
+	"
+
+PATCH()
+{
+	# patch hard-coded paths to perl
+	sed -i "s,/usr/bin/perl,$portPackageLinksDir/cmd~perl/bin/perl," \
+		doc/Doxyfile \
+		doc/texi2pod.pl
+	# force no-undefined-symbols
+	if [ "$effectiveTargetArchitecture" = x86_gcc2 ]; then
+		sed -i "s/SHFLAGS='-shared/SHFLAGS='-shared -Wl,--no-undefined/g" \
+			configure
+	fi
+}
+
+defineDebugInfoPackage ffmpeg6$secondaryArchSuffix \
+	$libDir/libavcodec.so.$libavcodecVersion \
+	$libDir/libavfilter.so.$libavfilterVersion \
+	$libDir/libavformat.so.$libavformatVersion \
+	$libDir/libavutil.so.$libavutilVersion \
+	$libDir/libswresample.so.$libswresampleVersion \
+	$libDir/libswscale.so.$libswscaleVersion \
+	"$(getPackagePrefix avdevice)/$relativeLibDir"/libavdevice.so.$libavdeviceVersion \
+	"$(getPackagePrefix tools)/$relativeBinDir"/ffmpeg \
+	"$(getPackagePrefix tools)/$relativeBinDir"/ffprobe
+
+BUILD()
+{
+	ccArgs=""
+	extraArgs=""
+	if [ "$effectiveTargetArchitecture" = x86_gcc2 ]; then
+		cc="gcc${gccSuffix/_/-}"
+		ccArgs="--cc=$cc --cxx=g++${secondaryArchSuffix/_/-}
+			--ld=gcc${secondaryArchSuffix/_/-}
+			--host-ld=gcc${secondaryArchSuffix/_/-}"
+
+		# Hack up base headers to make them think we're on GCC2 ABI
+		mkdir -p include_hacks include_hacks/os include_hacks/config
+		pushd include_hacks
+			rm -f os/BeBuild.h config/HaikuConfig.h
+			cp /system/develop/headers/os/BeBuild.h os
+			cp /system/develop/headers/config/HaikuConfig.h config
+			sed -i 's/__GNUC__ == 2/1/g' os/BeBuild.h config/HaikuConfig.h
+		popd
+
+		# Compile gcc_runtime.c (subset of libgcc that GCC 13 utilizes here)
+		$cc -fvisibility=hidden -c $portDir/additional-files/gcc_runtime.c \
+			-o gcc_runtime.o
+
+		baseLDFLAGS="-B/system/bin/${gccSuffix/_/}"
+		ccArgs="$ccArgs --host-ldflags=\"${baseLDFLAGS}\""
+		export CFLAGS="-isystem$(pwd) -isystem$(pwd)/os -isystem$(pwd)/config"
+		export LDFLAGS="$baseLDFLAGS $(pwd)/gcc_runtime.o"
+		extraArgs="--disable-asm"
+	else
+		extraArgs="--disable-ffplay \
+			--disable-sdl2 \
+			--enable-libdav1d \
+			--enable-libfdk-aac \
+			--enable-libgme \
+			--enable-gmp \
+			--enable-libopenjpeg \
+			--enable-libopenmpt \
+			--enable-libsoxr \
+			--enable-libvpx \
+			--enable-libwebp \
+			--enable-lzma \
+			--enable-pic"
+	fi
+
+	# not an autotools configure, and not a native build: prosepkg's gcc is a
+	# cross compiler, so configure cannot run what it compiles and must be
+	# told what it is building for. The wrappers are plain "gcc" and "g++" on
+	# the PATH, so there is no cross-prefix to give it.
+	./configure \
+		$ccArgs \
+		--enable-cross-compile \
+		--arch=aarch64 \
+		--target-os=haiku \
+		--cc=gcc \
+		--cxx=g++ \
+		--disable-doc \
+		--prefix=$prefix \
+		--bindir=$binDir \
+		--datadir=$dataDir/$portName \
+		--incdir=$includeDir \
+		--libdir=$libDir \
+		--shlibdir=$libDir \
+		--mandir=$manDir \
+		--disable-debug \
+		--disable-stripping \
+		--disable-static \
+		--enable-shared \
+		--enable-version3 \
+		--enable-libmp3lame \
+		--enable-libopus \
+		--enable-openssl \
+		--enable-libspeex \
+		--enable-libtheora \
+		--enable-libvorbis \
+		$extraArgs
+
+	make $jobArgs
+}
+
+INSTALL()
+{
+	make install
+
+	prepareInstalledDevelLibs $ffmpegLibs
+	fixPkgconfig
+
+	# The pkgconfig file reference other libraries using the wrong paths, which
+	# creates a lot of confusion. Fix them so correct paths are used.
+	local develPackageName="${portName}_devel-$portFullVersion"
+	local packageLinksDir=$(dirname $portPackageLinksDir)
+	local linksDir="$packageLinksDir/${develPackageName}/devel~libspeex$secondaryArchSuffix/$relativeDevelopLibDir"
+	sed -i -e "s,^\(Libs.private.*\)-L.*speex.* \(-lspeex.*\),\1-L$linksDir \2," \
+		$developLibDir/pkgconfig/libavcodec.pc \
+		$developLibDir/pkgconfig/libavdevice.pc \
+		$developLibDir/pkgconfig/libavfilter.pc \
+		$developLibDir/pkgconfig/libavformat.pc
+
+	# Move html docs to the right place -- there are none to move when the
+	# build is configured --disable-doc (texi2html is not a host tool here),
+	# and the tree has no share/ at all then.
+	if [ -d $prefix/share/doc/ffmpeg ]; then
+		mkdir -p $docDir
+		mv $prefix/share/doc/ffmpeg $docDir
+	fi
+	[ -d $prefix/share ] && rm -r $prefix/share
+
+	# Split out the executables (ffmpeg and ffprobe; ffplay is not built).
+	# The man pages are part of the documentation, which --disable-doc does
+	# not build, so they are named only when they are there.
+	toolEntries="$binDir"
+	[ -d $manDir/man1 ] && toolEntries="$toolEntries $manDir/man1"
+	packageEntries tools $toolEntries
+	packageEntries avdevice $libDir/libavdevice*
+
+	# devel package. --disable-doc leaves no documentation directory at all,
+	# so it is named only when it is there; the examples and the headers are
+	# built either way.
+	develEntries="$dataDir/ffmpeg6$secondaryArchSuffix/examples"
+	[ -d $documentationDir ] && develEntries="$develEntries $documentationDir"
+	packageEntries devel $develEntries $developDir
+}
+
+TEST()
+{
+	export LIBRARY_PATH="$sourceDir/libavutil${LIBRARY_PATH:+:$LIBRARY_PATH}"
+	export LIBRARY_PATH="$sourceDir/libavcodec${LIBRARY_PATH:+:$LIBRARY_PATH}"
+	export LIBRARY_PATH="$sourceDir/libswresample${LIBRARY_PATH:+:$LIBRARY_PATH}"
+	export LIBRARY_PATH="$sourceDir/libavdevice${LIBRARY_PATH:+:$LIBRARY_PATH}"
+	export LIBRARY_PATH="$sourceDir/libavfilter${LIBRARY_PATH:+:$LIBRARY_PATH}"
+	export LIBRARY_PATH="$sourceDir/libavformat${LIBRARY_PATH:+:$LIBRARY_PATH}"
+	export LIBRARY_PATH="$sourceDir/libswscale${LIBRARY_PATH:+:$LIBRARY_PATH}"
+	make check
+}
