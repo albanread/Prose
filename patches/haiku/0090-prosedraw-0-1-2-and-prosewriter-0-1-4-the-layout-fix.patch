@@ -1,0 +1,33 @@
+From f4faae875377023fcca71ab21189306360affe36 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 20:56:28 +0100
+Subject: [PATCH] ProseDraw 0.1-2 and ProseWriter 0.1-4: the layout fix
+
+Both applications' client areas drew over their own scroll bars and
+panels after a resize (a user report): ProseDraw's scroll view followed
+the window while its panels did not, and it had no FrameResized, so the
+constructor's layout was the only one there ever was; ProseWriter sized
+its scroll view one pixel past its content box on both axes. Repackaged
+from the commit that fixes them (main d069f85).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0090-prosedraw-0-1-2-and-prosewriter-0-1-4-the-layout-fix.patch d20fb32917effe9b4179845e97bd738c275ea3be99b21f635b8e1ac34d22e213
+---
+ build/jam/repositories/HaikuPorts/arm64 | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 26de5cbac6..96dc37753f 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -204,8 +204,8 @@ RemotePackageRepository HaikuPorts
+ 	romannumbers-1.0~git-2
+ 	samedi-1.2-1
+ 	shredder-1.0.0-3
+-	prosedraw-0.1-1
+-	prosewriter-0.1-3
++	prosedraw-0.1-2
++	prosewriter-0.1-4
+ 	sisong-2.16-4
+ 	slayer-1.0-2
+ 	speex-1.2.1-2

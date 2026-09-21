@@ -119,6 +119,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | hexvexed | 1.8-1 | built | hexvexed-1.8-1-arm64.hpkg |
 | html_parser | 3.83-2 | failed | BUILD phase failed (exit 2) |
 | hubbub | 0.3.8-1 | built | hubbub-0.3.8-1-arm64.hpkg, hubbub_devel-0.3.8-1-arm64.hpkg |
+| icu74 | 74.1-6 | built | icu74-74.1-6-arm64.hpkg, icu74_devel-74.1-6-arm64.hpkg, icu74_tools-74.1-6-arm64.hpkg |
 | ideam | 0.7.7-1 | failed | BUILD phase failed (exit 2) |
 | interface_elements | 1.0-2 | built | interface_elements-1.0-2-arm64.hpkg, interface_elements_devel-1.0-2-arm64.hpkg |
 | internalmidi | 2.5.3-2 | built | internalmidi-2.5.3-2-arm64.hpkg |
@@ -231,8 +232,8 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | ppviewer | 1.0.0-2 | built | ppviewer-1.0.0-2-arm64.hpkg |
 | projectconceptor | 0.1.1-1 | failed | INSTALL phase failed (exit 1) |
 | prose_examples | 1.0-1 | built | prose_examples-1.0-1-any.hpkg |
-| prosedraw | 0.1-1 | built | prosedraw-0.1-1-arm64.hpkg |
-| prosewriter | 0.1-3 | built | prosewriter-0.1-3-arm64.hpkg |
+| prosedraw | 0.1-2 | built | prosedraw-0.1-2-arm64.hpkg |
+| prosewriter | 0.1-4 | built | prosewriter-0.1-4-arm64.hpkg |
 | puri | 0.3.9.2-1 | failed | lib3ds failed: cannot download d477b7dc451ec88a739cc28e6d9a7564123569d0.tar.gz (log: /Volumes/HaikuSrc/prose-packages/logs/lib3ds.log) |
 | python3.10 | 3.10.21-1 | failed | BUILD phase failed (exit 1) |
 | python3.14 | 3.14.7-1 | failed | BUILD phase failed (exit 1) |
