@@ -245,7 +245,7 @@ setdecor Default
 ## 4. Platinum
 
 Patch `0085`: `src/add-ons/decorators/PlatinumDecorator`, packaged into
-`haiku.hpkg` beside the other two, and `Platinum.theme` (section 6). A frame
+`haiku.hpkg` beside the other two, and `Platinum.theme` (section 7). A frame
 after the Mac OS 8.5 appearance of that name. Haiku's `MacDecorator` ("Mac OS
 Platinum") is a sketch of it on the tab model, a gradient square for each
 button, and no package lists it; this one follows the original's anatomy.
@@ -331,7 +331,49 @@ from the system package), and the test program with one window of each
 look; a click on a background window's close button closed it, minimize
 minimized.
 
-## 6. Themes
+## 6. NeXT
+
+Patch `0087`: `src/add-ons/decorators/NextDecorator`, in `haiku.hpkg` with
+the others, and `NeXTSTEP.theme`. A frame after NeXTSTEP, in its four greys.
+
+| part | |
+|---|---|
+| frame | a one-unit black line round the window |
+| title bar | black with a white title while the window is in front, light grey with a black one behind; the title centred |
+| buttons | miniaturize (a small window) at the left, close (a cross) at the right, raised; no zoom button, as there was none; they work on a window in the background too |
+| resize bar | under a resizable window: a corner segment at either end and the middle, raised, parted by black |
+| modal windows | the line and a raised bevel |
+| add-on file | `NextDecorator` |
+
+![NeXT](images/decorator-next.png)
+
+- **The borders are not one width.** NeXT's were not: the sides and the top
+  are the line, which is `BorderWidth()`, and the bottom is the resize bar.
+  Stack and tile and `BWindow::DecoratorFrame()` take the bottom to be the
+  line too, so they see the frame end the resize bar's height short, less a
+  unit.
+- **The resize bar's segments** are `REGION_LEFT_BOTTOM_CORNER`,
+  `REGION_BOTTOM_BORDER` and `REGION_RIGHT_BOTTOM_CORNER`. With the primary
+  button only the right one resizes, because `DefaultWindowBehaviour` resizes
+  from the bottom right corner alone and drags from everything else; with
+  the secondary button all three resize, each its own way.
+- **Colours.** The title bar is the tab colour and tab text; the buttons and
+  the resize bar are the border colour, their bevels white and a half-tone
+  of it; the line is black. On a black bar the bar's own bevel is dark grey
+  above and at the left, on a grey one white and dark grey.
+- **Units** as Platinum and Win2k; the title bar lies wholly above the top
+  border, so nothing reaches over it.
+
+### Verified
+
+StyledEdit, Tracker and ProseWriter drawn in front and behind with the
+NeXTSTEP theme applied through the host on a built image (the decorator
+from the system package), and the test program with one window of each
+look; a click on a background window's close button closed it, miniaturize
+minimized. Not exercised: a drag on the resize bar (the automation clicks,
+it does not drag).
+
+## 7. Themes
 
 A theme is a wallpaper, a set of system colours and a decorator, chosen from
 the host's View ▸ Theme menu and applied to the guest through the portal.
@@ -363,7 +405,8 @@ wallpaper with Backgrounds' "Icon label outline" on. Tracker used to compare
 the workspace's colour with `B_DESKTOP_COLOR`, and so drew white labels on
 Prose Light's paper and, after a switch at run time, black ones on Prose
 Dark's ink. Measured on the themes since: contrast 17.8:1 on paper, 16.5:1
-on ink, 5.3:1 on Platinum's periwinkle and on Win2k's blue.
+on ink, 5.3:1 on Platinum's periwinkle and on Win2k's blue, 7.4:1 on
+NeXTSTEP's grey.
 
 | | |
 |---|---|
@@ -379,7 +422,7 @@ then `B_RESTORE_BACKGROUND_IMAGE` to Tracker) — and each of those persists
 it, so a theme applied once is the machine's state across restarts. The name
 is kept in `~/config/settings/prose/theme`.
 
-**Five ship.** *Prose Light*: the paper wallpaper, a light grey frame with
+**Six ship.** *Prose Light*: the paper wallpaper, a light grey frame with
 the round buttons at the left, the system's own colours otherwise. *Prose
 Dark*: the ink wallpaper, a charcoal frame, and Haiku's dark palette for
 panels, menus, documents and lists. *Classic*: the yellow tab and the default
@@ -388,7 +431,9 @@ platinum grey panels and menus, a lavender highlight and dark blue menu
 selections, on a plain periwinkle desktop with no picture. *Win2k* (patch
 0086): the Win2k frame, navy captions shading to sky blue and grey ones
 behind, the 3D grey for panels, menus and controls, navy selections, on the
-plain blue desktop. All five list every colour, so switching back restores
+plain blue desktop. *NeXTSTEP* (patch 0087): the NeXT frame and NeXT's four
+greys, light grey panels and menus, white where a menu item is chosen, on the
+dark grey workspace. All six list every colour, so switching back restores
 everything.
 
 **On the host: View ▸ Theme.** The submenu is filled from `prosetheme --list`

@@ -1,0 +1,1174 @@
+From 973cfb163f486ce4a73d4aadfd7726494f5e509d Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 16:37:49 +0100
+Subject: [PATCH] NeXT: a window frame after NeXTSTEP, and a theme with it
+
+A new decorator after NeXTSTEP: a one-unit black line round the window;
+a title bar, black with a white title while the window is in front and
+light grey with a black one behind, the title centred, a miniaturize
+button (a small window) at its left and a close button (a cross) at its
+right, raised in NeXT's white, grey and black; no zoom button, as there
+was none. Under a resizable window, the resize bar: a corner segment at
+either end and the middle, raised, parted by black. The buttons work on
+a window in the background too.
+
+The borders are not one width, as NeXT's were not: the sides and the top
+are the black line (BorderWidth()), the bottom is the resize bar. Stack
+and tile and BWindow::DecoratorFrame() count the bottom as the line, so
+they see the frame end a little short. With the primary button only the
+bar's right segment resizes -- Haiku resizes from the bottom right corner
+alone -- and with the secondary all three; the left segment is repainted
+when highlighted, which the base class does not do for that corner.
+
+Pixel art in units, like Platinum and Win2k; the title bar is the tab
+colour and text, the buttons and the resize bar the border colour, the
+bevels white and a half-tone of it.
+
+NeXTSTEP.theme: NeXT's four greys -- black title bars in front, light grey
+panels and menus, white where a menu item is chosen, white documents -- on
+the dark grey workspace with no picture.
+
+Verified in a guest with StyledEdit, Tracker and a program opening one
+window of each look: the bars in front and behind, the buttons and the
+resize bar as described; a click on a background window's close button
+closed it, miniaturize minimized.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0087-next-a-window-frame-after-nextstep-and-a-theme-with-it.patch 81a12412a12aea694e96482c1b0a2ad9eeff85c546b51f0647e3f4a7104a4394
+---
+ build/jam/packages/Haiku                      |   7 +-
+ build/jam/packages/ProsePortal                |   2 +-
+ data/prose/themes/NeXTSTEP.theme              |  54 ++
+ src/add-ons/decorators/Jamfile                |   1 +
+ src/add-ons/decorators/NextDecorator/Jamfile  |  21 +
+ .../NextDecorator/NextDecorator.cpp           | 840 ++++++++++++++++++
+ .../decorators/NextDecorator/NextDecorator.h  | 116 +++
+ .../NextDecorator/NextDecorator.rdef          |  15 +
+ 8 files changed, 1052 insertions(+), 4 deletions(-)
+ create mode 100644 data/prose/themes/NeXTSTEP.theme
+ create mode 100644 src/add-ons/decorators/NextDecorator/Jamfile
+ create mode 100644 src/add-ons/decorators/NextDecorator/NextDecorator.cpp
+ create mode 100644 src/add-ons/decorators/NextDecorator/NextDecorator.h
+ create mode 100644 src/add-ons/decorators/NextDecorator/NextDecorator.rdef
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index f5be2d69e6..effbc06afa 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -424,14 +424,15 @@ AddFilesToPackage add-ons Network\ Settings :
+ 	;
+ 
+ # PROSE fork: window frames of our own, chosen in Appearance or by a theme:
+-# two conventional ones, Platinum and Win2k. Haiku keeps its own decorator
+-# add-ons in haiku_extras, which this image does not ship, so these go in
+-# the system package.
++# two conventional ones, Platinum, Win2k and NeXT. Haiku keeps its own
++# decorator add-ons in haiku_extras, which this image does not ship, so
++# these go in the system package.
+ AddFilesToPackage add-ons decorators :
+ 	ProseDecorator
+ 	ProseRightDecorator
+ 	PlatinumDecorator
+ 	Win2kDecorator
++	NextDecorator
+ 	;
+ 
+ AddFilesToPackage add-ons Tracker :
+diff --git a/build/jam/packages/ProsePortal b/build/jam/packages/ProsePortal
+index 7972fbec32..ae591eb326 100644
+--- a/build/jam/packages/ProsePortal
++++ b/build/jam/packages/ProsePortal
+@@ -21,7 +21,7 @@ AddFilesToPackage data launch : $(portalLaunch) ;
+ AddFilesToPackage bin : prosetheme ;
+ 
+ local proseThemes = "Prose Light.theme" "Prose Dark.theme" Classic.theme
+-	Platinum.theme Win2k.theme ;
++	Platinum.theme Win2k.theme NeXTSTEP.theme ;
+ proseThemes = $(proseThemes:G=prose-themes) ;
+ SEARCH on $(proseThemes) = [ FDirName $(HAIKU_TOP) data prose themes ] ;
+ AddFilesToPackage data prose themes : $(proseThemes) ;
+diff --git a/data/prose/themes/NeXTSTEP.theme b/data/prose/themes/NeXTSTEP.theme
+new file mode 100644
+index 0000000000..fdba03dd47
+--- /dev/null
++++ b/data/prose/themes/NeXTSTEP.theme
+@@ -0,0 +1,54 @@
++# NeXTSTEP
++# After NeXTSTEP: the NeXT frame -- a black title bar in front, light grey
++# behind, the resize bar -- and NeXT's four greys for everything else:
++# light grey panels and menus, white where a menu item or a list line is
++# chosen, white documents, on the dark grey workspace with no picture.
++
++decorator = NextDecorator
++wallpaper = none
++
++# the window frame: the title bar is the tab colour, the buttons and the
++# resize bar the border colour
++window_tab = 0,0,0
++window_text = 255,255,255
++window_inactive_tab = 170,170,170
++window_inactive_text = 0,0,0
++window_border = 170,170,170
++window_inactive_border = 170,170,170
++
++# the desktop, shown with no picture, and under the icons' labels
++desktop = 85,85,85
++
++# panels, menus, documents, controls, lists
++panel_background = 170,170,170
++menu_background = 170,170,170
++navigation_base = 0,0,0
++menu_selected_background = 255,255,255
++menu_text = 0,0,0
++menu_selected_text = 0,0,0
++menu_selected_border = 0,0,0
++panel_text = 0,0,0
++document_background = 255,255,255
++document_text = 0,0,0
++control_background = 170,170,170
++control_text = 0,0,0
++control_border = 85,85,85
++control_highlight = 170,170,170
++navigation_pulse = 0,0,0
++shine = 255,255,255
++shadow = 0,0,0
++tooltip_background = 255,255,255
++tooltip_text = 0,0,0
++control_mark = 0,0,0
++list_background = 255,255,255
++list_selected_background = 170,170,170
++list_text = 0,0,0
++list_selected_text = 0,0,0
++scroll_bar_thumb = 170,170,170
++link_text = 0,0,0
++link_hover = 85,85,85
++link_visited = 85,85,85
++link_active = 0,0,0
++status_bar = 85,85,85
++success = 0,85,0
++failure = 170,0,0
+diff --git a/src/add-ons/decorators/Jamfile b/src/add-ons/decorators/Jamfile
+index 0940bf0461..6d179d50ef 100644
+--- a/src/add-ons/decorators/Jamfile
++++ b/src/add-ons/decorators/Jamfile
+@@ -8,3 +8,4 @@ SubInclude HAIKU_TOP src add-ons decorators ProseDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators ProseRightDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators PlatinumDecorator ;
+ SubInclude HAIKU_TOP src add-ons decorators Win2kDecorator ;
++SubInclude HAIKU_TOP src add-ons decorators NextDecorator ;
+diff --git a/src/add-ons/decorators/NextDecorator/Jamfile b/src/add-ons/decorators/NextDecorator/Jamfile
+new file mode 100644
+index 0000000000..c3f7c8f87a
+--- /dev/null
++++ b/src/add-ons/decorators/NextDecorator/Jamfile
+@@ -0,0 +1,21 @@
++SubDir HAIKU_TOP src add-ons decorators NextDecorator ;
++
++UseBuildFeatureHeaders freetype ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app stackandtile ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app decorator ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app drawing Painter ] ;
++UseHeaders [ FDirName $(HAIKU_TOP) src servers app font ] ;
++UsePrivateHeaders app shared interface graphics ;
++UseLibraryHeaders agg ;
++
++AddResources NextDecorator : NextDecorator.rdef ;
++
++Includes [ FGristFiles NextDecorator.cpp ]
++	: [ BuildFeatureAttribute freetype : headers ] ;
++
++Addon NextDecorator :
++	NextDecorator.cpp
++	: be <nogrist>app_server [ TargetLibstdc++ ] [ TargetLibsupc++ ]
++;
+diff --git a/src/add-ons/decorators/NextDecorator/NextDecorator.cpp b/src/add-ons/decorators/NextDecorator/NextDecorator.cpp
+new file mode 100644
+index 0000000000..e2631f3a56
+--- /dev/null
++++ b/src/add-ons/decorators/NextDecorator/NextDecorator.cpp
+@@ -0,0 +1,840 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++/*!	NeXT: a window frame after NeXTSTEP. */
++
++
++#include "NextDecorator.h"
++
++#include <math.h>
++#include <new>
++#include <string.h>
++
++#include <GraphicsDefs.h>
++#include <Point.h>
++#include <Rect.h>
++#include <View.h>
++#include <WindowPrivate.h>
++
++#include "DesktopSettings.h"
++#include "DrawingEngine.h"
++
++
++// Sizes in units (see the header).
++static const int32 kBarUnits = 19;				// the title bar's inside
++static const int32 kResizeBarUnits = 9;
++static const int32 kSegmentUnits = 24;			// a corner of the resize bar
++static const int32 kModalFrameUnits = 2;		// the line and a bevel
++
++// How far along the bottom and right borders of a window without a resize
++// bar a press counts as the resize corner, as TabDecorator has it.
++static const float kBorderResizeLength = 22.0f;
++
++// The buttons' signs, one character a unit, for a button of 13 units.
++static const char* kCloseSign[] = {
++	"#.......#",
++	".#.....#.",
++	"..#...#..",
++	"...#.#...",
++	"....#....",
++	"...#.#...",
++	"..#...#..",
++	".#.....#.",
++	"#.......#"
++};
++static const char* kMiniaturizeSign[] = {
++	"#######",
++	"#.....#",
++	"#.....#",
++	"#.....#",
++	"#.....#",
++	"#.....#",
++	"#######"
++};
++
++
++NextDecorator::NextDecorator(DesktopSettings& settings, BRect frame,
++	Desktop* desktop)
++	:
++	SATDecorator(settings, frame, desktop),
++	fUnit(1.0f),
++	fBottom(1.0f),
++	fButtonSize(13.0f)
++{
++}
++
++
++NextDecorator::~NextDecorator()
++{
++}
++
++
++// #pragma mark - hit testing
++
++
++Decorator::Region
++NextDecorator::RegionAt(BPoint where, int32& tabIndex) const
++{
++	tabIndex = -1;
++
++	for (int32 i = 0; i < fTabList.CountItems(); i++) {
++		Decorator::Tab* tab = fTabList.ItemAt(i);
++		if (!tab->tabRect.IsValid() || !tab->tabRect.Contains(where))
++			continue;
++
++		tabIndex = i;
++		if (tab->closeRect.IsValid() && tab->closeRect.Contains(where))
++			return REGION_CLOSE_BUTTON;
++		if (tab->minimizeRect.IsValid() && tab->minimizeRect.Contains(where))
++			return REGION_MINIMIZE_BUTTON;
++		return REGION_TAB;
++	}
++
++	// The resize bar: a corner at either end, the bottom between.
++	if (fBottom > fBorderWidth && fBottomBorder.Contains(where)) {
++		float segment = _SegmentWidth();
++		if (where.x <= fBottomBorder.left + segment - 1)
++			return REGION_LEFT_BOTTOM_CORNER;
++		if (where.x >= fBottomBorder.right - segment + 1)
++			return REGION_RIGHT_BOTTOM_CORNER;
++		return REGION_BOTTOM_BORDER;
++	}
++
++	Region region;
++	if (fLeftBorder.Contains(where))
++		return REGION_LEFT_BORDER;
++	if (fTopBorder.Contains(where))
++		return REGION_TOP_BORDER;
++	if (fRightBorder.Contains(where))
++		region = REGION_RIGHT_BORDER;
++	else if (fBottomBorder.Contains(where))
++		region = REGION_BOTTOM_BORDER;
++	else
++		return REGION_NONE;
++
++	// A resizable window without a resize bar: the end of the bottom and
++	// right borders is the resize corner.
++	if ((fTopTab->flags & B_NOT_RESIZABLE) == 0) {
++		BRect corner(BPoint(fBottomBorder.right - fBorderResizeLength,
++			fBottomBorder.bottom - fBorderResizeLength),
++			fBottomBorder.RightBottom());
++		if (corner.Contains(where))
++			return REGION_RIGHT_BOTTOM_CORNER;
++	}
++
++	return region;
++}
++
++
++void
++NextDecorator::ExtendDirtyRegion(Region region, BRegion& dirty)
++{
++	SATDecorator::ExtendDirtyRegion(region, dirty);
++
++	// the resize bar's left segment is a corner the base class does not know
++	if (region == REGION_LEFT_BOTTOM_CORNER && fBottom > fBorderWidth)
++		dirty.Include(fBottomBorder);
++}
++
++
++// #pragma mark - layout
++
++
++void
++NextDecorator::_DoLayout()
++{
++	const float fontSize = fDrawState.Font().Size();
++	const float scale = max_c(fontSize / 12.0f, 1.0f);
++	fUnit = max_c(1.0f, roundf(fontSize / 12.0f));
++	const float u = fUnit;
++
++	bool hasBar = false;
++	switch ((int)fTopTab->look) {
++		case B_TITLED_WINDOW_LOOK:
++		case B_DOCUMENT_WINDOW_LOOK:
++		case B_FLOATING_WINDOW_LOOK:
++		case kLeftTitledWindowLook:
++			hasBar = true;
++			fBorderWidth = int32(u);
++			break;
++
++		case B_MODAL_WINDOW_LOOK:
++			fBorderWidth = int32(kModalFrameUnits * u);
++			break;
++
++		case B_BORDERED_WINDOW_LOOK:
++			fBorderWidth = 1;
++			break;
++
++		default:
++			fBorderWidth = 0;
++	}
++
++	// A resizable window with a title bar gets the resize bar under it.
++	fBottom = fBorderWidth;
++	if (hasBar && (fTopTab->flags & B_NOT_RESIZABLE) == 0)
++		fBottom = kResizeBarUnits * u;
++
++	fResizeKnobSize = 0;
++	fBorderResizeLength = kBorderResizeLength * scale;
++
++	// The borders: strips beside and below the client area, none of them
++	// overlapping, the left and right ones without the corners -- the shape
++	// the base class's dirty-region bookkeeping expects. The bottom one is
++	// the resize bar when there is one.
++	if (fBorderWidth > 0) {
++		fLeftBorder.Set(fFrame.left - fBorderWidth, fFrame.top,
++			fFrame.left - 1, fFrame.bottom);
++		fRightBorder.Set(fFrame.right + 1, fFrame.top,
++			fFrame.right + fBorderWidth, fFrame.bottom);
++		fTopBorder.Set(fFrame.left - fBorderWidth, fFrame.top - fBorderWidth,
++			fFrame.right + fBorderWidth, fFrame.top - 1);
++		fBottomBorder.Set(fFrame.left - fBorderWidth, fFrame.bottom + 1,
++			fFrame.right + fBorderWidth, fFrame.bottom + fBottom);
++	} else {
++		fLeftBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fRightBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fTopBorder.Set(0.0, 0.0, -1.0, -1.0);
++		fBottomBorder.Set(0.0, 0.0, -1.0, -1.0);
++	}
++
++	// The resize rect is the resize bar's right segment: what resizes with
++	// the primary button, and what the size limits count.
++	if (fBottom > fBorderWidth) {
++		fResizeRect.Set(fBottomBorder.right - _SegmentWidth() + 1,
++			fBottomBorder.top, fBottomBorder.right, fBottomBorder.bottom);
++	} else
++		fResizeRect.Set(0, 0, -1, -1);
++
++	if (hasBar) {
++		font_height fontHeight;
++		fDrawState.Font().GetHeight(fontHeight);
++		float text = ceilf(fontHeight.ascent + fontHeight.descent);
++
++		// The bar's inside: the title with room round it, and at least what
++		// NeXT gave it; the buttons leave three units above and below.
++		float inside = max_c(kBarUnits * u, ceilf((text + 6 * u) / u) * u);
++		fButtonSize = inside - 6 * u;
++
++		// The line on top, then the inside; the top border under it is the
++		// line between the bar and the content.
++		float barHeight = u + inside;
++		fTitleBarRect.Set(fTopBorder.left, fTopBorder.top - barHeight,
++			fTopBorder.right, fTopBorder.top - 1);
++		fBorderRect = BRect(fTitleBarRect.LeftTop(),
++			fBottomBorder.RightBottom());
++		_LayoutBar();
++	} else {
++		fBorderRect = BRect(fTopBorder.LeftTop(), fBottomBorder.RightBottom());
++		for (int32 i = 0; i < fTabList.CountItems(); i++) {
++			Decorator::Tab* tab = fTabList.ItemAt(i);
++			tab->tabRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->closeRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->zoomRect.Set(0.0, 0.0, -1.0, -1.0);
++			tab->minimizeRect.Set(0.0, 0.0, -1.0, -1.0);
++		}
++		fTabsRegion.MakeEmpty();
++		fTitleBarRect.Set(0.0, 0.0, -1.0, -1.0);
++	}
++}
++
++
++/*!	A corner segment of the resize bar: NeXT's width, or a third of a
++	narrow window.
++*/
++float
++NextDecorator::_SegmentWidth() const
++{
++	float width = fBottomBorder.Width() + 1;
++	return min_c(kSegmentUnits * fUnit, floorf(width / 3));
++}
++
++
++/*!	One window: the bar is its tab. Stacked windows: equal slices, the
++	top one with both buttons, the others with close only.
++*/
++void
++NextDecorator::_LayoutBar()
++{
++	int32 count = fTabList.CountItems();
++	if (count < 1)
++		return;
++
++	float width = fTitleBarRect.Width() + 1;
++	float slice = floorf(width / count);
++
++	for (int32 i = 0; i < count; i++) {
++		Decorator::Tab* tab = fTabList.ItemAt(i);
++		BRect& tabRect = tab->tabRect;
++		tabRect.Set(fTitleBarRect.left + i * slice, fTitleBarRect.top,
++			i == count - 1 ? fTitleBarRect.right
++				: fTitleBarRect.left + (i + 1) * slice - 1,
++			fTitleBarRect.bottom);
++		tab->tabOffset = uint32(tabRect.left - fLeftBorder.left);
++		tab->tabLocation = 0.0f;
++
++		_LayoutButtons(tab, count == 1 || tab == fTopTab);
++
++		// What a window may shrink to: its buttons and a little title.
++		tab->minTabSize = 2 * fUnit + 2 * (3 * fUnit + fButtonSize)
++			+ fDrawState.Font().Size() * 3;
++		tab->maxTabSize = tab->minTabSize;
++		if (fDrawingEngine != NULL && Title(tab) != NULL) {
++			tab->maxTabSize += ceilf(fDrawingEngine->StringWidth(Title(tab),
++				strlen(Title(tab)), fDrawState.Font()));
++		}
++	}
++
++	fTabsRegion = fTitleBarRect;
++}
++
++
++/*!	Miniaturize at the bar's left, close at its right, three units in and
++	centred; no zoom.
++*/
++void
++NextDecorator::_LayoutButtons(Decorator::Tab* tab, bool allButtons)
++{
++	tab->closeRect.Set(0.0, 0.0, -1.0, -1.0);
++	tab->zoomRect.Set(0.0, 0.0, -1.0, -1.0);
++	tab->minimizeRect.Set(0.0, 0.0, -1.0, -1.0);
++
++	BRect inside = _BarInside(tab);
++	if (!inside.IsValid())
++		return;
++
++	const float u = fUnit;
++	const float size = fButtonSize;
++	float y = inside.top + floorf((inside.Height() + 1 - size) / (2 * u)) * u;
++	BRect rect(0, 0, size - 1, size - 1);
++
++	if (allButtons && (tab->flags & B_NOT_MINIMIZABLE) == 0)
++		tab->minimizeRect = rect.OffsetToCopy(inside.left + 3 * u, y);
++	if ((tab->flags & B_NOT_CLOSABLE) == 0) {
++		tab->closeRect = rect.OffsetToCopy(inside.right + 1 - 3 * u - size,
++			y);
++	}
++}
++
++
++/*!	The bar inside the black line; stacked slices keep a unit at their
++	right for a black rule between them.
++*/
++BRect
++NextDecorator::_BarInside(Decorator::Tab* tab) const
++{
++	const BRect& bar = tab->tabRect;
++	if (!fTitleBarRect.IsValid() || !bar.IsValid())
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	const float u = fUnit;
++	bool first = tab == fTabList.FirstItem();
++	return BRect(first ? bar.left + u : bar.left, bar.top + u,
++		bar.right - u, bar.bottom);
++}
++
++
++/*!	Where the title goes: centred in the bar when that keeps it clear of
++	the buttons, otherwise centred between them; truncated to fit. The rect
++	runs from the ascent to the descent; invalid when no title fits.
++*/
++BRect
++NextDecorator::_TitleRect(Decorator::Tab* tab)
++{
++	BRect inside = _BarInside(tab);
++	if (!inside.IsValid() || fDrawingEngine == NULL)
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	const float u = fUnit;
++	float left = inside.left + 3 * u;
++	float right = inside.right - 3 * u;
++	if (tab->minimizeRect.IsValid())
++		left = tab->minimizeRect.right + 1 + 3 * u;
++	if (tab->closeRect.IsValid())
++		right = tab->closeRect.left - 1 - 3 * u;
++	float room = right - left + 1;
++	if (room < fDrawState.Font().Size())
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	tab->truncatedTitle = Title(tab);
++	fDrawState.Font().TruncateString(&tab->truncatedTitle, B_TRUNCATE_END,
++		room);
++	tab->truncatedTitleLength = tab->truncatedTitle.Length();
++	if (tab->truncatedTitleLength == 0)
++		return BRect(0.0, 0.0, -1.0, -1.0);
++
++	float width = ceilf(fDrawingEngine->StringWidth(
++		tab->truncatedTitle.String(), tab->truncatedTitleLength,
++		fDrawState.Font()));
++
++	float x = floorf((inside.left + inside.right + 1 - width) / 2);
++	if (x < left || x + width - 1 > right)
++		x = floorf(left + (room - width) / 2);
++
++	font_height fontHeight;
++	fDrawState.Font().GetHeight(fontHeight);
++	float baseline = floorf(inside.top + (inside.Height() + 1
++		+ fontHeight.ascent - fontHeight.descent) / 2 + 0.5f);
++	return BRect(x, baseline - ceilf(fontHeight.ascent), x + width - 1,
++		baseline + ceilf(fontHeight.descent));
++}
++
++
++// #pragma mark - colours
++
++
++void
++NextDecorator::_GetPalette(Decorator::Tab* tab, Palette& palette)
++{
++	ComponentColors colors;
++	GetComponentColors(COMPONENT_TAB, RegionHighlight(REGION_TAB), colors,
++		tab);
++
++	// The bar and its bevel: on black, a dark grey line above and at the
++	// left; on light grey, white there and dark grey below and at the right.
++	palette.bar = colors[COLOR_TAB];
++	palette.text = colors[COLOR_TAB_TEXT];
++	if (palette.bar.IsDark()) {
++		palette.barLight = tint_color(palette.bar, 0.667f);
++		palette.barDark = tint_color(palette.bar, B_DARKEN_MAX_TINT);
++	} else {
++		palette.barLight = tint_color(palette.bar, B_LIGHTEN_MAX_TINT);
++		palette.barDark = tint_color(palette.bar, 1.5f);
++	}
++
++	// NeXT's four greys, from the border colour: white, it, half of it,
++	// black.
++	palette.face = tab->buttonFocus ? fFocusFrameColor : fNonFocusFrameColor;
++	palette.white = tint_color(palette.face,
++		palette.face.IsDark() ? 0.8f : B_LIGHTEN_MAX_TINT);
++	palette.dark = tint_color(palette.face, 1.5f);
++	palette.black = tint_color(palette.face, B_DARKEN_MAX_TINT);
++	palette.glyph = palette.face.IsLight() ? palette.black : palette.white;
++}
++
++
++/*!	A resize bar segment is the face, unless it is highlighted -- the
++	resize highlight, or stack-and-tile's -- in which case the family's
++	colour for that state is used, as the other decorators do.
++*/
++rgb_color
++NextDecorator::_SideFace(Component component, Region region,
++	const rgb_color& plain)
++{
++	uint8 highlight = RegionHighlight(region);
++	if (highlight == HIGHLIGHT_NONE)
++		return plain;
++
++	ComponentColors colors;
++	GetComponentColors(component, highlight, colors, fTopTab);
++	return colors[2];
++}
++
++
++// #pragma mark - drawing
++
++
++/*!	Fills the ring of the given width just inside \a outer. */
++void
++NextDecorator::_FillRing(BRect outer, float width, const rgb_color& color)
++{
++	if (!outer.IsValid())
++		return;
++
++	fDrawingEngine->FillRect(BRect(outer.left, outer.top, outer.right,
++		outer.top + width - 1), color);
++	fDrawingEngine->FillRect(BRect(outer.left, outer.bottom - width + 1,
++		outer.right, outer.bottom), color);
++	fDrawingEngine->FillRect(BRect(outer.left, outer.top + width,
++		outer.left + width - 1, outer.bottom - width), color);
++	fDrawingEngine->FillRect(BRect(outer.right - width + 1, outer.top + width,
++		outer.right, outer.bottom - width), color);
++}
++
++
++/*!	A unit-wide edge just inside \a rect: the top and left in one colour,
++	then the bottom and right in the other, which takes the two corners
++	where they meet.
++*/
++void
++NextDecorator::_Edge(BRect rect, const rgb_color& topLeft,
++	const rgb_color& bottomRight)
++{
++	const float u = fUnit;
++	fDrawingEngine->FillRect(BRect(rect.left, rect.top, rect.right,
++		rect.top + u - 1), topLeft);
++	fDrawingEngine->FillRect(BRect(rect.left, rect.top, rect.left + u - 1,
++		rect.bottom), topLeft);
++	fDrawingEngine->FillRect(BRect(rect.left, rect.bottom - u + 1, rect.right,
++		rect.bottom), bottomRight);
++	fDrawingEngine->FillRect(BRect(rect.right - u + 1, rect.top, rect.right,
++		rect.bottom), bottomRight);
++}
++
++
++void
++NextDecorator::_DrawFrame(BRect invalid)
++{
++	if (fTopTab->look == B_NO_BORDER_WINDOW_LOOK || fBorderWidth <= 0)
++		return;
++
++	Palette palette;
++	_GetPalette(fTopTab, palette);
++
++	if (fTopTab->look == B_BORDERED_WINDOW_LOOK) {
++		fDrawingEngine->StrokeRect(fBorderRect, palette.black);
++		return;
++	}
++
++	// Everything is drawn: the drawing engine is clipped to what needs it.
++	const float u = fUnit;
++
++	// the black line round everything
++	_FillRing(fBorderRect, u, palette.black);
++
++	if (!fTitleBarRect.IsValid()) {
++		// a modal window: the line, and a raised bevel inside it
++		_Edge(fBorderRect.InsetByCopy(u, u), palette.white, palette.dark);
++		return;
++	}
++
++	// the line between the bar and the content
++	fDrawingEngine->FillRect(fTopBorder, palette.black);
++
++	if (fBottom > fBorderWidth)
++		_DrawResizeBar(palette);
++}
++
++
++/*!	The resize bar: a black line under the content, then three raised
++	segments -- a corner at either end and the middle -- parted by black.
++*/
++void
++NextDecorator::_DrawResizeBar(const Palette& palette)
++{
++	const float u = fUnit;
++	const BRect& bar = fBottomBorder;
++	float segment = _SegmentWidth();
++
++	fDrawingEngine->FillRect(BRect(bar.left, bar.top, bar.right,
++		bar.top + u - 1), palette.black);
++
++	float top = bar.top + u;
++	float bottom = bar.bottom - u;
++	float leftEnd = bar.left + segment - 1;
++	float rightStart = bar.right - segment + 1;
++
++	// the rules parting the segments
++	fDrawingEngine->FillRect(BRect(leftEnd - u + 1, top, leftEnd, bottom),
++		palette.black);
++	fDrawingEngine->FillRect(BRect(rightStart, top, rightStart + u - 1,
++		bottom), palette.black);
++
++	struct {
++		BRect		rect;
++		Component	component;
++		Region		region;
++	} segments[3] = {
++		{ BRect(bar.left + u, top, leftEnd - u, bottom),
++			COMPONENT_BOTTOM_BORDER, REGION_LEFT_BOTTOM_CORNER },
++		{ BRect(leftEnd + 1, top, rightStart - 1, bottom),
++			COMPONENT_BOTTOM_BORDER, REGION_BOTTOM_BORDER },
++		{ BRect(rightStart + u, top, bar.right - u, bottom),
++			COMPONENT_RESIZE_CORNER, REGION_RIGHT_BOTTOM_CORNER }
++	};
++	for (int32 i = 0; i < 3; i++) {
++		if (!segments[i].rect.IsValid())
++			continue;
++		fDrawingEngine->FillRect(segments[i].rect, _SideFace(
++			segments[i].component, segments[i].region, palette.face));
++		_Edge(segments[i].rect, palette.white, palette.dark);
++	}
++}
++
++
++void
++NextDecorator::_DrawTab(Decorator::Tab* tab, BRect invalid)
++{
++	const BRect& bar = tab->tabRect;
++	if (!bar.IsValid() || !invalid.Intersects(bar))
++		return;
++
++	Palette palette;
++	_GetPalette(tab, palette);
++
++	BRect inside = _BarInside(tab);
++	fDrawingEngine->FillRect(inside, palette.bar);
++	_Edge(inside, palette.barLight, palette.barDark);
++	if (tab != fTabList.LastItem()) {
++		// a black rule between the slices of a stacked bar
++		fDrawingEngine->FillRect(BRect(bar.right - fUnit + 1, bar.top,
++			bar.right, bar.bottom), palette.black);
++	}
++
++	_DrawTitle(tab, bar);
++	_DrawButtons(tab, bar);
++}
++
++
++void
++NextDecorator::_DrawTitle(Decorator::Tab* tab, BRect rect)
++{
++	BRect title = _TitleRect(tab);
++	if (!title.IsValid())
++		return;
++
++	Palette palette;
++	_GetPalette(tab, palette);
++
++	// Its own ground first, a unit wider, so drawing it again does not
++	// thicken it.
++	BRect inside = _BarInside(tab).InsetByCopy(fUnit, fUnit);
++	fDrawingEngine->FillRect(title.InsetByCopy(-fUnit, 0) & inside,
++		palette.bar);
++
++	font_height fontHeight;
++	fDrawState.Font().GetHeight(fontHeight);
++	float baseline = title.bottom - ceilf(fontHeight.descent);
++
++	fDrawingEngine->SetDrawingMode(B_OP_OVER);
++	fDrawingEngine->SetHighColor(palette.text);
++	fDrawingEngine->SetFont(fDrawState.Font());
++	fDrawingEngine->DrawString(tab->truncatedTitle.String(),
++		tab->truncatedTitleLength, BPoint(title.left, baseline));
++	fDrawingEngine->SetDrawingMode(B_OP_COPY);
++}
++
++
++void
++NextDecorator::_DrawButtons(Decorator::Tab* tab, const BRect& invalid)
++{
++	if (tab->minimizeRect.IsValid() && invalid.Intersects(tab->minimizeRect))
++		_DrawMinimize(tab, false, tab->minimizeRect);
++	if (tab->closeRect.IsValid() && invalid.Intersects(tab->closeRect))
++		_DrawClose(tab, false, tab->closeRect);
++}
++
++
++void
++NextDecorator::_DrawClose(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawButton(tab, direct, rect, BUTTON_CLOSE, tab->closePressed);
++}
++
++
++void
++NextDecorator::_DrawZoom(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	// NeXT windows have no zoom button.
++}
++
++
++void
++NextDecorator::_DrawMinimize(Decorator::Tab* tab, bool direct, BRect rect)
++{
++	_DrawButton(tab, direct, rect, BUTTON_MINIATURIZE, tab->minimizePressed);
++}
++
++
++/*!	A title bar button: light grey, raised -- white above and at the left,
++	black below and at the right with dark grey inside that -- and its sign
++	in black: a cross to close, a small window to miniaturize. Pressed, it
++	sinks and the sign moves a unit down and right.
++*/
++void
++NextDecorator::_DrawButton(Decorator::Tab* tab, bool direct, BRect rect,
++	Button button, bool pressed)
++{
++	if (!rect.IsValid())
++		return;
++
++	// Pressed feedback is drawn straight to the front buffer; the rest of
++	// the time the window's own update copies it, as DefaultDecorator does.
++	bool copyToFrontEnabled = fDrawingEngine->CopyToFrontEnabled();
++	fDrawingEngine->SetCopyToFrontEnabled(direct);
++
++	Palette palette;
++	_GetPalette(tab, palette);
++	const float u = fUnit;
++
++	fDrawingEngine->FillRect(rect, palette.face);
++	if (pressed) {
++		_Edge(rect, palette.black, palette.white);
++		_Edge(rect.InsetByCopy(u, u), palette.dark, palette.face);
++	} else {
++		_Edge(rect, palette.white, palette.black);
++		_Edge(rect.InsetByCopy(u, u), palette.face, palette.dark);
++	}
++
++	const char** rows = button == BUTTON_CLOSE
++		? kCloseSign : kMiniaturizeSign;
++	int32 count = button == BUTTON_CLOSE
++		? sizeof(kCloseSign) / sizeof(kCloseSign[0])
++		: sizeof(kMiniaturizeSign) / sizeof(kMiniaturizeSign[0]);
++	int32 columns = strlen(rows[0]);
++
++	// centred, in cells that grow with a bigger button
++	int32 units = int32((rect.Width() + 1) / u);
++	float cell = u * max_c(1, units / 13);
++	float x = rect.left + floorf(((rect.Width() + 1) - columns * cell)
++		/ (2 * u)) * u;
++	float y = rect.top + floorf(((rect.Height() + 1) - count * cell)
++		/ (2 * u)) * u;
++	if (pressed) {
++		x += u;
++		y += u;
++	}
++
++	for (int32 row = 0; row < count; row++) {
++		for (int32 column = 0; column < columns; column++) {
++			if (rows[row][column] != '#')
++				continue;
++			float left = x + column * cell;
++			float top = y + row * cell;
++			fDrawingEngine->FillRect(BRect(left, top, left + cell - 1,
++				top + cell - 1), palette.glyph);
++		}
++	}
++
++	fDrawingEngine->SetCopyToFrontEnabled(copyToFrontEnabled);
++}
++
++
++// #pragma mark - state
++
++
++void
++NextDecorator::_SetTitle(Decorator::Tab* tab, const char* string,
++	BRegion* updateRegion)
++{
++	_DoLayout();
++	_DoOutlineLayout();
++	if (updateRegion != NULL && fTitleBarRect.IsValid())
++		updateRegion->Include(fTitleBarRect);
++}
++
++
++void
++NextDecorator::_SetFocus(Decorator::Tab* tab)
++{
++	tab->buttonFocus = IsFocus(tab)
++		|| ((tab->look == B_FLOATING_WINDOW_LOOK
++			|| tab->look == kLeftTitledWindowLook)
++			&& (tab->flags & B_AVOID_FOCUS) != 0);
++
++	// The top tab of a stacked bar is the one with both buttons.
++	if (fTabList.CountItems() > 1) {
++		for (int32 i = 0; i < fTabList.CountItems(); i++) {
++			Decorator::Tab* other = fTabList.ItemAt(i);
++			_LayoutButtons(other, other == fTopTab);
++		}
++	}
++}
++
++
++bool
++NextDecorator::_SetTabLocation(Decorator::Tab* tab, float location,
++	bool isShifting, BRegion* updateRegion)
++{
++	// A bar has no sliding tab.
++	return false;
++}
++
++
++bool
++NextDecorator::_MoveTab(int32 from, int32 to, bool isMoving,
++	BRegion* updateRegion)
++{
++	// Slices keep their order.
++	return false;
++}
++
++
++void
++NextDecorator::_MoveBy(BPoint offset)
++{
++	TabDecorator::_MoveBy(offset);
++	for (int32 i = 0; i < fTabList.CountItems(); i++)
++		fTabList.ItemAt(i)->minimizeRect.OffsetBy(offset);
++}
++
++
++void
++NextDecorator::_ResizeBy(BPoint offset, BRegion* dirty)
++{
++	// What repaints: the right and bottom strips -- the resize bar, whose
++	// segments move -- where they were and where they go, the parts of the
++	// left strip the window grows into, and the bar when the width changes,
++	// since the title re-centres and the close button moves. What the window
++	// shrinks away from is the desktop's to repaint.
++	if (dirty != NULL) {
++		dirty->Include(fRightBorder);
++		dirty->Include(fBottomBorder);
++	}
++
++	fFrame.right += offset.x;
++	fFrame.bottom += offset.y;
++	_DoLayout();
++	_DoOutlineLayout();
++
++	if (dirty != NULL) {
++		dirty->Include(fRightBorder);
++		dirty->Include(fBottomBorder);
++		if (offset.y > 0.0) {
++			dirty->Include(BRect(fLeftBorder.left,
++				fLeftBorder.bottom - offset.y, fLeftBorder.right,
++				fLeftBorder.bottom));
++		}
++		if (offset.x != 0.0) {
++			dirty->Include(fTopBorder);
++			if (fTitleBarRect.IsValid())
++				dirty->Include(fTitleBarRect);
++		}
++	}
++}
++
++
++void
++NextDecorator::_GetFootprint(BRegion* region)
++{
++	if (region == NULL)
++		return;
++
++	region->MakeEmpty();
++	if (fTopTab->look == B_NO_BORDER_WINDOW_LOOK || fBorderWidth <= 0)
++		return;
++
++	region->Set(fBorderRect);
++	region->Exclude(fFrame);
++}
++
++
++// #pragma mark - the add-on
++
++
++class NextDecorAddOn : public DecorAddOn {
++public:
++								NextDecorAddOn(image_id id, const char* name)
++									:
++									DecorAddOn(id, name)
++								{
++								}
++
++protected:
++	virtual	Decorator*			_AllocateDecorator(DesktopSettings& settings,
++									BRect rect, Desktop* desktop)
++								{
++									return new (std::nothrow) NextDecorator(
++										settings, rect, desktop);
++								}
++};
++
++
++extern "C" DecorAddOn*
++instantiate_decor_addon(image_id id, const char* name)
++{
++	return new (std::nothrow) NextDecorAddOn(id, name);
++}
+diff --git a/src/add-ons/decorators/NextDecorator/NextDecorator.h b/src/add-ons/decorators/NextDecorator/NextDecorator.h
+new file mode 100644
+index 0000000000..5cf39c9135
+--- /dev/null
++++ b/src/add-ons/decorators/NextDecorator/NextDecorator.h
+@@ -0,0 +1,116 @@
++/*
++ * Copyright 2026, the Prose project.
++ * Distributed under the terms of the MIT License.
++ *
++ * NeXT: a window frame after NeXTSTEP. A one-unit black line round the
++ * window; a title bar that is black with a white title when the window is
++ * in front and light grey with a black one behind, the title centred, a
++ * miniaturize button at its left and a close button at its right; and under
++ * a resizable window the resize bar, in three raised segments -- the corners
++ * and the middle. There is no zoom button, as there was none.
++ *
++ * Pixel art in whole units, as Platinum and Win2k are, in NeXT's four greys:
++ * the title bar is the tab colour (active or inactive) with the tab text,
++ * the buttons and the resize bar are the border colour, and the bevels are
++ * white and a half-tone of it. A theme sets them.
++ *
++ * Unlike the other Prose frames, the borders are not all one width: the
++ * sides and the top are the black line, the bottom is the resize bar.
++ * BorderWidth() is the line's; stack and tile, and BWindow::DecoratorFrame(),
++ * count the bottom as that too, and so see the frame end a little short.
++ * With the primary button only the resize bar's right segment resizes (Haiku
++ * resizes from the bottom right corner only); with the secondary, all three.
++ */
++#ifndef NEXT_DECORATOR_H
++#define NEXT_DECORATOR_H
++
++
++#include "DecorManager.h"
++#include "SATDecorator.h"
++
++
++class NextDecorator : public SATDecorator {
++public:
++								NextDecorator(DesktopSettings& settings,
++									BRect frame, Desktop* desktop);
++	virtual						~NextDecorator();
++
++	virtual	Region				RegionAt(BPoint where, int32& tab) const;
++	virtual	void				ExtendDirtyRegion(Region region,
++									BRegion& dirty);
++
++protected:
++	virtual	void				_DoLayout();
++
++	virtual	void				_DrawFrame(BRect invalid);
++	virtual	void				_DrawTab(Decorator::Tab* tab, BRect invalid);
++	virtual	void				_DrawTitle(Decorator::Tab* tab, BRect rect);
++	virtual	void				_DrawButtons(Decorator::Tab* tab,
++									const BRect& invalid);
++	virtual	void				_DrawClose(Decorator::Tab* tab, bool direct,
++									BRect rect);
++	virtual	void				_DrawZoom(Decorator::Tab* tab, bool direct,
++									BRect rect);
++	virtual	void				_DrawMinimize(Decorator::Tab* tab, bool direct,
++									BRect rect);
++
++	virtual	void				_SetTitle(Decorator::Tab* tab,
++									const char* string,
++									BRegion* updateRegion = NULL);
++	virtual	void				_SetFocus(Decorator::Tab* tab);
++	virtual	bool				_SetTabLocation(Decorator::Tab* tab,
++									float location, bool isShifting,
++									BRegion* updateRegion = NULL);
++	virtual	bool				_MoveTab(int32 from, int32 to, bool isMoving,
++									BRegion* updateRegion = NULL);
++
++	virtual	void				_MoveBy(BPoint offset);
++	virtual	void				_ResizeBy(BPoint offset, BRegion* dirty);
++
++	virtual	void				_GetFootprint(BRegion* region);
++
++private:
++			enum Button {
++				BUTTON_CLOSE,
++				BUTTON_MINIATURIZE
++			};
++
++			struct Palette {
++				rgb_color		bar;
++				rgb_color		barLight;
++				rgb_color		barDark;
++				rgb_color		text;
++				rgb_color		face;		// buttons and the resize bar
++				rgb_color		white;
++				rgb_color		dark;
++				rgb_color		black;
++				rgb_color		glyph;
++			};
++
++			void				_LayoutBar();
++			void				_LayoutButtons(Decorator::Tab* tab,
++									bool allButtons);
++			BRect				_BarInside(Decorator::Tab* tab) const;
++			BRect				_TitleRect(Decorator::Tab* tab);
++			float				_SegmentWidth() const;
++
++			void				_GetPalette(Decorator::Tab* tab,
++									Palette& palette);
++			rgb_color			_SideFace(Component component, Region region,
++									const rgb_color& plain);
++
++			void				_FillRing(BRect outer, float width,
++									const rgb_color& color);
++			void				_Edge(BRect rect, const rgb_color& topLeft,
++									const rgb_color& bottomRight);
++			void				_DrawResizeBar(const Palette& palette);
++			void				_DrawButton(Decorator::Tab* tab, bool direct,
++									BRect rect, Button button, bool pressed);
++
++			float				fUnit;
++			float				fBottom;		// the bottom border's height
++			float				fButtonSize;
++};
++
++
++#endif	// NEXT_DECORATOR_H
+diff --git a/src/add-ons/decorators/NextDecorator/NextDecorator.rdef b/src/add-ons/decorators/NextDecorator/NextDecorator.rdef
+new file mode 100644
+index 0000000000..19fff67711
+--- /dev/null
++++ b/src/add-ons/decorators/NextDecorator/NextDecorator.rdef
+@@ -0,0 +1,15 @@
++resource("be:decor:info") message('deco') {
++	"name"				= "NeXT",
++	"authors"			= "The Prose project",
++	"short_descr"		= "A black title bar and a resize bar, after NeXTSTEP",
++	"long_descr"		= "A thin black line round the window; a title bar, "
++		"black with a white title in front and light grey behind, a "
++		"miniaturize button at its left and a close button at its right; "
++		"and the resize bar under a resizable window, in three segments. "
++		"Drawn in whole pixels that grow with the system font, in the "
++		"system's window colours, so a theme sets them.",
++	"lic_url"			= "https://opensource.org/license/mit",
++	"lic_name"			= "MIT",
++	"support_url"		= "https://github.com/albanread/Prose",
++	float "version"		= 1.0
++};
