@@ -57,6 +57,14 @@ base set (the minimum image has no `grep`, for example). Older versions of
 the same packages are removed, and the result is checked by remounting. The
 run scripts install into their fresh copy, never into the build output.
 
+**ICU (icu74 74.1-6):** the community's recipe with the data linked into
+libicudata.so (`--with-data-packaging=dll`) and a native tools stage for the
+cross build (`--with-cross-build`). The arm64 bootstrap package's
+libicudata.so is a stub that loads icudt74l.dat from a path nothing on Haiku
+sets, so every ICU-backed format in the image came out empty (numbers without
+digits, "Used memory -- MiB"); this build carries its data and needs no path.
+The image takes it through patch 0089.
+
 **Codecs (verified on arm64):** libpng16, libjpeg_turbo, libwebp, tiff,
 giflib, openjpeg, lcms, libogg, libvorbis, flac, opus, speex, speexdsp,
 mpg123, lame, wavpack, libtheora, libvpx, dav1d (+ libiconv, libltdl).

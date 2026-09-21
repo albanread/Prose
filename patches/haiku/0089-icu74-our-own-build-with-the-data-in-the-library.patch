@@ -1,0 +1,53 @@
+From aea8d4e339f1eaf1686b90ba82b8873e5445282f Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Mon, 21 Sep 2026 20:35:00 +0100
+Subject: [PATCH] icu74: our own build, with the data in the library
+
+The arm64 list took the bootstrap icu74 from the package server, and the
+bootstrap libicudata.so is a stub that loads icudt74l.dat at run time --
+which nothing on Haiku points at (upstream Haiku links ICU into libbe and
+never runs the stub). Every ICU-backed format in the system came out
+empty: BNumberFormat::Format() failed, string_for_size() printed the unit
+with no number, and ActivityMonitor said "Used memory -- MiB" about a
+kernel that knew perfectly well (get_system_info() answered a probe with
+the right numbers all along).
+
+prosepkg builds icu74 74.1-6 from the community's recipe with two
+changes (packages/builder/overlay/dev-libs/icu): the data is linked into
+libicudata.so (--with-data-packaging=dll, ~30 MB, no path to find and no
+environment to set), and the tools the build runs over the data are
+built natively on the Mac first (--with-cross-build, ICU's own recipe
+for cross-building).
+
+The names the build resolves are unchanged (icu74, icu74_devel,
+icu74_tools), so BuildFeatures and the profiles see the same things;
+only the version moves. local-packages.sh picks the new files up like
+any other package the fork lists beyond upstream's.
+
+Verified on the dev machine: with this package in place of the bootstrap
+one, BNumberFormat and BStringFormat succeed with no ICU_DATA set, and
+ActivityMonitor's legend reads "Used memory 240 MiB, Cached memory
+165 MiB".
+
+Prose-Patch: 0089-icu74-our-own-build-with-the-data-in-the-library.patch d71e6a5aac65133035e7acdc96726b17bf68e921095360cf72868119e0d2e40b
+---
+ build/jam/repositories/HaikuPorts/arm64 | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 3c0b5318cd..26de5cbac6 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -35,9 +35,9 @@ RemotePackageRepository HaikuPorts
+ 	gcc_syslibs-13.3.0_2026_03_29_bootstrap-1
+ 	gcc_syslibs_devel-13.3.0_2026_03_29_bootstrap-1
+ 	grep-3.11_bootstrap-1
+-	icu74-74.1_bootstrap-1
+-	icu74_devel-74.1_bootstrap-1
+-	icu74_tools-74.1_bootstrap-1
++	icu74-74.1-6
++	icu74_devel-74.1-6
++	icu74_tools-74.1-6
+ 	less-668_bootstrap-1
+ 	libffi-3.4.6_bootstrap-1
+ 	libffi_devel-3.4.6_bootstrap-1
