@@ -149,7 +149,75 @@ multi-page/layers remain future work).**
   polyline hit test on the mid-segment, persistence, flag undo);
   smoke 10 → 11 steps (elbow PDF structure + zoom round trip).
 
-**Session findings (two traps worth their price):**
+### Sprint 4 — editing in place, drag and drop (2026-09-21)
+
+**Delivered:**
+
+- **In-place label editing:** Enter (or double-click) on a single
+  non-connector shape opens a borderless text control over it, in the
+  shape's own text size (zoom-aware). Enter commits (one undo entry),
+  Escape cancels, focus loss commits; the shape's own label is
+  suppressed while edited. The inspector's Label field remains as an
+  alternative. **Verified end to end in the guest, keyboard only** —
+  the smoke clears the page, edits, and reads the label back from a
+  PDF export (step 12).
+- **The stencil palette:** the tool buttons are now a drawn stencil —
+  click a cell to pick the tool (Select/Link are click-only), drag a
+  shape cell onto the canvas to create one where it lands ('pdDg',
+  snapped, selected, default 96×64). Icons per kind, selected-cell
+  highlight synced with the window's tool state.
+- **Colour chips:** nine swatches in the inspector; dragging one drops
+  a fill on a shape ('pdDc' → fill) or a stroke on a connector.
+- **Drop plumbing:** the canvas receives drops via MessageReceived
+  (custom whats, B_SIMPLE_DATA variants, and dropped files forward to
+  the window's open path — which also fixed the long-broken replayed
+  B_REFS_RECEIVED, previously posted to a window that never handled
+  it). The drop cores (DropCreateAt/DropColourAt) are shared by real
+  drops and the scripted `Drop` property, so the logic is testable:
+  smoke step 13 drops a shape and a colour at doc points and checks
+  count + the red fill in the exported PDF.
+- Smoke 11 → 13 steps, all green; selftest stays 71/71 (no model
+  changes).
+
+**Verification honesty:** the physical drag gesture is **human-owed**
+— this guest's mouse cannot deliver events to windows at all (see
+below), so DragMessage engagement, the drag outline, and double-click
+are verified by code review only. Everything downstream of a real
+drop — delivery parsing, point mapping, hit testing, model mutation,
+PDF output — is machine-verified via the `Drop` hook.
+
+**Session findings (input forensics — a long day):**
+
+- The day started with every interaction dead. Three separate
+  causes, each masked by the previous: (1) zombie teams from earlier
+  crashes poisoning the roster (naive `awk '{print $2}'` kills fail
+  on file-argument lines — the smoke's first-numeric-field loop
+  exists for exactly this); (2) a QEMU `system_reset` had killed
+  input delivery to windows entirely — Ctrl+Alt+Del still "worked"
+  because the input server handles that shortcut itself; (3) even
+  after a clean guest reboot, keys reached the app but not the
+  canvas.
+- **Activate from scripting needs the window lock:** calling
+  `window->Activate()` from the app looper is silently ignored on
+  this Haiku — the tab never turns yellow. Lock/Activate/Unlock plus
+  a posted follow-up (activation restores the previously focused
+  view, usually an inspector text field) finally put the canvas in
+  focus. ProseWriter worked by luck of its simpler view tree.
+- **Haiku's Command modifier is ALT.** `sendkey ctrl-a` arrives at
+  the canvas as raw byte 0x01, not as the Cmd+A menu shortcut — every
+  scripted shortcut must use `alt-…`. (qmp.py's QCODES gate now
+  admits `ret`; `return`/`enter` are rejected by QMP.)
+- **Mouse events do not reach windows on this guest.** Not clicks,
+  not drags, not after input-server restart or clean reboot; only
+  the input server's own shortcuts respond. Treat the pointer as
+  dead for automation; verify mouse-driven features on real hardware.
+
+**Still human-owed (Sprint 4):** the physical drag gesture (stencil
+→ canvas, colour chip → shape/canvas), double-click to edit, and the
+swatch strip by mouse. Everything downstream of a drop is
+machine-verified via the `Drop` property.
+
+**Sprint 3 session findings (two traps worth their price):**
 
 - A hung selftest was my own new test repeating the Sprint 1
   dangling-pointer lesson: `PDShape*` held across `AddShape`
@@ -163,8 +231,8 @@ multi-page/layers remain future work).**
   against the guest's page cache, not the drive — an unflushed
   deploy is lost to a reset. Sync after deploying (AGENTS.md).
 
-**Still human-owed:** inspector checkboxes and the View ▸ Zoom menu
-by mouse; palette drags.
+**Still human-owed (Sprint 3):** inspector checkboxes and the View ▸
+Zoom menu by mouse; palette drags.
 
 ## Test definitions
 
@@ -174,7 +242,9 @@ by mouse; palette drags.
 | D02 | launch + render | launch, screenshot | PASS |
 | D03 | scripted shapes | `AddShape` ×3 + connector, screenshot | PASS |
 | D04 | round trip | Save → relaunch with file → screenshot + ShapeCount | PASS |
-| D05 | smoke | `prosedraw/tests/guest-smoke.sh` | PASS 11/11 |
+| D05 | smoke | `prosedraw/tests/guest-smoke.sh` | PASS 13/13 |
 | D06 | PDF export | `PDF do` → magic/MediaBox/vector ops in guest; fetched PDF eyeballed on host | PASS |
 | D07 | recent files | settings file lists opened docs, most recent first | PASS |
 | D08 | elbow + zoom | orthogonal route in PDF (eyeballed), zoom scripting round trip, 200% screenshot | PASS |
+| D09 | in-place label edit | keyboard: select → Enter → type → Enter → label in PDF | PASS |
+| D10 | drop cores | `Drop` property: shape drop + colour drop → count + red fill in PDF | PASS |

@@ -172,20 +172,58 @@ zq=$("$GUEST" run "hey $SIG get Zoom" 2>/dev/null | grep -a result \
 	&& ok "elbow route + zoom" \
 	|| bad "elbow/zoom (c=$c elbows=$elbows z=$z1/$z0/$zq)"
 
-# 10 - clean quit (unmodified document) exits the app
-n=10
+# 12 - in-place label editing: keyboard only (this guest's mouse cannot
+#      deliver to windows). Haiku's Command modifier is ALT. Clear the
+#      diagram first (select all + delete) so the editor opens on a
+#      single selection; typing replaces (standard text field), Enter
+#      commits, the label shows in the PDF export
+n=12
+"$GUEST" run "hey $SIG do Activate" >/dev/null 2>&1
+"$QMP" hmp "sendkey alt-a" >/dev/null; sleep 1
+"$QMP" hmp "sendkey delete" >/dev/null; sleep 1
+"$GUEST" run "$PWQ $SIG AddShape X do 'rect 10 10 90 60|Orig'" >/dev/null 2>&1
+"$GUEST" run "hey $SIG do Activate" >/dev/null 2>&1
+"$QMP" hmp "sendkey alt-a" >/dev/null; sleep 1
+"$QMP" hmp "sendkey ret" >/dev/null; sleep 1
+"$QMP" hmp "sendkey x" >/dev/null; sleep 0.5
+"$QMP" hmp "sendkey ret" >/dev/null; sleep 1
+"$GUEST" run "$PWQ $SIG PDF X do /tmp/pd-edit.pdf" >/dev/null 2>&1
+label=$("$GUEST" run 'grep -a "Tj" /tmp/pd-edit.pdf' 2>/dev/null | head -2)
+echo "$label" | grep -aq "(x) Tj" && ok "in-place label edit" \
+	|| bad "label edit ($label)"
+
+# 13 - the drop cores via the Drop property: stencil-style shape drop
+#      and colour swatch drop run the identical code a real drag drops
+#      into (the physical gesture is human-owed: no mouse on this guest)
+n=13
+before=$(count)
+"$GUEST" run "$PWQ $SIG Drop X do 'rect 300 300'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Drop X do 'colour 216 40 40 340 330'" >/dev/null 2>&1
+sleep 1
+after=$(count)
+"$GUEST" run "$PWQ $SIG PDF X do /tmp/pd-drop.pdf" >/dev/null 2>&1
+red=$("$GUEST" run 'grep -ac "0.847 0.157 0.157 rg" /tmp/pd-drop.pdf' \
+	2>/dev/null | head -1 | tr -d '\0\r\n')
+[ "$after" = "$((before + 1))" ] && [ "$red" -ge 1 ] \
+	&& ok "drop cores (shape + colour)" || bad "drop (b=$before a=$after red=$red)"
+# leave the document clean for the quit step
+"$GUEST" run "$PWQ $SIG Save X do /tmp/pd-final.draw" >/dev/null 2>&1
+sleep 1
+
+# 14 - clean quit (unmodified document) exits the app
+n=14
 "$GUEST" run "$PWQ $SIG Quit X do" >/dev/null 2>&1
 sleep 2
 left=$("$GUEST" run 'ps' 2>/dev/null | grep -ac "apps/ProseDraw")
 [ "$left" = "0" ] && ok "clean quit exits" || bad "quit (teams left: $left)"
 
-# 11 - Open Recent persisted: the settings file exists, lists the
-#      documents this run opened, most recent first (the elbow save)
-n=11
+# 15 - Open Recent persisted: the settings file exists, lists the
+#      documents this run opened, most recent first (the final save)
+n=15
 recent=$("$GUEST" run 'cat /boot/home/config/settings/ProseDraw/recent_files' \
 	2>/dev/null | tr -d '\r')
 first=$(echo "$recent" | head -1 | tr -d '\0')
-echo "$recent" | grep -aq "pd-smoke.draw" && echo "$first" | grep -aq "pd-elbow.draw" \
+echo "$recent" | grep -aq "pd-smoke.draw" && echo "$first" | grep -aq "pd-final.draw" \
 	&& ok "recent files persisted" || bad "recent ($first)"
 
 "$QMP" shot "$OUT/pd-smoke-desk.png" >/dev/null 2>&1

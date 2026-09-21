@@ -15,6 +15,18 @@ will be written here. The discipline that keeps it working:
   background-launched windows on this guest are never activated, and tablet
   clicks do not activate windows. Keyboard works after Activate; treat mouse
   clicks as unreliable for testing (modal-alert buttons are Tab/Enter).
+- **Input facts learned the hard way (2026-09-21):** the Activate
+  scripting handler must Lock the window — `window->Activate()` from the
+  app looper is silently ignored — and must re-focus the canvas via a
+  posted message (activation restores the previously focused view).
+  Haiku's Command modifier is **Alt**: `sendkey ctrl-a` arrives as raw
+  0x01, every scripted shortcut is `alt-…`. QMP/HMP Enter is `ret`
+  (`enter`/`return` are rejected). A QEMU `system_reset` can kill input
+  delivery to windows entirely — Ctrl+Alt+Del still "works" (the input
+  server owns that shortcut), so probe with a real window; if dead,
+  reboot the guest properly. **Mouse events never reach windows on this
+  guest** — verify pointer-driven features on real hardware and say so
+  in the plan.
 - **Kill guest apps by numeric team id** — `ps` puts the id in the column
   after the command name; `killall` does not exist on this image.
 - **Before believing a guest failure, prove the guest binary is the host

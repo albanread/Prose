@@ -80,10 +80,10 @@ WriteAttrOn(const char* path, const char* attr, const BString& value)
 }
 
 // ------------------------------------------------------------ inspector --
+class PDStencil;
 class PDWindow : public BWindow {
 public:
 			PDWindow(BRect frame, const char* title);
-
 	bool	QuitRequested() override;
 	void	MessageReceived(BMessage* message) override;
 	void	MenusBeginning() override;
@@ -110,7 +110,8 @@ public:
 		GRID_SHOW_MSG = 'pdGs', GRID_SNAP_MSG = 'pdGn',
 		ALIGN_MSG = 'pdAl', ZORDER_MSG = 'pdZo',
 		ZOOM_MSG = 'pdZm',
-		STATUS_MSG = 'pdUp', FOCUS_LABEL_MSG = 'pdIl'
+		STATUS_MSG = 'pdUp', FOCUS_LABEL_MSG = 'pdIl',
+		FOCUS_CANVAS_MSG = 'pdFc', DROP_HOOK_MSG = 'pdDh'
 	};
 
 private:
@@ -129,7 +130,7 @@ private:
 	PDDocument	fDoc;
 	PDCanvas*	fCanvas;
 	BMenuBar*	fMenuBar;
-	BView*		fPalette;
+	PDStencil*	fPalette;
 	BView*		fInspector;
 	BStringView*	fStatus;
 	BScrollView*	fScroll;
@@ -171,6 +172,179 @@ const PDWindow::ColourEntry PDWindow::kColours[] = {
 };
 const int32 PDWindow::kColourCount = 9;
 
+// -------------------------------------------------------------- stencil --
+// The tool palette as a real stencil: click a cell to pick the tool,
+// drag a shape cell onto the canvas to create one where it lands.
+// Cells 0 (Select) and 6 (Link) are tool-only — they have no payload.
+class PDStencil : public BView {
+public:
+	PDStencil()
+		:
+		BView(BRect(0, 0, 84, 7 * 30 + 4), "stencil", B_FOLLOW_NONE,
+			B_WILL_DRAW)
+	{
+		SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+		SetDrawingMode(B_OP_COPY);
+	}
+
+	void SetSelected(int32 tool)
+	{
+		fSelected = tool;
+		Invalidate();
+	}
+
+	void Draw(BRect) override
+	{
+		SetFont(be_plain_font);
+		SetLowColor(ViewColor());
+		for (int32 i = 0; i < 7; i++) {
+			BRect cell = CellAt(i);
+			if (i == fSelected) {
+				SetHighColor(tint_color(ViewColor(), B_DARKEN_2_TINT));
+				FillRect(cell);
+			}
+			SetHighColor(0, 0, 0, 255);
+			DrawIcon(i, cell);
+			font_height fh;
+			GetFontHeight(&fh);
+			DrawString(kNames[i],
+				BPoint(cell.left + 28, cell.top + (cell.Height() + fh.ascent) / 2 - 1));
+		}
+	}
+
+	void MouseDown(BPoint where) override
+	{
+		int32 cell = CellAt(where);
+		if (cell < 0)
+			return;
+		if (!Draggable(cell)) {
+			Pick(cell);
+			return;
+		}
+		// hold-to-drag: a plain click picks the tool, moving past a few
+		// pixels starts a drag that drops a shape on the canvas
+		BPoint now = where;
+		uint32 buttons = 0;
+		GetMouse(&now, &buttons, false);
+		while (buttons != 0) {
+			if (fabsf(now.x - where.x) > 5 || fabsf(now.y - where.y) > 5) {
+				BMessage* drag = new BMessage('pdDg');
+				drag->AddInt32("kind", KindOf(cell));
+				DragMessage(drag, CellAt(cell), this);
+				return;
+			}
+			snooze(20000);
+			GetMouse(&now, &buttons, false);
+		}
+		Pick(cell);
+	}
+
+private:
+	static const char* kNames[7];
+
+	BRect CellAt(int32 i) const
+	{
+		return BRect(2, 2 + i * 30, 82, 2 + i * 30 + 28);
+	}
+	int32 CellAt(BPoint p) const
+	{
+		for (int32 i = 0; i < 7; i++)
+			if (CellAt(i).Contains(p))
+				return i;
+		return -1;
+	}
+	bool Draggable(int32 cell) const { return cell >= 1 && cell <= 5; }
+	int32 KindOf(int32 cell) const
+	{
+		// cell order matches PDTool order
+		switch (cell) {
+			case 1: return PD_RECT;
+			case 2: return PD_RRECT;
+			case 3: return PD_ELLIPSE;
+			case 4: return PD_DIAMOND;
+			default: return PD_TEXT;
+		}
+	}
+	void Pick(int32 cell)
+	{
+		BMessage m('pdTl');
+		m.AddInt32("tool", cell);
+		if (Window() != NULL)
+			Window()->PostMessage(&m);
+	}
+	void DrawIcon(int32 i, BRect cell)
+	{
+		BRect icon(4, cell.top + 5, 24, cell.top + 25);
+		switch (i) {
+			case 0:	// select: arrow
+			{
+				BPoint arrow[5] = { icon.LeftTop(), icon.LeftTop()
+					+ BPoint(14, 0), icon.LeftTop() + BPoint(14, 5),
+					icon.LeftTop() + BPoint(6, 5), icon.LeftTop()
+					+ BPoint(6, 16) };
+				StrokePolygon(arrow, 5, true);
+				break;
+			}
+			case 1: StrokeRect(icon); break;
+			case 2: StrokeRoundRect(icon, 4, 4); break;
+			case 3: StrokeEllipse(icon); break;
+			case 4:
+			{
+				BPoint d[4] = { BPoint((icon.left + icon.right) / 2, icon.top),
+					BPoint(icon.right, (icon.top + icon.bottom) / 2),
+					BPoint((icon.left + icon.right) / 2, icon.bottom),
+					BPoint(icon.left, (icon.top + icon.bottom) / 2) };
+				StrokePolygon(d, 4, true);
+				break;
+			}
+			case 5:
+			{
+				BFont font(be_plain_font);
+				font.SetSize(15);
+				SetFont(&font);
+				DrawString("T", BPoint(icon.left + 7, icon.bottom - 3));
+				break;
+			}
+			default:	// link
+				StrokeLine(icon.LeftTop() + BPoint(2, 16),
+					icon.RightBottom() - BPoint(2, 16));
+				break;
+		}
+	}
+
+	int32	fSelected = 0;
+};
+
+const char* PDStencil::kNames[7] = { "Select", "Box", "Round", "Oval",
+	"Diamond", "Text", "Link" };
+
+// --------------------------------------------------------------- swatch --
+// An inspector colour chip: drag it onto a shape to fill it, onto a
+// connector to colour its line.
+class PDSwatch : public BView {
+public:
+	PDSwatch(BRect frame, rgb_color c)
+		:
+		BView(frame, "swatch", B_FOLLOW_NONE, B_WILL_DRAW),
+		fColour(c)
+	{
+		SetViewColor(c);
+	}
+
+	void MouseDown(BPoint) override
+	{
+		BMessage* drag = new BMessage('pdDc');
+		drag->AddInt32("red", fColour.red);
+		drag->AddInt32("green", fColour.green);
+		drag->AddInt32("blue", fColour.blue);
+		DragMessage(drag, Bounds(), this);
+	}
+
+private:
+	rgb_color	fColour;
+};
+
+
 PDWindow::PDWindow(BRect frame, const char* title)
 	:
 	BWindow(frame, title, B_TITLED_WINDOW,
@@ -199,20 +373,7 @@ PDWindow::PDWindow(BRect frame, const char* title)
 		B_FANCY_BORDER);
 	AddChild(fScroll);
 
-	fPalette = new BView(BRect(0, 0, 84, 100), "palette", B_FOLLOW_NONE,
-		B_WILL_DRAW);
-	fPalette->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-	const char* tools[] = { "Select", "Box", "Round", "Ellipse",
-		"Diamond", "Text", "Link" };
-	for (int32 i = 0; i < 7; i++) {
-		BMessage* m = new BMessage(TOOL_MSG);
-		m->AddInt32("tool", i);
-		BButton* b = new BButton(BRect(4, 4 + i * 30, 80, 28 + i * 30),
-			"tool", tools[i], m);
-		if (i == 0)
-			b->SetValue(B_CONTROL_ON);
-		fPalette->AddChild(b);
-	}
+	fPalette = new PDStencil();
 	AddChild(fPalette);
 
 	BuildInspector();
@@ -466,7 +627,13 @@ PDWindow::BuildInspector()
 			"conn", checks[i], m);
 		fInspector->AddChild(*boxes[i]);
 	}
-	fInspector->ResizeTo(208, 360);
+	// colour chips: drag one onto a shape (fill) or connector (stroke)
+	for (int32 i = 0; i < kColourCount; i++) {
+		fInspector->AddChild(new PDSwatch(
+			BRect(8 + i * 22, 362, 8 + i * 22 + 18, 380),
+			kColours[i].c));
+	}
+	fInspector->ResizeTo(208, 392);
 }
 
 void
@@ -805,21 +972,13 @@ PDWindow::MessageReceived(BMessage* message)
 			int32 tool = 0;
 			message->FindInt32("tool", &tool);
 			fCanvas->SetTool((PDTool)tool);
-			for (int32 i = 0; i < 7; i++) {
-				BButton* b = dynamic_cast<BButton*>(
-					fPalette->ChildAt(i));
-				if (b != NULL)
-					b->SetValue(i == tool ? B_CONTROL_ON : B_CONTROL_OFF);
-			}
+			fPalette->SetSelected(tool);
 			UpdateStatus();
 			break;
 		}
 		case STATUS_MSG:
 			RefreshInspector();
 			UpdateStatus();
-			break;
-		case FOCUS_LABEL_MSG:
-			fLabel->MakeFocus();
 			break;
 		case INSPECTOR_MSG:
 		{
@@ -841,6 +1000,29 @@ PDWindow::MessageReceived(BMessage* message)
 		case B_SELECT_ALL:
 			fCanvas->SelectAll();
 			break;
+		case FOCUS_CANVAS_MSG:
+			fCanvas->MakeFocus();
+			break;
+		case DROP_HOOK_MSG:
+		{
+			// harness drop: doc point -> the same core a real drop runs
+			float x = 0, y = 0;
+			message->FindFloat("x", &x);
+			message->FindFloat("y", &y);
+			BPoint viewPoint = fCanvas->DocToView(BPoint(x, y));
+			int32 kind = -1;
+			if (message->FindInt32("kind", &kind) == B_OK)
+				fCanvas->DropCreateAt((PDShapeKind)kind, viewPoint);
+			else {
+				int32 r = 0, g2 = 0, b = 0;
+				message->FindInt32("red", &r);
+				message->FindInt32("green", &g2);
+				message->FindInt32("blue", &b);
+				rgb_color c = { (uint8)r, (uint8)g2, (uint8)b, 255 };
+				fCanvas->DropColourAt(c, viewPoint);
+			}
+			break;
+		}
 		case 'pdDp':
 			fCanvas->DuplicateSelection();
 			break;
@@ -942,6 +1124,16 @@ PDWindow::MessageReceived(BMessage* message)
 			}
 			break;
 		}
+		case B_REFS_RECEIVED:
+		{
+			// Tracker double-click, launch refs (replayed after
+			// ReadyToRun), or a file dropped on the canvas — all the
+			// same open
+			entry_ref ref;
+			if (message->FindRef("refs", &ref) == B_OK)
+				OpenFile(ref);
+			break;
+		}
 		case 'pdSv':
 		{
 			// save panel selection, or a scripted save
@@ -1037,6 +1229,11 @@ static property_info sPDProperties[] = {
 		{ B_DIRECT_SPECIFIER, 0 },
 		"export the diagram as vector PDF (data: path)", 0,
 		{ B_STRING_TYPE } },
+	{ "Drop",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"run the drop core at a doc point: \"kind x y\" or "
+		"\"colour r g b x y\" (harness)", 0, { B_STRING_TYPE } },
 	{ "Open",
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
@@ -1120,8 +1317,18 @@ HandleScriptingForWindow(PDWindow* window, BMessage* message,
 		return true;
 	}
 	if (prop == "Activate" && isExec) {
-		window->Activate();
-		window->Canvas()->MakeFocus();
+		// scripting runs on the app looper; window calls need the lock
+		// (paid for here: a lock-less Activate() from the app thread is
+		// silently ignored and the window never takes keyboard focus)
+		if (window->Lock()) {
+			window->Activate();
+			window->Canvas()->MakeFocus();
+			window->Unlock();
+		}
+		// activation restores the previously focused view — an
+		// inspector text field, typically — so re-focus the canvas
+		// once more AFTER the activation has settled
+		window->PostMessage(PDWindow::FOCUS_CANVAS_MSG);
 		ReplyString(message, "");
 		return true;
 	}
@@ -1193,6 +1400,52 @@ HandleScriptingForWindow(PDWindow* window, BMessage* message,
 				ReplyError(message, strerror(err));
 		} else
 			ReplyError(message, "data: path required");
+		return true;
+	}
+	if (prop == "Drop" && isExec) {
+		// harness: drive the drop core at a doc point — the identical
+		// code a real stencil/swatch drop runs, minus the app_server
+		// drag itself (this guest's mouse cannot deliver drags; the
+		// physical gesture stays human-owed)
+		BString data;
+		if (message->FindString("data", &data) == B_OK && data.Length()) {
+			float x = 0, y = 0;
+			if (sscanf(data.String(), "colour %*d %*d %*d %f %f", &x, &y)
+					== 2
+				|| sscanf(data.String(), "color %*d %*d %*d %f %f",
+					&x, &y) == 2) {
+				int32 r = 0, g2 = 0, b = 0;
+				sscanf(data.String(), "%*s %d %d %d", &r, &g2, &b);
+				BMessage drop(PDWindow::DROP_HOOK_MSG);
+				drop.AddInt32("red", r);
+				drop.AddInt32("green", g2);
+				drop.AddInt32("blue", b);
+				drop.AddFloat("x", x);
+				drop.AddFloat("y", y);
+				window->PostMessage(&drop);
+				ReplyString(message, "");
+				return true;
+			}
+			PDShapeKind kind = PD_RECT;
+			if (data.IStartsWith("rrect")) kind = PD_RRECT;
+			else if (data.IStartsWith("ellipse")) kind = PD_ELLIPSE;
+			else if (data.IStartsWith("diamond")) kind = PD_DIAMOND;
+			else if (data.IStartsWith("text")) kind = PD_TEXT;
+			else if (!data.IStartsWith("rect")) {
+				ReplyError(message,
+					"kind must be rect/rrect/ellipse/diamond/text/colour");
+				return true;
+			}
+			char head[16] = { 0 };
+			sscanf(data.String(), "%15s %f %f", head, &x, &y);
+			BMessage drop(PDWindow::DROP_HOOK_MSG);
+			drop.AddInt32("kind", (int32)kind);
+			drop.AddFloat("x", x);
+			drop.AddFloat("y", y);
+			window->PostMessage(&drop);
+			ReplyString(message, "");
+		} else
+			ReplyError(message, "data: drop spec required");
 		return true;
 	}
 	if (prop == "Open" && isExec) {

@@ -23,7 +23,8 @@ from pathlib import Path
 SOCK = Path(__file__).resolve().parent / "qmp.sock"
 
 # QMP qcode names (subset; QEMU accepts these spellings)
-QCODES = {"ctrl", "shift", "alt", "altgr", "tab", "esc", "enter", "spc",
+QCODES = {"ctrl", "shift", "alt", "altgr", "tab", "esc", "enter", "ret",
+          "spc",
           "left", "right", "up", "down", "home", "end", "pgup", "pgdn",
           "delete", "backspace", "f1", "f2", "f3", "f4", "f5", "f6", "f7",
           "f8", "f9", "f10", "f11", "f12", "a", "b", "c", "d", "e", "f",

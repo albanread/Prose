@@ -3,6 +3,7 @@
 #include <Beep.h>
 #include <Font.h>
 #include <ScrollView.h>
+#include <TextControl.h>
 #include <Window.h>
 
 #include <algorithm>
@@ -15,6 +16,33 @@ const float PDCanvas::kMargin = 24.0f;
 static const rgb_color kSelection = { 0, 100, 255, 255 };
 static const pattern kDash = { { 0xcc, 0xcc, 0xcc, 0xcc,
 	0xcc, 0xcc, 0xcc, 0xcc } };
+
+// The in-place label editor: a borderless text control laid over the
+// shape. Enter commits (invocation message to the canvas), Escape
+// cancels, focus loss commits via the canvas's close path.
+class PDLabelEditor : public BTextControl {
+	typedef BTextControl inherited;
+public:
+	PDLabelEditor(BRect frame, const char* text, float fontSize)
+		:
+		BTextControl(frame, "pdlabel", "", text, new BMessage('pdLb'))
+	{
+		SetDivider(0);
+		BFont font(be_plain_font);
+		font.SetSize(fontSize);
+		TextView()->SetFontAndColor(&font);
+	}
+
+	void KeyDown(const char* bytes, int32 numBytes) override
+	{
+		if (numBytes == 1 && bytes[0] == B_ESCAPE) {
+			if (Parent() != NULL && Window() != NULL)
+				Window()->PostMessage('pdLx', Parent());
+			return;
+		}
+		inherited::KeyDown(bytes, numBytes);
+	}
+};
 
 PDCanvas::PDCanvas(PDDocument* doc)
 	:
@@ -204,7 +232,7 @@ PDCanvas::DrawShape(const PDShape& s)
 
 	BRect r = BRect(DocToView(s.rect.LeftTop()), DocToView(s.rect.RightBottom()));
 	if (s.kind == PD_TEXT) {
-		if (s.label.Length() > 0) {
+		if (s.label.Length() > 0 && s.id != fEditorShapeId) {
 			BFont font(be_plain_font);
 			font.SetSize(s.style.textSize * fZoom);
 			SetFont(&font);
@@ -254,8 +282,8 @@ PDCanvas::DrawShape(const PDShape& s)
 	}
 	SetPenSize(1.0f);
 
-	// the label, centred in the shape
-	if (s.label.Length() > 0) {
+	// the label, centred in the shape (suppressed while edited in place)
+	if (s.label.Length() > 0 && s.id != fEditorShapeId) {
 		BFont font(be_plain_font);
 		font.SetSize(s.style.textSize * fZoom);
 		SetFont(&font);
@@ -400,7 +428,71 @@ PDCanvas::QueueConnector(bool elbow)
 	}
 }
 
-// ----------------------------------------------------------------- input --
+// ------------------------------------------------------- label editing --
+void
+PDCanvas::OpenLabelEditor()
+{
+	if (fEditor != NULL || fSelection.size() != 1)
+		return;
+	PDShape* s = fDoc->ShapeById(fSelection[0]);
+	if (s == NULL || s->kind == PD_CONNECTOR)
+		return;
+	BRect r = BRect(DocToView(s->rect.LeftTop()),
+		DocToView(s->rect.RightBottom()));
+	float fs = s->style.textSize * fZoom;
+	BRect fr;
+	if (s->kind == PD_TEXT) {
+		fr = BRect(r.left, r.top, r.right, r.top + fs * 2 + 8);
+	} else {
+		// centred over the shape, wide enough for the text it holds
+		float w = std::max(72.0f * fZoom,
+			s->label.Length() * fs * 0.7f + 24 * fZoom);
+		float cy = (r.top + r.bottom) / 2;
+		fr = BRect((r.left + r.right) / 2 - w / 2, cy - fs - 4,
+			(r.left + r.right) / 2 + w / 2, cy + fs + 4);
+	}
+	fEditor = new PDLabelEditor(fr, s->label.String(), fs);
+	fEditorShapeId = s->id;
+	AddChild(fEditor);
+	fEditor->SetTarget(this);
+	fEditor->MakeFocus();
+	Invalidate();
+}
+
+void
+PDCanvas::CommitLabelEdit()
+{
+	if (fEditor == NULL)
+		return;
+	BString text = fEditor->Text();
+	int32 id = fEditorShapeId;
+	CloseLabelEdit();
+	fDoc->SetShapeLabel(id, text.String());
+	Invalidate();
+	UpdateStatus();
+}
+
+void
+PDCanvas::CancelLabelEdit()
+{
+	if (fEditor == NULL)
+		return;
+	CloseLabelEdit();
+	Invalidate();
+}
+
+void
+PDCanvas::CloseLabelEdit()
+{
+	PDLabelEditor* editor = fEditor;
+	fEditor = NULL;
+	fEditorShapeId = 0;
+	RemoveChild(editor);
+	delete editor;
+	MakeFocus();
+}
+
+// ---------------------------------------------------------- input --
 int32
 PDCanvas::HandleAt(BPoint viewPoint, int32* xAnchor, int32* yAnchor)
 {
@@ -437,6 +529,15 @@ PDCanvas::MouseDown(BPoint where)
 	switch (fTool) {
 		case PD_TOOL_SELECT:
 		{
+			// double-click (second click, same spot, within a quarter
+			// second) opens the label editor
+			bigtime_t now = system_time();
+			bool doubleClick = (now - fLastClickTime) < 250000
+				&& fabsf(where.x - fLastClickPoint.x) < 6
+				&& fabsf(where.y - fLastClickPoint.y) < 6;
+			fLastClickTime = now;
+			fLastClickPoint = where;
+
 			int32 handleId = HandleAt(where, &xAnchor, &yAnchor);
 			if (handleId != 0) {
 				fDoc->PushUndo();
@@ -465,6 +566,11 @@ PDCanvas::MouseDown(BPoint where)
 					sel.push_back(hit);
 				}
 				Select(sel);
+				// double-click a fresh single selection: edit the label
+				if (doubleClick && sel.size() == 1) {
+					OpenLabelEditor();
+					return;
+				}
 				// moving starts from every selected box (connectors ride)
 				fMoveBase.clear();
 				for (int32 id : fSelection) {
@@ -527,6 +633,7 @@ PDCanvas::MouseDown(BPoint where)
 void
 PDCanvas::MouseMoved(BPoint point, uint32 transit, const BMessage*)
 {
+	fLastMouse = point;
 	if (fDrag == DRAG_NONE)
 		return;
 	if (transit != B_INSIDE_VIEW && transit != B_OUTSIDE_VIEW)
@@ -614,9 +721,8 @@ PDCanvas::KeyDown(const char* bytes, int32 numBytes)
 		case B_DOWN_ARROW: NudgeSelection(0, g); return;
 		case B_ESCAPE: Select(std::vector<int32>()); return;
 		case B_ENTER:
-			// hand the label to the inspector
-			if (Window() != NULL)
-				Window()->PostMessage('pdIl');
+			// edit the selected shape's label in place
+			OpenLabelEditor();
 			return;
 		default:
 			BView::KeyDown(bytes, numBytes);
@@ -628,4 +734,113 @@ PDCanvas::UpdateStatus()
 {
 	if (Window() != NULL)
 		Window()->PostMessage('pdUp');
+}
+
+// --------------------------------------------------------------- drops --
+void
+PDCanvas::MessageReceived(BMessage* message)
+{
+	switch (message->what) {
+		case 'pdLb':
+			CommitLabelEdit();
+			return;
+		case 'pdLx':
+			CancelLabelEdit();
+			return;
+		case 'pdDg':
+			DropCreate(message);
+			return;
+		case 'pdDc':
+			DropColour(message);
+			return;
+		case B_SIMPLE_DATA:
+			// some drag sources deliver as B_SIMPLE_DATA; the payload
+			// fields tell which drop it is
+			if (message->HasInt32("kind")) {
+				DropCreate(message);
+				return;
+			}
+			if (message->HasInt32("red")) {
+				DropColour(message);
+				return;
+			}
+			// a diagram file dropped on the canvas opens like any other
+			if (message->HasRef("refs") && Window() != NULL)
+				Window()->PostMessage(message);
+			return;
+		case B_REFS_RECEIVED:
+			if (message->HasRef("refs") && Window() != NULL)
+				Window()->PostMessage(message);
+			return;
+		default:
+			BView::MessageReceived(message);
+	}
+}
+
+BPoint
+PDCanvas::DropPoint(BMessage* message)
+{
+	// Haiku records the release point in screen coordinates; the last
+	// hover point covers message sources that don't
+	BPoint screen;
+	if (message->FindPoint("_drop_point_", &screen) == B_OK) {
+		ConvertFromScreen(&screen);
+		return screen;
+	}
+	return fLastMouse;
+}
+
+void
+PDCanvas::DropCreate(BMessage* message)
+{
+	int32 kind = PD_RECT;
+	if (message->FindInt32("kind", &kind) != B_OK)
+		return;
+	DropCreateAt((PDShapeKind)kind, DropPoint(message));
+}
+
+void
+PDCanvas::DropCreateAt(PDShapeKind kind, BPoint viewPoint)
+{
+	BPoint p = ViewToDoc(viewPoint);
+	PDShape* s = fDoc->AddShape(kind,
+		fDoc->SnapRect(BRect(p, p + BPoint(96, 64))), NULL);
+	Select(std::vector<int32>(1, s->id));
+}
+
+void
+PDCanvas::DropColour(BMessage* message)
+{
+	int32 red = 0, green = 0, blue = 0;
+	if (message->FindInt32("red", &red) != B_OK
+		|| message->FindInt32("green", &green) != B_OK
+		|| message->FindInt32("blue", &blue) != B_OK) {
+		return;
+	}
+	rgb_color c = { (uint8)red, (uint8)green, (uint8)blue, 255 };
+	DropColourAt(c, DropPoint(message));
+}
+
+void
+PDCanvas::DropColourAt(rgb_color c, BPoint viewPoint)
+{
+	BPoint p = ViewToDoc(viewPoint);
+	int32 hit = fDoc->ShapeAtPoint(p);
+	if (hit != 0) {
+		// on a shape: set the fill
+		PDStyle st = fDoc->ShapeById(hit)->style;
+		st.fill = c;
+		st.fillOn = true;
+		fDoc->SetShapeStyle(hit, st);
+	} else {
+		// on a connector: set the stroke
+		hit = fDoc->ConnectorAtPoint(p);
+		if (hit != 0) {
+			PDStyle st = fDoc->ShapeById(hit)->style;
+			st.stroke = c;
+			fDoc->SetShapeStyle(hit, st);
+		}
+	}
+	Invalidate();
+	UpdateStatus();
 }

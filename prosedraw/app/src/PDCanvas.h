@@ -24,6 +24,7 @@ public:
 				const BMessage* drag) override;
 	void	MouseUp(BPoint point) override;
 	void	KeyDown(const char* bytes, int32 numBytes) override;
+	void	MessageReceived(BMessage* message) override;
 	void	MakeFocus(bool focus = true) override;
 
 	void	SetTool(PDTool tool) { fTool = tool; }
@@ -51,6 +52,20 @@ public:
 	// the page grew or shrank: resize the data extent
 	void	DocumentChangedSize();
 
+	// in-place label editing: open on Enter or double-click with a
+	// single non-connector selection; Enter commits, Escape cancels,
+	// losing focus commits
+	void	OpenLabelEditor();
+	void	CommitLabelEdit();
+	void	CancelLabelEdit();
+	void	CloseLabelEdit();
+	bool	EditingLabel() const { return fEditor != NULL; }
+
+	// the drop cores, shared by real drops (MessageReceived) and the
+	// scripted Drop property; view-space point
+	void	DropCreateAt(PDShapeKind kind, BPoint viewPoint);
+	void	DropColourAt(rgb_color c, BPoint viewPoint);
+
 	BPoint	DocToView(BPoint p) const
 	{
 		return BPoint((kMargin + p.x) * fZoom,
@@ -73,6 +88,10 @@ private:
 	void		UpdateStatus();
 	int32		HandleAt(BPoint viewPoint, int32* xAnchor, int32* yAnchor);
 	BRect		SelectionFrame(int32 id) const;	// view-space
+	// drag-and-drop land: point where a drop message landed, view space
+	BPoint		DropPoint(BMessage* message);
+	void		DropCreate(BMessage* message);	// stencil -> shape
+	void		DropColour(BMessage* message);	// swatch -> fill/stroke
 
 	PDDocument*	fDoc;
 	PDTool		fTool = PD_TOOL_SELECT;
@@ -86,6 +105,13 @@ private:
 	int32		fConnectFrom = 0;			// connector tool's first shape
 	BPoint		fConnectNow;				// rubber line's live end
 	std::vector<BRect>	fMoveBase;	// multi-move originals, aligned to fSelection
+	// in-place label editor (owned while open)
+	class PDLabelEditor* fEditor = NULL;
+	int32		fEditorShapeId = 0;
+	// double-click detection (Enter is the other editor opener)
+	bigtime_t	fLastClickTime = 0;
+	BPoint		fLastClickPoint;
+	BPoint		fLastMouse;					// hover, drop fallback
 };
 
 #endif	// PD_CANVAS_H

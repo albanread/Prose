@@ -34,7 +34,17 @@ prosedraw/
   export stays 1:1 vector.
 - **Inspector:** label, X/Y/W/H, fill (none + 9 colours), stroke,
   line width, dashed, text size, connector arrows/route — applies to
-  the selection live.
+  the selection live, plus nine draggable colour chips.
+- **Labels, edited in place (Sprint 4):** Enter or double-click a
+  shape and type right on the canvas — the editor matches the shape's
+  text size at any zoom; Enter commits (undoable), Escape cancels.
+- **Drag and drop (Sprint 4):** the tool palette is a real stencil —
+  drag a shape cell onto the page to create it where it lands; drag a
+  colour chip from the inspector to fill a shape or stroke a
+  connector; drop a `.draw` file on the canvas to open it. (The
+  physical drag gesture wants a real mouse — this test VM's pointer
+  is dead; the drop handling is machine-verified via the `Drop`
+  scripting property.)
 - **Arrange:** 6 alignments + 2 distributions, front/back z-order,
   duplicate (offset), delete, arrow-key nudge, full undo/redo.
 - **Paper:** A4/Letter/Legal/A5/A3, portrait/landscape, page metrics
@@ -51,7 +61,8 @@ prosedraw/
   `application/pdf`.
 - **Scripting:** `Activate`, `ShapeCount`/`Zoom` (get/set), `AddShape`
   (do, data `"kind x y w h|label"`, `"connect"`, `"connect elbow"`),
-  `Save`, `Open`, `PDF`, `Quit` — this is the smoke-test surface.
+  `Drop` (do, `"kind x y"` or `"colour r g b x y"`), `Save`, `Open`,
+  `PDF`, `Quit` — this is the smoke-test surface.
 - **Selftest:** `ProseDraw --selftest` — 71 checks (paper metrics,
   snapping, connector anchor math and routing, align, undo,
   persistence, sniffing, PDF structure, recent list).
@@ -64,10 +75,12 @@ prosedraw/
 | D02 | launch + render (screenshot) | PASS |
 | D03 | scripted shapes + connector (screenshot) | PASS |
 | D04 | save → relaunch-with-file round trip | PASS |
-| D05 | `tests/guest-smoke.sh` | PASS 11/11 |
+| D05 | `tests/guest-smoke.sh` | PASS 13/13 |
 | D06 | PDF export (guest checks + host eyeball) | PASS |
 | D07 | recent files persisted | PASS |
 | D08 | elbow routing + zoom (PDF eyeball + scripting) | PASS |
+| D09 | in-place label edit (keyboard → PDF) | PASS |
+| D10 | drop cores via `Drop` property | PASS |
 
 ## Not yet (planned — see docs/plan.md)
 
