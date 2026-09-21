@@ -1,8 +1,10 @@
 #include "PDDocument.h"
 
+#include <Bitmap.h>
 #include <Entry.h>
 #include <File.h>
 #include <Node.h>
+#include <TranslationUtils.h>
 
 #include <algorithm>
 #include <cmath>
@@ -115,6 +117,68 @@ PDDocument::AddShape(PDShapeKind kind, BRect rect, const char* label)
 	fShapes.push_back(s);
 	fModified = true;
 	return &fShapes.back();
+}
+
+// ---------------------------------------------------------------- images --
+int32
+PDDocument::AddImageRGBA(int32 width, int32 height, const uint8* rgba)
+{
+	if (width <= 0 || height <= 0 || rgba == NULL)
+		return -1;
+	PDImage img;
+	img.id = fNextImageId++;
+	img.width = width;
+	img.height = height;
+	img.bits.assign(rgba, rgba + (size_t)width * height * 4);
+	fImages.push_back(img);
+	fModified = true;
+	return img.id;
+}
+
+int32
+PDDocument::AddImageFile(const char* path, status_t* err)
+{
+	BBitmap* bmp = BTranslationUtils::GetBitmap(path);
+	if (bmp == NULL) {
+		if (err != NULL)
+			*err = B_BAD_VALUE;	// unreadable or not an image format
+		return -1;
+	}
+	if (bmp->ColorSpace() != B_RGBA32 && bmp->ColorSpace() != B_RGB32) {
+		// convert anything else through an RGBA32 copy
+		BBitmap conv(bmp->Bounds(), B_RGBA32);
+		if (conv.ImportBits(bmp) != B_OK) {
+			delete bmp;
+			if (err != NULL)
+				*err = B_BAD_VALUE;
+			return -1;
+		}
+		delete bmp;
+		bmp = new BBitmap(conv);
+	}
+	int32 w = bmp->Bounds().IntegerWidth() + 1;
+	int32 h = bmp->Bounds().IntegerHeight() + 1;
+	uint32 bpr = bmp->BytesPerRow();
+	// copy row by row into tight B_RGBA32 rows
+	std::vector<uint8> tight((size_t)w * h * 4);
+	const uint8* src = (const uint8*)bmp->Bits();
+	for (int32 y = 0; y < h; y++)
+		memcpy(tight.data() + (size_t)y * w * 4,
+			src + (size_t)y * bpr, (size_t)w * 4);
+	delete bmp;
+	int32 id = AddImageRGBA(w, h, tight.data());
+	if (id < 0 && err != NULL)
+		*err = B_NO_MEMORY;
+	return id;
+}
+
+const PDImage*
+PDDocument::ImageById(int32 id) const
+{
+	for (const PDImage& img : fImages)
+		if (img.id == id)
+			return &img;
+	return NULL;
 }
 
 void
@@ -440,7 +504,19 @@ PDDocument::SaveToMessage(BMessage* msg) const
 		m.AddBool("as", s.arrowStart);
 		if (s.orthogonal)
 			m.AddBool("ort", true);
+		if (s.kind == PD_IMAGE)
+			m.AddInt32("img", s.imageId);
 		msg->AddMessage("shape", &m);
+	}
+	// the rasters: raw B_RGBA32, tight rows. Append-only content —
+	// undo may orphan one; it is harmless and re-saves keep working.
+	for (const PDImage& img : fImages) {
+		BMessage im;
+		im.AddInt32("id", img.id);
+		im.AddInt32("w", img.width);
+		im.AddInt32("h", img.height);
+		im.AddData("bits", B_RAW_TYPE, img.bits.data(), img.bits.size());
+		msg->AddMessage("image", &im);
 	}
 	return B_OK;
 }
@@ -477,8 +553,26 @@ PDDocument::LoadFromMessage(const BMessage* msg)
 		m.FindBool("ae", &s.arrowEnd);
 		m.FindBool("as", &s.arrowStart);
 		m.FindBool("ort", &s.orthogonal);
+		m.FindInt32("img", &s.imageId);
 		fShapes.push_back(s);
 		fNextId = std::max(fNextId, s.id + 1);
+	}
+	BMessage im;
+	for (int32 i = 0; msg->FindMessage("image", i, &im) == B_OK; i++) {
+		PDImage img;
+		im.FindInt32("id", &img.id);
+		im.FindInt32("w", &img.width);
+		im.FindInt32("h", &img.height);
+		const void* bits = NULL;
+		ssize_t size = 0;
+		if (im.FindData("bits", B_RAW_TYPE, &bits, &size) == B_OK
+			&& img.width > 0 && img.height > 0
+			&& size == (ssize_t)((size_t)img.width * img.height * 4)) {
+			img.bits.assign((const uint8*)bits,
+				(const uint8*)bits + size);
+			fImages.push_back(img);
+			fNextImageId = std::max(fNextImageId, img.id + 1);
+		}
 	}
 	fModified = false;
 	return B_OK;

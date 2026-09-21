@@ -149,6 +149,41 @@ multi-page/layers remain future work).**
   polyline hit test on the mid-segment, persistence, flag undo);
   smoke 10 → 11 steps (elbow PDF structure + zoom round trip).
 
+### Sprint 5 — image shapes (2026-09-21)
+
+**Delivered:** `PD_IMAGE` shapes — rasters on the diagram.
+
+- **Model:** a document-level image store (`PDImage`: B_RGBA32,
+  tight rows; several shapes can share one raster). Files load
+  through the Translation Kit (`AddImageFile`: BMP/PNG/JPEG…);
+  raw buffers load directly (`AddImageRGBA`). Rasters and shape
+  references persist in the flattened document. Images are
+  append-only content: undo can orphan one, harmlessly.
+- **Canvas:** images draw into their shape rect via `DrawBitmap`
+  (scaled); selection, move, resize, duplicate all work like any
+  shape.
+- **PDF:** referenced images embed as Flate-compressed DeviceRGB
+  XObjects (zlib joins the build, shared with ProseWriter's kit);
+  only images actually referenced by shapes are written. Object
+  numbering went dynamic (5 fixed objects + N images).
+- **Scripting:** `AddShape do "image x y w h|/path/file"`.
+
+**Verified:** selftest 71 → 84 (storage round trip, a real 8×8 BMP
+through the translators with pixel checks, two-image PDF embedding);
+guest canvas rendering pixel-checked (red/blue split BMP drawn with
+correct orientation at the right coordinates); the exported PDF
+byte-audited (xref offsets, stream lengths, decoded pixels) and
+rendered by QuickLook at a fresh path — see the cache lesson below.
+Smoke 13 → 14 steps, all green.
+
+**Session finding:** a "blank" QuickLook thumbnail of a perfectly
+valid PDF was a **stale qlmanage cache** on a reused filename —
+always thumbnail to a fresh path (and parse BMP output with the
+right bpp/stride) before declaring a rendering bug. Also: the VM
+died outright mid-session (no QEMU process); `vm/run.sh` brought it
+back, and the unflushed deploy was gone with it — sync after every
+deploy, as AGENTS.md already said.
+
 ### Sprint 4 — editing in place, drag and drop (2026-09-21)
 
 **Delivered:**
@@ -242,9 +277,10 @@ Zoom menu by mouse; palette drags.
 | D02 | launch + render | launch, screenshot | PASS |
 | D03 | scripted shapes | `AddShape` ×3 + connector, screenshot | PASS |
 | D04 | round trip | Save → relaunch with file → screenshot + ShapeCount | PASS |
-| D05 | smoke | `prosedraw/tests/guest-smoke.sh` | PASS 13/13 |
+| D05 | smoke | `prosedraw/tests/guest-smoke.sh` | PASS 14/14 |
 | D06 | PDF export | `PDF do` → magic/MediaBox/vector ops in guest; fetched PDF eyeballed on host | PASS |
 | D07 | recent files | settings file lists opened docs, most recent first | PASS |
 | D08 | elbow + zoom | orthogonal route in PDF (eyeballed), zoom scripting round trip, 200% screenshot | PASS |
 | D09 | in-place label edit | keyboard: select → Enter → type → Enter → label in PDF | PASS |
 | D10 | drop cores | `Drop` property: shape drop + colour drop → count + red fill in PDF | PASS |
+| D11 | image shapes | BMP → canvas pixel-check → Flate XObject in PDF → QuickLook render | PASS |

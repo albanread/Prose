@@ -20,9 +20,10 @@ prosedraw/
 
 ## What works (Sprint 1)
 
-- **Shapes:** rectangle, rounded rectangle, ellipse, diamond, text;
-  connectors between shapes (press on A, release on B); deleting a
-  shape deletes its connectors.
+- **Shapes:** rectangle, rounded rectangle, ellipse, diamond, text,
+  images (BMP/PNG/JPEG through the Translation Kit, embedded in the
+  document and the PDF); connectors between shapes (press on A,
+  release on B); deleting a shape deletes its connectors.
 - **Connectors (Sprint 3):** straight or elbow (orthogonal) routes and
   arrows at either end — per connector, set in the inspector or via
   `AddShape do "connect elbow"`; screen, hit-testing and PDF all share
@@ -60,30 +61,33 @@ prosedraw/
   PDF… or the `PDF` scripting property; exported files are typed
   `application/pdf`.
 - **Scripting:** `Activate`, `ShapeCount`/`Zoom` (get/set), `AddShape`
-  (do, data `"kind x y w h|label"`, `"connect"`, `"connect elbow"`),
-  `Drop` (do, `"kind x y"` or `"colour r g b x y"`), `Save`, `Open`,
-  `PDF`, `Quit` — this is the smoke-test surface.
-- **Selftest:** `ProseDraw --selftest` — 71 checks (paper metrics,
+  (do, data `"kind x y w h|label"`, `"connect"`, `"connect elbow"`,
+  `"image x y w h|/path/to/image"`), `Drop` (do, `"kind x y"` or
+  `"colour r g b x y"`), `Save`, `Open`, `PDF`, `Quit` — this is the
+  smoke-test surface.
+- **Selftest:** `ProseDraw --selftest` — 84 checks (paper metrics,
   snapping, connector anchor math and routing, align, undo,
-  persistence, sniffing, PDF structure, recent list).
+  persistence, sniffing, PDF structure, recent list, image storage
+  and BMP loading).
 
 ## Test status
 
 | ID | Test | Result |
 |---|---|---|
-| D01 | selftest | PASS 71/71 |
+| D01 | selftest | PASS 84/84 |
 | D02 | launch + render (screenshot) | PASS |
 | D03 | scripted shapes + connector (screenshot) | PASS |
 | D04 | save → relaunch-with-file round trip | PASS |
-| D05 | `tests/guest-smoke.sh` | PASS 13/13 |
+| D05 | `tests/guest-smoke.sh` | PASS 14/14 |
 | D06 | PDF export (guest checks + host eyeball) | PASS |
 | D07 | recent files persisted | PASS |
 | D08 | elbow routing + zoom (PDF eyeball + scripting) | PASS |
 | D09 | in-place label edit (keyboard → PDF) | PASS |
 | D10 | drop cores via `Drop` property | PASS |
+| D11 | image shapes (BMP → canvas pixels → Flate XObject) | PASS |
 
 ## Not yet (planned — see docs/plan.md)
 
 BPrintJob for real printers (no printer on the test guest to verify
-against — PDF is the printable path); image shapes, multi-page
-documents, layers, obstacle-avoiding connector routing.
+against — PDF is the printable path); multi-page documents, layers,
+obstacle-avoiding connector routing.

@@ -1348,21 +1348,39 @@ HandleScriptingForWindow(PDWindow* window, BMessage* message,
 		else if (data.IStartsWith("ellipse")) kind = PD_ELLIPSE;
 		else if (data.IStartsWith("diamond")) kind = PD_DIAMOND;
 		else if (data.IStartsWith("text")) kind = PD_TEXT;
+		else if (data.IStartsWith("image")) kind = PD_IMAGE;
 		else if (!data.IStartsWith("rect")) {
-			ReplyError(message, "kind must be rect/rrect/ellipse/diamond/text");
+			ReplyError(message, "kind must be rect/rrect/ellipse/diamond/text/image");
 			return true;
 		}
 		float x = 0, y = 0, w = 96, h = 64;
 		int32 bar = data.FindFirst('|');
 		BString spec = bar >= 0 ? BString(data, bar) : data;
 		sscanf(spec.String() + (kind == PD_RECT ? 4 : kind == PD_TEXT ? 4
-			: kind == PD_RRECT ? 5 : kind == PD_ELLIPSE ? 7 : 7),
+			: kind == PD_RRECT || kind == PD_IMAGE ? 5
+			: kind == PD_ELLIPSE ? 7 : 7),
 			" %f %f %f %f", &x, &y, &w, &h);
 		BString label;
 		if (bar >= 0)
 			data.CopyInto(label, bar + 1, data.Length() - bar - 1);
+		// images: the text after '|' is the file to load and embed
+		int32 imageId = -1;
+		if (kind == PD_IMAGE) {
+			if (!label.Length()) {
+				ReplyError(message, "data: image needs |path");
+				return true;
+			}
+			status_t ierr = B_OK;
+			imageId = doc.AddImageFile(label.String(), &ierr);
+			if (imageId < 0) {
+				ReplyError(message, strerror(ierr));
+				return true;
+			}
+		}
 		PDShape* s = doc.AddShape(kind, BRect(x, y, x + w, y + h),
-			label.Length() ? label.String() : NULL);
+			kind != PD_IMAGE && label.Length() ? label.String() : NULL);
+		if (kind == PD_IMAGE)
+			s->imageId = imageId;
 		window->Canvas()->Invalidate();
 		window->UpdateStatus();
 		ReplyInt(message, s->id);
@@ -1943,6 +1961,114 @@ SelfTest()
 		const PDShape* undone = doc.ShapeById(cId);
 		CHECK("flags undo", undone != NULL && undone->orthogonal
 			&& undone->arrowStart && doc.Count() == 3);
+	}
+
+	printf("block: images\n"); fflush(stdout);
+	{
+		// a 2x2 RGBA raster with distinct bytes
+		uint8 rgba[16];
+		for (int i = 0; i < 16; i++)
+			rgba[i] = (uint8)(i * 16 + 8);
+		PDDocument doc;
+		int32 imgId = doc.AddImageRGBA(2, 2, rgba);
+		CHECK("image added", imgId >= 0 && doc.CountImages() == 1);
+		const PDImage* img = doc.ImageById(imgId);
+		CHECK("image stored", img != NULL && img->width == 2
+			&& img->height == 2 && img->bits.size() == 16
+			&& memcmp(img->bits.data(), rgba, 16) == 0);
+		CHECK("image bad rejected",
+			doc.AddImageRGBA(0, 2, rgba) == -1);
+		CHECK("image missing file", doc.AddImageFile("/tmp/pd-no-such")
+			== -1);
+
+		int32 aId = doc.AddShape(PD_IMAGE, BRect(10, 10, 110, 110))->id;
+		doc.ShapeById(aId)->imageId = imgId;
+
+		// persistence: rasters and their references round trip
+		BMessage msg;
+		doc.SaveToMessage(&msg);
+		PDDocument loaded;
+		loaded.LoadFromMessage(&msg);
+		CHECK("image round trip count", loaded.CountImages() == 1);
+		const PDImage* limg = loaded.ImageById(imgId);
+		CHECK("image round trip bits", limg != NULL
+			&& limg->bits.size() == 16
+			&& memcmp(limg->bits.data(), rgba, 16) == 0);
+		CHECK("image shape reference",
+			loaded.ShapeById(aId)->kind == PD_IMAGE
+			&& loaded.ShapeById(aId)->imageId == imgId);
+
+		// a real BMP through the Translation Kit: 8x8 solid red, 24bpp
+		{
+			const int32 W = 8, H = 8;
+			const int32 rowBytes = (W * 3 + 3) & ~3;
+			uint8 bmp[54 + rowBytes * H];
+			memset(bmp, 0, sizeof(bmp));
+			bmp[0] = 'B'; bmp[1] = 'M';
+			uint32 fileSize = 54 + rowBytes * H;
+			memcpy(bmp + 2, &fileSize, 4);
+			uint32 dataOffset = 54;
+			memcpy(bmp + 10, &dataOffset, 4);
+			uint32 headerSize = 40;
+			memcpy(bmp + 14, &headerSize, 4);
+			int32 w32 = W, h32 = H;
+			memcpy(bmp + 18, &w32, 4);
+			memcpy(bmp + 22, &h32, 4);
+			uint16 planes = 1, bpp = 24;
+			memcpy(bmp + 26, &planes, 2);
+			memcpy(bmp + 28, &bpp, 2);
+			for (int32 y = 0; y < H; y++) {
+				uint8* row = bmp + 54 + (H - 1 - y) * rowBytes; // bottom-up
+				for (int32 x = 0; x < W; x++) {
+					row[x * 3 + 0] = 40;	// B
+					row[x * 3 + 1] = 40;	// G
+					row[x * 3 + 2] = 216;	// R
+				}
+			}
+			BFile f;
+			if (f.SetTo("/tmp/pd-selftest.bmp", B_WRITE_ONLY
+					| B_CREATE_FILE | B_ERASE_FILE) == B_OK) {
+				f.Write(bmp, sizeof(bmp));
+				f.Unset();
+			}
+			status_t ierr = B_OK;
+			int32 bmpId = doc.AddImageFile("/tmp/pd-selftest.bmp", &ierr);
+			CHECK("bmp loads through translators",
+				bmpId >= 0 && ierr == B_OK);
+			const PDImage* bimg = doc.ImageById(bmpId);
+			CHECK("bmp dimensions", bimg != NULL && bimg->width == 8
+				&& bimg->height == 8 && bimg->bits.size() == 8 * 8 * 4);
+			CHECK("bmp pixels", bimg != NULL
+				&& bimg->bits.data()[0] == 40		// B
+				&& bimg->bits.data()[1] == 40		// G
+				&& bimg->bits.data()[2] == 216);	// R
+			int32 bShape = doc.AddShape(PD_IMAGE, BRect(130, 10, 230, 110),
+				NULL)->id;
+			doc.ShapeById(bShape)->imageId = bmpId;
+
+			// and the PDF embeds it as a Flate image XObject
+			const char* pdfPath = "/tmp/pd-imgtest.pdf";
+			CHECK("image pdf write", PD_WritePDF(doc, pdfPath) == B_OK);
+			std::string pdf;
+			BFile pf;
+			if (pf.SetTo(pdfPath, B_READ_ONLY) == B_OK) {
+				char buf[4096];
+				ssize_t n;
+				while ((n = pf.Read(buf, sizeof(buf))) > 0)
+					pdf.append(buf, n);
+			}
+			CHECK("pdf image xobject",
+				pdf.find("/Subtype /Image") != std::string::npos
+				&& pdf.find("/Filter /FlateDecode")
+					!= std::string::npos
+				&& pdf.find("/Width 8") != std::string::npos
+				&& pdf.find("/Width 2") != std::string::npos);
+			CHECK("pdf images drawn",
+				pdf.find("/Im0 Do") != std::string::npos
+				&& pdf.find("/Im1 Do") != std::string::npos);
+			remove(pdfPath);
+			remove("/tmp/pd-selftest.bmp");
+		}
 	}
 
 	#undef CHECK

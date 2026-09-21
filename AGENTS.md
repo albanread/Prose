@@ -53,6 +53,10 @@ will be written here. The discipline that keeps it working:
   the project's `docs/plan.md` (see ProseWriter's for the pattern, including
   the honest "still owed" lists); keep the README status table current.
   `prosewriter/docs/review-2026-09-20.md` is the model post-mortem.
+- **QuickLook thumbnails cache by filename** — a regenerated PDF at a
+  reused path can show a stale (blank) thumbnail that looks like a
+  rendering bug. Always thumbnail to a fresh path, and parse rendered
+  BMPs with the right bpp/stride, before declaring one.
 - **Committed conventions:** atomic saves (write-tmp → Sync → rename, never
   B_ERASE_FILE a user document); failed saves are never silent; check every
   status_t against B_OK, not against "not negative".

@@ -1,6 +1,7 @@
 #include "PDCanvas.h"
 
 #include <Beep.h>
+#include <Bitmap.h>
 #include <Font.h>
 #include <ScrollView.h>
 #include <TextControl.h>
@@ -239,6 +240,21 @@ PDCanvas::DrawShape(const PDShape& s)
 			SetHighColor(s.style.textColor);
 			DrawString(s.label.String(), r.LeftTop()
 				+ BPoint(0, s.style.textSize * fZoom));
+		}
+		return;
+	}
+
+	if (s.kind == PD_IMAGE) {
+		// draw the raster into the shape's rect (scaled)
+		const PDImage* img = fDoc->ImageById(s.imageId);
+		if (img != NULL && img->width > 0 && img->height > 0) {
+			BBitmap bmp(BRect(0, 0, img->width - 1, img->height - 1),
+				B_RGBA32);
+			if (bmp.IsValid()
+				&& (size_t)bmp.BitsLength() >= img->bits.size()) {
+				memcpy(bmp.Bits(), img->bits.data(), img->bits.size());
+				DrawBitmap(&bmp, r);
+			}
 		}
 		return;
 	}

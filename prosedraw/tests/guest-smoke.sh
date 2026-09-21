@@ -206,20 +206,51 @@ red=$("$GUEST" run 'grep -ac "0.847 0.157 0.157 rg" /tmp/pd-drop.pdf' \
 	2>/dev/null | head -1 | tr -d '\0\r\n')
 [ "$after" = "$((before + 1))" ] && [ "$red" -ge 1 ] \
 	&& ok "drop cores (shape + colour)" || bad "drop (b=$before a=$after red=$red)"
+# 14 - image shapes: a generated BMP loads through the Translation
+#      Kit, draws on the canvas and embeds as a Flate image XObject
+n=14
+python3 - "$OUT/pd-smoke-logo.bmp" <<'PYEOF'
+import struct, sys
+W = H = 32
+row = (W*3 + 3) & ~3
+data = bytearray()
+for y in range(H):
+    for x in range(W):
+        data += bytes((40, 40, 216) if x < W//2 else (216, 40, 40))
+    data += b'\0' * (row - W*3)
+hdr = b'BM' + struct.pack('<IHHI', 54 + len(data), 0, 0, 54)
+hdr += struct.pack('<IiiHHIIiiII', 40, W, H, 1, 24, 0, len(data),
+    2835, 2835, 0, 0)
+open(sys.argv[1], 'wb').write(hdr + bytes(data))
+PYEOF
+"$GUEST" put "$OUT/pd-smoke-logo.bmp" /tmp/pd-smoke-logo.bmp >/dev/null 2>&1
+before=$(count)
+"$GUEST" run "$PWQ $SIG AddShape X do 'image 60 500 100 100|/tmp/pd-smoke-logo.bmp'" \
+	>/dev/null 2>&1
+sleep 1
+after=$(count)
+"$GUEST" run "$PWQ $SIG PDF X do /tmp/pd-img-smoke.pdf" >/dev/null 2>&1
+imgobj=$("$GUEST" run 'grep -ac "Subtype /Image" /tmp/pd-img-smoke.pdf' \
+	2>/dev/null | head -1 | tr -d '\0\r\n')
+drawn=$("$GUEST" run 'grep -ac "/Im0 Do" /tmp/pd-img-smoke.pdf' 2>/dev/null \
+	| head -1 | tr -d '\0\r\n')
+[ "$after" = "$((before + 1))" ] && [ "$imgobj" -ge 1 ] && [ "$drawn" -ge 1 ] \
+	&& ok "image shape (load + embed)" \
+	|| bad "image (b=$before a=$after obj=$imgobj do=$drawn)"
 # leave the document clean for the quit step
 "$GUEST" run "$PWQ $SIG Save X do /tmp/pd-final.draw" >/dev/null 2>&1
 sleep 1
 
-# 14 - clean quit (unmodified document) exits the app
-n=14
+# 15 - clean quit (unmodified document) exits the app
+n=15
 "$GUEST" run "$PWQ $SIG Quit X do" >/dev/null 2>&1
 sleep 2
 left=$("$GUEST" run 'ps' 2>/dev/null | grep -ac "apps/ProseDraw")
 [ "$left" = "0" ] && ok "clean quit exits" || bad "quit (teams left: $left)"
 
-# 15 - Open Recent persisted: the settings file exists, lists the
+# 16 - Open Recent persisted: the settings file exists, lists the
 #      documents this run opened, most recent first (the final save)
-n=15
+n=16
 recent=$("$GUEST" run 'cat /boot/home/config/settings/ProseDraw/recent_files' \
 	2>/dev/null | tr -d '\r')
 first=$(echo "$recent" | head -1 | tr -d '\0')

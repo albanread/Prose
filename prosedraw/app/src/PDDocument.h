@@ -18,7 +18,8 @@
 #include <vector>
 
 enum PDShapeKind : uint8 {
-	PD_RECT, PD_RRECT, PD_ELLIPSE, PD_DIAMOND, PD_TEXT, PD_CONNECTOR
+	PD_RECT, PD_RRECT, PD_ELLIPSE, PD_DIAMOND, PD_TEXT, PD_CONNECTOR,
+	PD_IMAGE
 };
 
 enum PDAlign : uint8 {
@@ -58,6 +59,18 @@ struct PDShape {
 	bool		arrowEnd = true;
 	bool		arrowStart = false;
 	bool		orthogonal = false;	// elbow route instead of straight
+	// PD_IMAGE only: which of the document's images to draw
+	int32		imageId = 0;
+};
+
+// A raster held by the document, referenced by shapes (several shapes
+// can share one image). Pixel rows are native B_RGBA32 bytes — the
+// same layout a BBitmap's Bits() yields — stored tight (width*4).
+struct PDImage {
+	int32	id = 0;
+	int32	width = 0;
+	int32	height = 0;
+	std::vector<uint8>	bits;
 };
 
 // Papers in points at 72 dpi — one table, one truth (layout, canvas,
@@ -126,6 +139,15 @@ public:
 	void		PushUndo() { Snapshot(); }
 	void		Touch() { fModified = true; }
 
+	// ---- images (rasters shared by PD_IMAGE shapes)
+	// takes ownership of nothing — copies width*height*4 bytes
+	int32		AddImageRGBA(int32 width, int32 height, const uint8* rgba);
+	// loads any file the Translation Kit reads (BMP/PNG/JPEG…) into
+	// the store; returns the image id, or -1 with *err set
+	int32		AddImageFile(const char* path, status_t* err = NULL);
+	const PDImage*	ImageById(int32 id) const;
+	int32		CountImages() const { return (int32)fImages.size(); }
+
 	// ---- page
 	PDPageSetup	Page() const { return fPage; }
 	void		SetPage(const PDPageSetup& p) { fPage = p; }
@@ -151,6 +173,8 @@ private:
 	void		Restore(std::vector<PDShape> shapes, int32 nextId);
 
 	std::vector<PDShape>	fShapes;
+	std::vector<PDImage>	fImages;
+	int32		fNextImageId = 1;
 	std::vector<std::pair<std::vector<PDShape>, int32> > fUndo, fRedo;
 	int32		fNextId = 1;
 	float		fGrid = 8.0f;

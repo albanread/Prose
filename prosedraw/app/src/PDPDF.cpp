@@ -4,9 +4,13 @@
 #include <File.h>
 #include <String.h>
 
+#include <zlib.h>
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <vector>
 
 #include "PDDocument.h"
 
@@ -308,7 +312,8 @@ EmitBoxShape(PdfPen& p, const PDShape& s)
 }
 
 static void
-EmitShape(PdfPen& p, const PDShape& s, const PDDocument& doc)
+EmitShape(PdfPen& p, const PDShape& s, const PDDocument& doc,
+	std::map<int32, int32>& imageObject)
 {
 	if (s.kind == PD_CONNECTOR) {
 		EmitConnector(p, s, doc);
@@ -319,6 +324,21 @@ EmitShape(PdfPen& p, const PDShape& s, const PDDocument& doc)
 		if (s.label.Length() > 0)
 			EmitLabel(p, s.label, s.style, s.rect.left,
 				s.rect.top + s.style.textSize, false);
+		return;
+	}
+	if (s.kind == PD_IMAGE) {
+		// unit square scaled onto the rect; the XObject is registered
+		// in imageObject for the Resources dictionary
+		const PDImage* img = doc.ImageById(s.imageId);
+		if (img == NULL)
+			return;
+		if (imageObject.count(s.imageId) == 0)
+			imageObject[s.imageId] = (int32)imageObject.size();
+		int32 n = imageObject[s.imageId];
+		p.s << "q " << p.N(s.rect.Width()) << " 0 0 "
+			<< p.N(s.rect.Height()) << " " << p.N(s.rect.left) << " "
+			<< p.N(p.Y(s.rect.bottom))
+			<< " cm /Im" << n << " Do Q\n";
 		return;
 	}
 	p.s << "q\n";
@@ -332,6 +352,31 @@ EmitShape(PdfPen& p, const PDShape& s, const PDDocument& doc)
 	}
 }
 
+// B_RGBA32 rows are B,G,R,A on little-endian arm64; PDF wants RGB.
+static bool
+FlateRGB(const PDImage& img, std::vector<char>* out)
+{
+	std::vector<uint8> rgb;
+	rgb.resize((size_t)img.width * img.height * 3);
+	size_t rowLen = (size_t)img.width * 4;
+	for (int32 y = 0; y < img.height; y++) {
+		const uint8* src = img.bits.data() + (size_t)y * rowLen;
+		uint8* dst = rgb.data() + (size_t)y * img.width * 3;
+		for (int32 x = 0; x < img.width; x++) {
+			dst[x * 3 + 0] = src[x * 4 + 2];
+			dst[x * 3 + 1] = src[x * 4 + 1];
+			dst[x * 3 + 2] = src[x * 4 + 0];
+		}
+	}
+	uLongf compressed = compressBound((uLong)rgb.size());
+	out->resize(compressed);
+	if (compress2((Bytef*)out->data(), &compressed,
+			(const Bytef*)rgb.data(), (uLong)rgb.size(), 6) != Z_OK)
+		return false;
+	out->resize(compressed);
+	return true;
+}
+
 status_t
 PD_WritePDF(const PDDocument& doc, const char* path)
 {
@@ -339,10 +384,30 @@ PD_WritePDF(const PDDocument& doc, const char* path)
 		return B_BAD_VALUE;
 	const PDPageSetup& page = doc.Page();
 
+	// first pass: content stream + which images it references
+	// (imageObject: image id -> /ImN index)
+	std::map<int32, int32> imageObject;
 	BString content;
 	PdfPen pen = { content, page.height };
 	for (int32 i = 0; i < doc.Count(); i++)
-		EmitShape(pen, *doc.ShapeAt(i), doc);
+		EmitShape(pen, *doc.ShapeAt(i), doc, imageObject);
+
+	// second pass: Flate-compress every referenced raster up front —
+	// the image objects need exact stream lengths before writing
+	struct ImageBits
+	{
+		const PDImage*	image;
+		std::vector<char> flate;
+	};
+	std::vector<ImageBits> images;
+	for (const auto& entry : imageObject) {
+		const PDImage* img = doc.ImageById(entry.first);
+		ImageBits bits;
+		bits.image = img;
+		if (img == NULL || !FlateRGB(*img, &bits.flate))
+			return B_ERROR;
+		images.push_back(bits);
+	}
 
 	BFile file;
 	status_t err = file.SetTo(path,
@@ -350,8 +415,10 @@ PD_WritePDF(const PDDocument& doc, const char* path)
 	if (err != B_OK)
 		return err;
 
+	const int32 kFixedObjects = 5;	// catalog, pages, page, content, font
+	const int32 objectCount = kFixedObjects + (int32)images.size();
 	off_t pos = 0;
-	off_t offsets[5];	// offsets[n] = byte offset of object n+1
+	std::vector<off_t> offsets(objectCount + 1);
 	auto write = [&](const char* data, ssize_t length) -> status_t {
 		status_t e = WriteAll(&file, data, length);
 		pos += length;
@@ -376,12 +443,18 @@ PD_WritePDF(const PDDocument& doc, const char* path)
 	}
 	if (err == B_OK) {
 		offsets[2] = pos;
+		BString xobjects;
+		for (size_t i = 0; i < images.size(); i++)
+			xobjects << (i > 0 ? " " : "") << "/Im" << i << " "
+				<< kFixedObjects + 1 + (int32)i << " 0 R";
 		BString pageObj;
 		pageObj << "3 0 obj\n<< /Type /Page /Parent 2 0 R\n"
 			<< "  /MediaBox [0 0 " << PdfNum(page.width) << " "
 			<< PdfNum(page.height) << "]\n"
-			<< "  /Resources << /Font << /F1 5 0 R >> >>\n"
-			<< "  /Contents 4 0 R >>\nendobj\n";
+			<< "  /Resources << /Font << /F1 5 0 R >>";
+		if (images.size() > 0)
+			pageObj << " /XObject << " << xobjects << " >>";
+		pageObj << " >>\n  /Contents 4 0 R >>\nendobj\n";
 		err = writeStr(pageObj);
 	}
 	if (err == B_OK) {
@@ -397,17 +470,36 @@ PD_WritePDF(const PDDocument& doc, const char* path)
 			"/BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\n"
 			"endobj\n");
 	}
+	for (size_t i = 0; i < images.size() && err == B_OK; i++) {
+		offsets[kFixedObjects + i] = pos;
+		BString head;
+		head << kFixedObjects + 1 + (int32)i << " 0 obj\n"
+			<< "<< /Type /XObject /Subtype /Image /Width "
+			<< images[i].image->width << " /Height "
+			<< images[i].image->height
+			<< " /ColorSpace /DeviceRGB /BitsPerComponent 8"
+			<< " /Filter /FlateDecode /Length "
+			<< (ssize_t)images[i].flate.size() << " >>\nstream\n";
+		err = writeStr(head);
+		if (err == B_OK)
+			err = write(images[i].flate.data(),
+				(ssize_t)images[i].flate.size());
+		if (err == B_OK)
+			err = writeStr("\nendstream\nendobj\n");
+	}
 	if (err == B_OK) {
 		off_t xrefAt = pos;
 		BString xref;
-		xref << "xref\n0 6\n0000000000 65535 f \n";
+		xref << "xref\n0 " << objectCount + 1
+			<< "\n0000000000 65535 f \n";
 		char line[24];
-		for (int i = 0; i < 5; i++) {
+		for (int32 i = 0; i < objectCount; i++) {
 			snprintf(line, sizeof(line), "%010lld 00000 n \n",
 				(long long)offsets[i]);
 			xref << line;
 		}
-		xref << "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n"
+		xref << "trailer\n<< /Size " << objectCount + 1
+			<< " /Root 1 0 R >>\nstartxref\n"
 			<< (long long)xrefAt << "\n%%EOF\n";
 		err = writeStr(xref);
 	}
