@@ -280,6 +280,52 @@ the page renders the saved content. The file panels were correct all
 along; what failed was testing against dead instances.
 
 
+### Sprint 11 — the caret that followed, and tables that finally line up (2026-09-21)
+
+Two user-reported UI defects, both fixed and guest-verified.
+
+**(a) The caret sat on characters while typing.** The caret position
+math was already right (it lands at the next character's spot); the
+defect was the blink cycle. Keystrokes never reset it, so during
+typing the caret stayed invisible — or frozen where a character had
+just appeared — for up to a full 500 ms interval. Typing spaces (no
+glyph change to track) made it look stuck on the last character.
+Fix: `ResetCaretBlink()` on every caret movement — typing
+(`InsertText`/`DeleteSelection`/`Paste`) now restarts the cycle with
+the caret shown immediately, like every editor. Verified in the
+guest: screenshot taken < 150 ms after typing a space shows the
+caret right of the text; half a second later it blinks off normally.
+
+**(b) The table editor was garbage — every row sized its own
+columns.** Rows are separator-marked paragraphs (that architecture
+stays), but the layout sized each row from its OWN content, so the
+vertical rules landed at different x per row: a ragged non-grid.
+Columns are now a property of the whole table, as tables are:
+`TableColumnWidths` aggregates the natural width per column across
+every row (max wins), the column count is the widest row's, and all
+rows share identical edges — ragged rows just have empty trailing
+columns. The right border closes even for rows with fewer cells.
+Structure edits join the model: `InsertTableRowAfter`,
+`InsertTableColumnAt` (every row), `DeleteTableRow`,
+`DeleteTableColumnAt` — all undoable through the existing edit
+machinery, with guards outside tables. Edit ▸ Table exposes them;
+Tab already traversed cells and appended a row from the last cell.
+Column widths remain content-derived; user-set widths (drag the
+edge) are still owed — they need persisted per-table geometry.
+
+Selftest 164 → 177 (alignment across rows with different content and
+cell counts; insert/delete row and column skeletons and guards);
+guest smoke 9/9; the grid verified pixel-wise (verticals at identical
+x in every band) and by eyeball.
+
+**Session note:** debugging (b) burned cycles on three self-inflicted
+wounds, all old lessons: hardcoded byte counts in a test (mid-cell
+split → out-of-range paragraph reads → the crash-alert hang), a
+mis-aimed guest deploy silenced behind `>/dev/null`, and a pile of
+`--selftest` zombies that only a clean guest reboot cleared. The
+paragraph conventions that tripped the arithmetic: `ParagraphLength`
+EXCLUDES the separator, `ParaStart(p+1) = ParaStart(p) + len + 1`.
+
 ### Sprint 10 — print to PDF (paper metrics as the single truth)
 
 **Goal:** a real PDF out of ProseWriter, paginated EXACTLY like the screen.

@@ -153,6 +153,66 @@ PWLayout::CellLayout::CellWidthOfByte(int32 byte, const PWLayout* layout,
 	return 0;
 }
 
+// The shared column structure of the table containing `para`: natural
+// width per column is the MAXIMUM across every row (missing cells
+// contribute 0), the column count is the widest row's. Columns are a
+// property of the whole table — that is what makes it a table; sizing
+// a row by its own content made every row's rules land at different x
+// and the grid was garbage.
+std::vector<float>
+PWLayout::TableColumnWidths(int32 firstPara) const
+{
+	int32 lastPara = firstPara;
+	while (IsTableParagraph(lastPara + 1))
+		lastPara++;
+	const PWParaFormat& fmt = fDoc->ParagraphFormat(firstPara);
+	float column = fSetup.pageWidth - fSetup.marginRight - fmt.indentRight
+		- (fSetup.marginLeft + fmt.indentLeft);
+
+	std::vector<float> natural;
+	for (int32 p = firstPara; p <= lastPara; p++) {
+		const char* text = fDoc->ParagraphText(p);
+		int32 len = fDoc->ParagraphLength(p);
+		const std::vector<PWRun>& runs = fDoc->ParagraphRuns(p);
+		int32 from = 0;
+		for (int32 i = 0;; i++) {
+			int32 to = i;
+			for (to = from; to < len && text[to] != kCellSep; to++)
+				;
+			if ((int32)natural.size() <= i)
+				natural.push_back(40.0f);
+			if (to > from) {
+				BFont font(be_plain_font);
+				const PWCharFormat& f = FormatForSpan(runs, from);
+				font.SetFamilyAndFace(f.family,
+					(uint16)((f.bold ? B_BOLD_FACE : 0)
+						| (f.italic ? B_ITALIC_FACE : 0)));
+				font.SetSize(f.size);
+				float w = font.StringWidth(text + from, to - from);
+				natural[i] = std::max(natural[i],
+					std::min(w + 16.0f, column * 0.7f));
+			}
+			if (to >= len)
+				break;
+			from = to + 1;
+		}
+	}
+
+	float sum = 0;
+	for (float n : natural)
+		sum += n;
+	std::vector<float> widths(natural.size(), 0);
+	for (size_t i = 0; i < natural.size(); i++)
+		widths[i] = std::max(30.0f, natural[i] / sum * column);
+	// renormalise after the minimum clamp
+	sum = 0;
+	for (float w : widths)
+		sum += w;
+	for (float& w : widths)
+		w = w / sum * column;
+	return widths;
+}
+
 // Table row layout: cells wrap inside their column; the row becomes one
 // synthesized Line of the row's height, so page flow, fingerprints and
 // the rest of the engine treat it like any other line.
@@ -166,6 +226,11 @@ PWLayout::LayoutTableRow(int32 para)
 	float column = fSetup.pageWidth - fSetup.marginRight - fmt.indentRight
 		- (fSetup.marginLeft + fmt.indentLeft);
 
+	int32 tableFirst = para;
+	while (tableFirst > 0 && IsTableParagraph(tableFirst - 1))
+		tableFirst--;
+	std::vector<float> widths = TableColumnWidths(tableFirst);
+
 	// cell boundaries
 	std::vector<int32> starts;
 	starts.push_back(0);
@@ -174,35 +239,10 @@ PWLayout::LayoutTableRow(int32 para)
 			starts.push_back(i + 1);
 	int32 cellCount = (int32)starts.size();
 	starts.push_back(paraLen + 1);	// sentinel
-
-	// natural width per cell (capped), then proportional columns
-	std::vector<float> natural(cellCount, 40.0f);
-	for (int32 c = 0; c < cellCount; c++) {
-		int32 from = starts[c];
-		int32 to = c + 1 < cellCount ? starts[c + 1] - 1 : paraLen;
-		if (to > from) {
-			BFont font(be_plain_font);
-			const PWCharFormat& f = FormatForSpan(runs, from);
-			font.SetFamilyAndFace(f.family,
-				(uint16)((f.bold ? B_BOLD_FACE : 0)
-					| (f.italic ? B_ITALIC_FACE : 0)));
-			font.SetSize(f.size);
-			float w = font.StringWidth(text + from, to - from);
-			natural[c] = std::min(w + 16.0f, column * 0.7f);
-		}
-	}
-	float sum = 0;
-	for (float n : natural)
-		sum += n;
-	std::vector<float> widths(cellCount, 0);
-	for (int32 c = 0; c < cellCount; c++)
-		widths[c] = std::max(30.0f, natural[c] / sum * column);
-	// renormalise after the minimum clamp
-	sum = 0;
-	for (float w : widths)
-		sum += w;
-	for (float& w : widths)
-		w = w / sum * column;
+	// widths come from the table, not this row (TableColumnWidths);
+	// a row with fewer cells leaves the trailing columns empty
+	if ((int32)widths.size() < cellCount)
+		widths.resize(cellCount, 30.0f);
 
 	RowLayout row;
 	row.para = para;

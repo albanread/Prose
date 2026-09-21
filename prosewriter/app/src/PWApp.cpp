@@ -2,6 +2,7 @@
 
 #include <Alert.h>
 #include <Application.h>
+#include <Beep.h>
 #include <Button.h>
 #include <Rect.h>
 #include <RadioButton.h>
@@ -937,6 +938,15 @@ PWWindow::BuildMenus()
 	menu->AddItem(item("Paste", 'pWps', 'V', B_COMMAND_KEY));
 	menu->AddSeparatorItem();
 	menu->AddItem(item("Select all", B_SELECT_ALL, 'A', B_COMMAND_KEY));
+	menu->AddSeparatorItem();
+	// structure edits on the table under the caret; Tab already moves
+	// between cells and appends a row from the last cell
+	BMenu* table = new BMenu("Table");
+	table->AddItem(item("Insert row", 'pWRI'));
+	table->AddItem(item("Insert column", 'pWCI'));
+	table->AddItem(item("Delete row", 'pWRD'));
+	table->AddItem(item("Delete column", 'pWCD'));
+	menu->AddItem(table);
 	fMenuBar->AddItem(menu);
 
 	menu = new BMenu("Text");
@@ -1940,6 +1950,34 @@ PWWindow::MessageReceived(BMessage* message)
 			} else
 				fTableWin->Activate();
 			break;
+		case 'pWRI': case 'pWCI': case 'pWRD': case 'pWCD':
+		{
+			// table structure edits on the caret's table
+			int32 at = fView->CaretOffset();
+			int32 newCaret = at;
+			status_t err = B_NOT_ALLOWED;
+			switch (message->what) {
+				case 'pWRI':
+					err = fDoc.InsertTableRowAfter(at, &newCaret);
+					break;
+				case 'pWCI':
+					err = fDoc.InsertTableColumnAt(at, &newCaret);
+					break;
+				case 'pWRD':
+					err = fDoc.DeleteTableRow(at, &newCaret);
+					break;
+				default:
+					err = fDoc.DeleteTableColumnAt(at, &newCaret);
+					break;
+			}
+			if (err == B_OK) {
+				fView->SetCaret(newCaret, false);
+				fView->Relayout();
+				UpdateStatusText();
+			} else
+				beep();
+			break;
+		}
 		case 'pWpl': {
 			// a panel died (its own close button or our quit): drop the
 			// pointer before it dangles
@@ -2995,6 +3033,90 @@ SelfTest()
 		CHECK("table row follows the shift",
 			slayout.RowAt(1) != NULL
 			&& slayout.RowAt(1)->cells.size() == 3);
+
+		// --- columns are a property of the whole table: rows with
+		// different content and even different cell counts share the
+		// same column edges (the old per-row sizing was the defect)
+		{
+			// three contiguous rows — SplitPara BETWEEN rows, the
+			// InsertTable idiom (ParagraphLength excludes separators)
+			PWDocument tdoc;
+			tdoc.Insert(0, "Name\035Quantity\035Notes", NULL);
+			int32 at = tdoc.Length();
+			tdoc.SplitPara(at);
+			tdoc.Insert(at + 1, "long content in this cell\035x\035z", NULL);
+			at = at + 1 + tdoc.ParagraphLength(1);
+			tdoc.SplitPara(at);
+			tdoc.Insert(at + 1, "short\0351", NULL);
+			CHECK("seed is three rows", tdoc.CountParagraphs() == 3);
+			PWLayout tlayout(&tdoc);
+			tlayout.SetPageSetup(PWPageSetup());
+			tlayout.Layout();
+			const PWLayout::RowLayout* r0 = tlayout.RowAt(0);
+			const PWLayout::RowLayout* r1 = tlayout.RowAt(1);
+			const PWLayout::RowLayout* r2 = tlayout.RowAt(2);
+			bool aligned = r0 != NULL && r1 != NULL && r2 != NULL;
+			if (aligned) {
+				for (size_t c = 0; c < r0->cells.size(); c++) {
+					if (c < r1->cells.size()
+						&& (fabs(r0->cells[c].x - r1->cells[c].x) > 0.01f
+							|| fabs(r0->cells[c].width
+								- r1->cells[c].width) > 0.01f))
+						aligned = false;
+					if (c < r2->cells.size()
+						&& (fabs(r0->cells[c].x - r2->cells[c].x) > 0.01f
+							|| fabs(r0->cells[c].width
+								- r2->cells[c].width) > 0.01f))
+						aligned = false;
+				}
+			}
+			CHECK("table columns align across rows", aligned);
+			CHECK("table column count is the widest row's",
+				r0 != NULL && r0->cells.size() == 3
+				&& r2 != NULL && r2->cells.size() == 2);
+
+			// --- structure edits
+			int32 caret = 0;
+			// insert a row below row 0: same cell count, empty
+			CHECK("insert row",
+				tdoc.InsertTableRowAfter(0, &caret) == B_OK);
+			CHECK("inserted row is empty cells",
+				tdoc.ParagraphLength(1) == 2
+				&& tdoc.ParagraphText(1)[0] == PWDocument::kCellSep);
+			tlayout.Layout();
+			{
+				const PWLayout::RowLayout* nr = tlayout.RowAt(1);
+				const PWLayout::RowLayout* orow = tlayout.RowAt(0);
+				CHECK("inserted row aligns too", nr != NULL && orow != NULL
+					&& !nr->cells.empty() && !orow->cells.empty()
+					&& fabs(nr->cells[0].x - orow->cells[0].x) < 0.01f);
+			}
+			// delete that row again
+			CHECK("delete row", tdoc.DeleteTableRow(caret, &caret) == B_OK);
+			CHECK("row count back", tdoc.CountParagraphs() == 3);
+			// insert a column at the caret's column (0): every row
+			int32 row0Len = tdoc.ParagraphLength(0);
+			CHECK("insert column",
+				tdoc.InsertTableColumnAt(0, &caret) == B_OK);
+			CHECK("column inserted in every row",
+				tdoc.ParagraphText(0)[0] == PWDocument::kCellSep
+				&& tdoc.ParagraphLength(0) == row0Len + 1
+				&& tdoc.ParagraphText(1)[0] == PWDocument::kCellSep
+				&& tdoc.ParagraphText(2)[0] == PWDocument::kCellSep);
+			// delete the column again
+			CHECK("delete column",
+				tdoc.DeleteTableColumnAt(caret, &caret) == B_OK);
+			CHECK("column deletion restores text",
+				tdoc.ParagraphLength(0) == row0Len
+				&& tdoc.ParagraphText(0)[0] == 'N');
+			// guards
+			PWDocument ndoc;
+			ndoc.Insert(0, "no table here", NULL);
+			CHECK("row ops refuse outside tables",
+				ndoc.InsertTableRowAfter(0, &caret) == B_NOT_ALLOWED
+				&& ndoc.DeleteTableRow(0, &caret) == B_NOT_ALLOWED
+				&& ndoc.DeleteTableColumnAt(0, &caret) == B_NOT_ALLOWED);
+		}
 
 		// --- RTF: multi-entry font tables, and colour back to black
 		const char* multiFontRtf =

@@ -34,6 +34,14 @@ public:
 	float	PagePixelWidth() const;
 	float	PagePixelHeight() const;
 	void	SetCaret(int32 offset, bool select);
+	// every caret movement restarts the blink cycle with the caret
+	// shown — typing used to leave it hidden (or frozen where a char
+	// had just appeared) for up to a full blink interval
+	void	ResetCaretBlink()
+	{
+		fCaretVisible = true;
+		fLastCaretBlink = system_time();
+	}
 	void	Select(int32 from, int32 to);
 	bool	HasSelection() const
 				{ return fSelAnchor >= 0 && fSelAnchor != fCaret; }

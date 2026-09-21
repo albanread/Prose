@@ -173,6 +173,16 @@ public:
 	// rows x cols of empty cells; header bolds the first row's cells
 	status_t	InsertTable(int32 offset, int32 rows, int32 cols,
 				bool header);
+	// Table structure edits. A table is a maximal run of paragraphs
+	// containing kCellSep (one paragraph per row); these operations
+	// work on the table under `offset` and report a sensible caret in
+	// *newCaret. They refuse (B_NOT_ALLOWED) outside a table or when
+	// the operation would leave nothing.
+	static const char	kCellSep = '\035';
+	status_t	InsertTableRowAfter(int32 offset, int32* newCaret);
+	status_t	InsertTableColumnAt(int32 offset, int32* newCaret);
+	status_t	DeleteTableRow(int32 offset, int32* newCaret);
+	status_t	DeleteTableColumnAt(int32 offset, int32* newCaret);
 	// The image covering a byte offset, or NULL.
 	PWImage*		ImageAt(int32 offset);
 	int32		CountImages() const;

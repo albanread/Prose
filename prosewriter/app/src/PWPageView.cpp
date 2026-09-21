@@ -289,6 +289,14 @@ PWPageView::DrawPages(BRect updateRect)
 							x = (cell.x + cell.width) * fZoom;
 						StrokeLine(BPoint(x, top), BPoint(x, bottom));
 					}
+					// the table's right edge closes the border even for
+					// rows with fewer cells (ragged rows end mid-table)
+					{
+						float x = 24 + (line.x + line.width) * fZoom;
+						if (fPrinting)
+							x = (line.x + line.width) * fZoom;
+						StrokeLine(BPoint(x, top), BPoint(x, bottom));
+					}
 				}
 			}
 			DrawSquiggles(line, segs);
@@ -575,6 +583,7 @@ PWPageView::InsertText(const char* text, int32 length)
 	fCaret += length;
 	fSelAnchor = -1;
 	fOverrideFormat = false;	// the format has been used; moves re-sync
+	ResetCaretBlink();
 	Relayout();
 	ScrollCaretVisible();
 }
@@ -589,6 +598,7 @@ PWPageView::DeleteSelection()
 	fDoc->Remove(from, to - from);
 	fCaret = from;
 	fSelAnchor = -1;
+	ResetCaretBlink();
 	Relayout();
 	ScrollCaretVisible();
 }
@@ -736,8 +746,7 @@ PWPageView::SetCaret(int32 offset, bool extend)
 			fSelAnchor = offset == 0 ? 0 : fCaret;
 	} else
 		fSelAnchor = -1;
-	fCaretVisible = true;
-	fLastCaretBlink = system_time();
+	ResetCaretBlink();
 	Invalidate();
 	ScrollCaretVisible();
 	Window()->PostMessage('pWup');
@@ -859,6 +868,7 @@ PWPageView::Paste(const BMessage* clip)
 	}
 	fCaret = insertedAt + text.Length();
 	fSelAnchor = -1;
+	ResetCaretBlink();
 	Relayout();
 	ScrollCaretVisible();
 }

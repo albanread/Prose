@@ -950,6 +950,169 @@ PWDocument::InsertTable(int32 offset, int32 rows, int32 cols, bool header)
 	return B_OK;
 }
 
+// ------------------------------------------------------------ tables --
+// A table is a maximal run of paragraphs containing kCellSep; one
+// paragraph is one row, one separator-delimited span is one cell.
+namespace {
+
+bool
+IsRow(const PWDocument* doc, int32 para)
+{
+	if (para < 0 || para >= doc->CountParagraphs())
+		return false;
+	return strchr(doc->ParagraphText(para), PWDocument::kCellSep) != NULL;
+}
+
+// byte offset (document-wide) where cell `col` starts in row `para`;
+// -1 when the row has no such cell
+int32
+CellStart(const PWDocument* doc, int32 para, int32 col)
+{
+	const char* text = doc->ParagraphText(para);
+	int32 len = doc->ParagraphLength(para);
+	int32 cell = 0, i = 0;
+	while (i < len && cell < col) {
+		if (text[i] == PWDocument::kCellSep)
+			cell++;
+		i++;
+	}
+	if (cell < col)
+		return -1;
+	return doc->ParaStart(para) + i;
+}
+
+}	// namespace
+
+status_t
+PWDocument::InsertTableRowAfter(int32 offset, int32* newCaret)
+{
+	int32 para, inPara;
+	Locate(offset, &para, &inPara);
+	if (!IsRow(this, para))
+		return B_NOT_ALLOWED;
+	int32 cols = 1;
+	for (int32 i = 0; i < ParagraphLength(para); i++)
+		if (ParagraphText(para)[i] == kCellSep)
+			cols++;
+	std::string row((size_t)(cols - 1), kCellSep);
+	// split first: the empty paragraph after this row becomes the new
+	// row, then its cell separators go in (inserting them before the
+	// split would append cells to the old row)
+	int32 at = ParaStart(para) + ParagraphLength(para);
+	SplitPara(at);
+	Insert(at + 1, row.c_str(), NULL);
+	if (newCaret != NULL)
+		*newCaret = at + 1;
+	return B_OK;
+}
+
+status_t
+PWDocument::InsertTableColumnAt(int32 offset, int32* newCaret)
+{
+	int32 para, inPara;
+	Locate(offset, &para, &inPara);
+	if (!IsRow(this, para))
+		return B_NOT_ALLOWED;
+	// the caret's column
+	int32 col = 0;
+	for (int32 i = 0; i < inPara; i++)
+		if (ParagraphText(para)[i] == kCellSep)
+			col++;
+	// the table run, edited bottom-up so earlier offsets stay valid
+	int32 last = para;
+	while (IsRow(this, last + 1))
+		last++;
+	for (int32 p = last; p >= para; p--) {
+		// an empty cell before column `col` — or at the end of a
+		// ragged row, keeping the table rectangular
+		int32 at = CellStart(this, p, col);
+		if (at < 0)
+			at = ParaStart(p) + ParagraphLength(p);
+		Insert(at, std::string(1, kCellSep).c_str(), NULL);
+	}
+	// the caret sits INSIDE the new empty cell, so the next delete
+	// column takes out what insert put in
+	if (newCaret != NULL)
+		*newCaret = CellStart(this, para, col);
+	return B_OK;
+}
+
+status_t
+PWDocument::DeleteTableRow(int32 offset, int32* newCaret)
+{
+	int32 para, inPara;
+	Locate(offset, &para, &inPara);
+	if (!IsRow(this, para))
+		return B_NOT_ALLOWED;
+	bool lastRow = !IsRow(this, para - 1) && !IsRow(this, para + 1);
+	int32 at = ParaStart(para);
+	if (lastRow) {
+		// the table's only row goes, table and all
+		int32 len = ParagraphLength(para);
+		Remove(at, len);		// the row text
+		Remove(at, 1);			// its paragraph separator
+		if (newCaret != NULL)
+			*newCaret = at;
+		return B_OK;
+	}
+	// remove the row text and its separator (merged with the next row
+	// if this is the table's first row and the separator before it)
+	int32 len = ParagraphLength(para);
+	if (IsRow(this, para + 1) && !IsRow(this, para - 1)) {
+		Remove(at, len + 1);	// row text + the separator AFTER it
+	} else
+		Remove(at - 1, len + 1);	// separator BEFORE it + row text
+	if (newCaret != NULL)
+		*newCaret = at;
+	return B_OK;
+}
+
+status_t
+PWDocument::DeleteTableColumnAt(int32 offset, int32* newCaret)
+{
+	int32 para, inPara;
+	Locate(offset, &para, &inPara);
+	if (!IsRow(this, para))
+		return B_NOT_ALLOWED;
+	int32 col = 0;
+	for (int32 i = 0; i < inPara; i++)
+		if (ParagraphText(para)[i] == kCellSep)
+			col++;
+	int32 first = para;
+	while (IsRow(this, first - 1))
+		first--;
+	int32 last = para;
+	while (IsRow(this, last + 1))
+		last++;
+	// refuse to delete the only column of the table
+	int32 maxCells = 1;
+	for (int32 p = first; p <= last; p++) {
+		int32 cells = 1;
+		for (int32 i = 0; i < ParagraphLength(p); i++)
+			if (ParagraphText(p)[i] == kCellSep)
+				cells++;
+		maxCells = std::max(maxCells, cells);
+	}
+	if (maxCells <= 1)
+		return B_NOT_ALLOWED;
+	for (int32 p = last; p >= first; p--) {
+		int32 start = CellStart(this, p, col);
+		if (start < 0)
+			continue;
+		// the span [CellStart(col), CellStart(col+1)) is the cell text
+		// plus its trailing separator; the last cell runs to para end
+		int32 end = CellStart(this, p, col + 1);
+		if (end < 0)
+			end = ParaStart(p) + ParagraphLength(p);
+		Remove(start, end - start);
+	}
+	if (newCaret != NULL) {
+		int32 at = CellStart(this, para, col);
+		*newCaret = at >= 0 ? at : offset;
+	}
+	return B_OK;
+}
+
 PWDocument::PWImage*
 PWDocument::ImageAt(int32 offset)
 {

@@ -169,6 +169,10 @@ private:
 	};
 	void	BuildSummaries();
 	void	LayoutTableRow(int32 para);
+	// the table containing `firstPara` (maximal run of table rows),
+	// sized as tables are: column width = max natural width across all
+	// rows; every row of the table shares the result
+	std::vector<float> TableColumnWidths(int32 firstPara) const;
 	void	PruneRowCache();
 	float	TextWidthOfSpan(const char* text, int32 from, int32 to) const;
 	float	MeasureWithRuns(const char* text, int32 from, int32 to) const;
