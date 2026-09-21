@@ -87,6 +87,14 @@ public:
 	bool	QuitRequested() override;
 	void	MessageReceived(BMessage* message) override;
 	void	MenusBeginning() override;
+	// the panels own the whole window: no child follows the frame, the
+	// window re-lays everything out on every resize (a B_FOLLOW_ALL
+	// scroll view used to stretch over the inspector and the status
+	// strip the moment the window changed size)
+	void	FrameResized(float width, float height) override
+	{
+		LayoutChildren();
+	}
 
 	PDDocument* Document() { return &fDoc; }
 	PDCanvas*	Canvas() { return fCanvas; }
@@ -369,7 +377,7 @@ PDWindow::PDWindow(BRect frame, const char* title)
 	BuildMenus();
 	AddChild(fMenuBar);
 
-	fScroll = new BScrollView("scroll", fCanvas, B_FOLLOW_ALL, true, true,
+	fScroll = new BScrollView("scroll", fCanvas, B_FOLLOW_NONE, true, true,
 		B_FANCY_BORDER);
 	AddChild(fScroll);
 
@@ -380,7 +388,7 @@ PDWindow::PDWindow(BRect frame, const char* title)
 	AddChild(fInspector);
 
 	fStatus = new BStringView(BRect(0, 0, 300, 18), "status", "",
-		B_FOLLOW_LEFT_RIGHT | B_FOLLOW_BOTTOM);
+		B_FOLLOW_NONE);
 	AddChild(fStatus);
 
 	SetSizeLimits(640, 4000, 480, 4000);
@@ -639,15 +647,26 @@ PDWindow::BuildInspector()
 void
 PDWindow::LayoutChildren()
 {
+	// the client area lives strictly between stencil and inspector,
+	// above the status strip — never under either (scrollbars own
+	// their own strips inside the scroll view; the view is clipped)
 	float menuH = fMenuBar->Bounds().Height() + 1;
 	fMenuBar->ResizeTo(Bounds().Width(), menuH - 1);
 	fPalette->MoveTo(0, menuH);
 	float right = Bounds().right;
 	fInspector->MoveTo(right - 208, menuH);
 	fScroll->MoveTo(84, menuH);
-	fScroll->ResizeTo(right - 208 - 84 + 1, Bounds().bottom - 19 - menuH);
+	fScroll->ResizeTo(right - 208 - 84, Bounds().bottom - 18 - menuH + 1);
 	fStatus->MoveTo(8, Bounds().bottom - 17);
 	fStatus->ResizeTo(Bounds().Width() - 16, 16);
+	// repositioned views do not all invalidate themselves (the canvas
+	// stayed black after a scripted resize once); repaint explicitly
+	if (fCanvas != NULL)
+		fCanvas->Invalidate();
+	if (fInspector != NULL)
+		fInspector->Invalidate();
+	if (fPalette != NULL)
+		fPalette->Invalidate();
 }
 
 void

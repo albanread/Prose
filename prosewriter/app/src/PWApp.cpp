@@ -865,8 +865,10 @@ PWWindow::LayoutChildren()
 	float bottom = Bounds().bottom - 19 - (fFindShown ? kFindBarHeight : 0);
 	BView* scroll = fView->ScrollView();
 	if (scroll) {
+		// exactly the content width, ending above the status strip —
+		// the old +1s hung the border over the edge and the status bar
 		scroll->MoveTo(0, top);
-		scroll->ResizeTo(Bounds().Width() + 1, bottom - top + 1);
+		scroll->ResizeTo(Bounds().Width(), bottom - top);
 	}
 	fFindBar->MoveTo(0, Bounds().bottom - 19 - kFindBarHeight + 1);
 	fFindBar->ResizeTo(Bounds().Width(), kFindBarHeight);

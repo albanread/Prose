@@ -326,6 +326,15 @@ mis-aimed guest deploy silenced behind `>/dev/null`, and a pile of
 paragraph conventions that tripped the arithmetic: `ParagraphLength`
 EXCLUDES the separator, `ParaStart(p+1) = ParaStart(p) + len + 1`.
 
+**Layout fix (2026-09-21, same user report):** the client area hung
+one pixel past the content box on both axes
+(`ResizeTo(Width() + 1, bottom - top + 1)`), putting the scroll
+view's border over the window edge and its bottom into the status
+strip. Exact sizing now; the scroll border sits inside the window
+and the status strip is clear (pixel-probed). The same report fixed
+ProseDraw's far worse variant — a B_FOLLOW_ALL scroll view with no
+FrameResized swallowed the inspector on resize (see its plan).
+
 ### Sprint 10 — print to PDF (paper metrics as the single truth)
 
 **Goal:** a real PDF out of ProseWriter, paginated EXACTLY like the screen.

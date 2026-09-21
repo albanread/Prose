@@ -184,6 +184,20 @@ died outright mid-session (no QEMU process); `vm/run.sh` brought it
 back, and the unflushed deploy was gone with it — sync after every
 deploy, as AGENTS.md already said.
 
+**Layout fix (2026-09-21, user report):** the client area expanded
+over the inspector and the status strip whenever the window was
+resized — the scroll view was created B_FOLLOW_ALL (it stretched
+full-window over the B_FOLLOW_NONE panels) and the window had no
+FrameResized, so LayoutChildren never ran again after construction.
+The scroll view is now B_FOLLOW_NONE like every other panel,
+FrameResized re-lays everything out and repaints, and the old
+`+ 1` width that tucked the view under the inspector is gone. The
+paper can no longer leave the strip between stencil, inspector and
+status bar. Verified with a scripted window resize (`hey set Frame`
+resizes it): pixel probes show zero page/desk leakage into the
+inspector band or the status strip, at a size far smaller than the
+constructor's default.
+
 ### Sprint 4 — editing in place, drag and drop (2026-09-21)
 
 **Delivered:**
