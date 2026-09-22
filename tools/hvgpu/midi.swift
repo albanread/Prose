@@ -75,6 +75,12 @@ final class HostSynth {
     private let engine = AVAudioEngine()
     private let synth: AVAudioUnitMIDIInstrument
     private(set) var ok = false
+    /// Notes sent but not heard, and when something was last heard at all. An
+    /// engine can report itself running and render nothing (seen after a
+    /// virtio-snd session went wrong): the tap on the mixer is the only one
+    /// that knows.
+    private let heard = OSAllocatedUnfairLock(initialState: (
+        unheardNotes: 0, lastAudible: Date.distantPast, restarts: 0))
 
     init() {
         var desc = AudioComponentDescription()
@@ -90,14 +96,32 @@ final class HostSynth {
             log("midi: host General MIDI synth running")
         } catch {
             log("midi: synth failed to start: \(error.localizedDescription)")
+            return
+        }
+
+        // what the engine actually renders, sampled cheaply on the render thread
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) {
+            [heard] buffer, _ in
+            guard let channel = buffer.floatChannelData?[0] else { return }
+            var i = 0
+            let frames = Int(buffer.frameLength)
+            while i < frames {
+                if channel[i] != 0 {
+                    heard.withLock { $0.unheardNotes = 0; $0.lastAudible = Date() }
+                    return
+                }
+                i += 16
+            }
         }
     }
 
     func play(_ message: [UInt8]) {
         guard ok, let status = message.first else { return }
-        // an engine stops itself on a configuration change or a render error,
-        // and a synth whose engine stopped is simply never heard again: say
-        // so, and start it once more (the notes after that are played)
+        // An engine stops itself on a configuration change or a render error,
+        // and a synth whose engine stopped is simply never heard again; an
+        // engine that renders nothing while claiming to run has been seen too
+        // (after a virtio-snd session went wrong). Both are noticed here, and
+        // answered by starting the engine again.
         if !engine.isRunning {
             log("midi: the synth's engine had stopped; starting it again")
             do {
@@ -105,8 +129,24 @@ final class HostSynth {
             } catch {
                 log("midi: engine restart failed: \(error.localizedDescription)")
                 ok = false
+                return
+            }
+            heard.withLock { $0.unheardNotes = 0 }
+        } else if heard.withLock({ $0.unheardNotes }) >= 4,
+            Date().timeIntervalSince(heard.withLock { $0.lastAudible }) > 1.5 {
+            var restarts = 0
+            heard.withLock { $0.restarts += 1; restarts = $0.restarts; $0.unheardNotes = 0 }
+            log("midi: the engine renders nothing (restart \(restarts)); starting it again")
+            engine.stop()
+            do {
+                try engine.start()
+            } catch {
+                log("midi: engine restart failed: \(error.localizedDescription)")
+                ok = false
+                return
             }
         }
+        heard.withLock { $0.unheardNotes += 1 }
         if status == 0xF0 {
             synth.sendMIDISysExEvent(Data(message))
         } else if status < 0xF0 {

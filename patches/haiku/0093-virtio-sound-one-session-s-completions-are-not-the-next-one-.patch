@@ -1,0 +1,177 @@
+From 680fbe3875a614e3bdcf225b98f070e02d8f53a1 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 07:18:01 +0100
+Subject: [PATCH] virtio_sound: one session's completions are not the next
+ one's
+
+The second playback of a boot ran at about a third of the speed, its
+content repeating: a 20 s file took 56-77 s of continuous sound. The
+device returns still-queued buffers only after PCM_STOP, and those late
+completions landed in the next session's semaphore as phantom
+buffer-done events, pacing its exchanges on buffers the next session
+never sent. (Nothing else was wrong: the first play of a boot was
+sample-accurate, decode ran at 440x real time, and the driver counted
+0 I/O errors, 0 xruns and 0 re-anchors through the worst of it.)
+
+The pacing itself was the node's drift estimator: the driver reports
+(played_real_time, played_frames_count) pairs and the frames counter
+was never reset per session, so across every idle gap between sessions
+it reported a second of real time carrying 21 ms of frames. The
+pipeline's drift collapsed, and with it the rate the mixer pulled at:
+the second playback of a boot ran at half speed with repeating content,
+the third not at all -- a pure tone showed it with no file in sight, and
+QEMU's own wav output confirmed the guest as the one at fault. Both
+bases now start over together at each start.
+
+Session boundaries are also clean in themselves: every buffer carries
+the generation of the session that sent it (a completion from an older
+one is counted and dropped), and PCM_RELEASE waits for the device to
+return everything still in flight first, so the ring the next session
+queues into is its own.
+
+Verified: private_workspace/sound-regression.sh -- two MP3 plays, a MIDI
+scale and a tone after them, with the run's audio recorded on the Mac;
+both plays keep real time and the ending parts are heard.
+
+Prose-Patch: 0093-virtio-sound-one-session-s-completions-are-not-the-next-one-.patch 7e8849b1a6c0505829e9bc825c9a1b04dcc1f18174cb7cfed629e5c879b6af1c
+---
+ .../drivers/audio/virtio/virtio_sound.cpp     | 74 ++++++++++++++++---
+ 1 file changed, 63 insertions(+), 11 deletions(-)
+
+diff --git a/src/add-ons/kernel/drivers/audio/virtio/virtio_sound.cpp b/src/add-ons/kernel/drivers/audio/virtio/virtio_sound.cpp
+index 7334eb85f3..ae7f6757e0 100644
+--- a/src/add-ons/kernel/drivers/audio/virtio/virtio_sound.cpp
++++ b/src/add-ons/kernel/drivers/audio/virtio/virtio_sound.cpp
+@@ -168,6 +168,12 @@ struct playback_stream {
+ 
+ 	sem_id			readySem;		// one release per completed buffer
+ 	spinlock		lock;
++	uint32			generation;		// the session in progress; a completion
++									// from an older one is not ours
++	uint32			submittedGen[MAX_BUFFERS];
++	int32			inFlight;		// out with this generation, not yet
++									// returned by the device
++	uint32			staleCompletions;
+ 	uint32			completed[MAX_BUFFERS];
+ 	bigtime_t		completedTime[MAX_BUFFERS];
+ 	int64			completedFrames[MAX_BUFFERS];
+@@ -387,9 +393,17 @@ snd_tx_callback(void* driverCookie, void* cookie)
+ 		uint32 index = (uint32)(addr_t)tag - 1;
+ 		if (index >= stream.bufferCount)
+ 			continue;
++		InterruptsSpinLocker locker(stream.lock);
++		if (stream.submittedGen[index] != stream.generation) {
++			// a buffer of the last session, returned after its stop: dropped,
++			// or it would complete a buffer the next session never sent
++			stream.staleCompletions++;
++			continue;
++		}
++		stream.submittedGen[index] = 0;
++		stream.inFlight--;
+ 		virtio_snd_pcm_status* status = (virtio_snd_pcm_status*)(info->cmd + XFER_OFFSET
+ 			+ index * XFER_STRIDE + 8);
+-		InterruptsSpinLocker locker(stream.lock);
+ 		if (status->status != VIRTIO_SND_S_OK)
+ 			stream.ioErrors++;
+ 		stream.latencyBytes = status->latency_bytes;
+@@ -410,6 +424,11 @@ static status_t
+ snd_submit(snd_info* info, uint32 index)
+ {
+ 	playback_stream& stream = info->playback;
++	{
++		InterruptsSpinLocker locker(stream.lock);
++		stream.submittedGen[index] = stream.generation;
++		stream.inFlight++;
++	}
+ 	virtio_snd_pcm_xfer* xfer = (virtio_snd_pcm_xfer*)(info->cmd + XFER_OFFSET
+ 		+ index * XFER_STRIDE);
+ 	xfer->stream_id = stream.id;
+@@ -420,9 +439,12 @@ snd_submit(snd_info* info, uint32 index)
+ 	};
+ 	status_t status = info->virtio->queue_request_v(info->queues[VIRTIO_SND_VQ_TX], entries, 2, 1,
+ 		(void*)(addr_t)(index + 1));
+-	if (status != B_OK)
++	if (status != B_OK) {
++		InterruptsSpinLocker locker(stream.lock);
++		stream.submittedGen[index] = 0;
++		stream.inFlight--;
+ 		ERROR("submitting buffer %" B_PRIu32 " failed: %s\n", index, strerror(status));
+-	else
++	} else
+ 		stream.submitted++;
+ 	return status;
+ }
+@@ -454,6 +476,9 @@ snd_pcm_start(snd_info* info)
+ 	memset(stream.buffers, 0, stream.bufferCount * stream.bufferBytes);
+ 	{
+ 		InterruptsSpinLocker locker(stream.lock);
++		stream.generation++;
++		memset(stream.submittedGen, 0, sizeof(stream.submittedGen));
++		stream.inFlight = 0;
+ 		stream.completedHead = stream.completedTail = 0;
+ 		stream.framesCount = 0;
+ 		stream.realTime = system_time();
+@@ -467,6 +492,14 @@ snd_pcm_start(snd_info* info)
+ 	status = snd_pcm_request(info, VIRTIO_SND_R_PCM_START);
+ 	if (status != B_OK)
+ 		return status;
++	// The node feeds (played_real_time, played_frames_count) pairs into a
++	// drift estimator (TimeComputer), and both have to start over together:
++	// the schedule anchors here, so the frames have to as well. Continuing
++	// the count across the idle gap between sessions reported a second of
++	// real time carrying 21 ms of frames -- the pipeline's drift collapsed,
++	// and the second playback of a boot ran at half speed with repeating
++	// content, the third not at all.
++	stream.exchanges = 0;
+ 	stream.anchorTime = system_time();
+ 	stream.anchorExchanges = 0;
+ 	stream.reanchors = 0;
+@@ -484,21 +517,40 @@ snd_pcm_stop(snd_info* info)
+ 	playback_stream& stream = info->playback;
+ 	if (stream.running)
+ 		snd_pcm_request(info, VIRTIO_SND_R_PCM_STOP);
+-	if (stream.prepared)
++	if (stream.prepared) {
++		// The device returns what was still queued only after the stop; until
++		// it has, completions still belong to this session, and the next one
++		// would inherit them -- the second playback of a boot then ran at a
++		// third of the speed with repeating content, from phantom
++		// completions pacing its exchanges.
++		const bigtime_t giveUpAt = system_time() + 500000;
++		while (system_time() < giveUpAt) {
++			if (atomic_get(&stream.inFlight) == 0)
++				break;
++			snooze(1000);
++		}
+ 		snd_pcm_request(info, VIRTIO_SND_R_PCM_RELEASE);
++	}
+ 	if (stream.running || stream.prepared) {
+ 		INFO("playback stopped: %" B_PRIu32 " buffers submitted, %" B_PRIu32 " exchanges, %"
+ 			B_PRIu32 " I/O errors, %" B_PRIu32 " xruns, %" B_PRIu32 " re-anchors, device lag up to %"
+-			B_PRIdBIGTIME " us\n", stream.submitted, stream.exchanges, stream.ioErrors,
+-			stream.xruns, stream.reanchors, stream.maxLag);
++			B_PRIdBIGTIME " us, %" B_PRIu32 " stale completions dropped\n", stream.submitted,
++			stream.exchanges, stream.ioErrors, stream.xruns, stream.reanchors, stream.maxLag,
++			stream.staleCompletions);
+ 	}
+ 	stream.running = false;
+ 	stream.prepared = false;
+-	// the device returns whatever was still queued; those completions are stale
+-	snooze(20000);
+-	InterruptsSpinLocker locker(stream.lock);
+-	stream.completedHead = stream.completedTail = 0;
+-	stream.toSubmit = -1;
++	{
++		InterruptsSpinLocker locker(stream.lock);
++		stream.completedHead = stream.completedTail = 0;
++		stream.toSubmit = -1;
++		// whatever the drain did not take is not coming back as ours
++		stream.inFlight = 0;
++		memset(stream.submittedGen, 0, sizeof(stream.submittedGen));
++	}
++	// completions of this session the exchanges never took
++	while (acquire_sem_etc(stream.readySem, 1, B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT, 0) == B_OK)
++		;
+ }
+ 
+ 
