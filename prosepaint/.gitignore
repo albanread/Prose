@@ -1,0 +1,3 @@
+# binaries and scratch (regenerable: make, using prosewriter's sysroot)
+app/ProsePaint
+app/src/*.o
