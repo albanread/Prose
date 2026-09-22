@@ -38,6 +38,8 @@
 //                           command line ("capture path=/tmp/a.png"), tests; docs/automation.md
 //   --automation            allow automation for this run without the menu item
 //   --no-sound              no virtio-snd device (default: output+input to the Mac's audio devices)
+//   --record-sound FILE     this app's audio (the machine's sound and the MIDI synth) as a WAV,
+//                          for tests that must prove sound was made (soundcapture.swift)
 //   --no-midi               no Prose MIDI device (default: guest MIDI -> Mac's GM synth + CoreMIDI)
 //   --no-portal             no Prose Portal device even with automation allowed (docs/automation.md)
 //   --no-synth              keep the CoreMIDI endpoints but don't play guest MIDI on the Mac's synth
@@ -1643,6 +1645,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     func stopVM(reason: String) {
         if let router = inputRouter { log(router.stats) }
         if !args.contains("--no-midi") { log(midi.stats) }
+        soundCapture?.finish()
         if portal.attached { log(portal.stats) }
         guard !stopping else { return }
         stopping = true
@@ -1670,6 +1673,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         stopVM(reason: "quit")
+        soundCapture?.finish()
         return .terminateCancel
     }
 
@@ -1692,6 +1696,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
 }
 
 ProseCommand.register()      // applescript.swift: keep the scripting class in the binary
+/// --record-sound (soundcapture.swift): started before the machine, so a test
+/// hears everything it plays
+let soundCapture = SoundCapture.startIfRequested()
 if args.contains("--scripting-check") {
     let registry = NSScriptSuiteRegistry.shared()
     log("scripting: suites \(registry.suiteNames)")

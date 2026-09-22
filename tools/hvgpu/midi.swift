@@ -95,6 +95,18 @@ final class HostSynth {
 
     func play(_ message: [UInt8]) {
         guard ok, let status = message.first else { return }
+        // an engine stops itself on a configuration change or a render error,
+        // and a synth whose engine stopped is simply never heard again: say
+        // so, and start it once more (the notes after that are played)
+        if !engine.isRunning {
+            log("midi: the synth's engine had stopped; starting it again")
+            do {
+                try engine.start()
+            } catch {
+                log("midi: engine restart failed: \(error.localizedDescription)")
+                ok = false
+            }
+        }
         if status == 0xF0 {
             synth.sendMIDISysExEvent(Data(message))
         } else if status < 0xF0 {
