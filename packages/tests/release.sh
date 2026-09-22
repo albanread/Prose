@@ -11,7 +11,8 @@
 #     "35:click x=1691 y=1069,45:click x=1691 y=1069,60:run command=sh /HostFS/release.sh >/dev/null 2>&1 &,165:shutdown"
 #   and read <folder>/release-check.log; its last line is PASS or FAIL.
 #
-# It checks: ProseWriter, ProseDraw, ProsePaint and ProseJulia installed, in the Deskbar's Office folder,
+# It checks: ProseWriter, ProseDraw and ProsePaint in Office, ProseOthello in
+# Games and ProseJulia among the Demos, each installed, in the Deskbar's Office folder,
 # and staying up; clang, clang++, lld and make, with a Be API program built and
 # run; the examples; Sisong with its clang build command and File > Examples;
 # every shipped theme and window frame, and a theme applying; an MP3 decoded
@@ -23,18 +24,22 @@ ok()  { echo "ok    $*"; }
 bad() { echo "FAIL  $*"; fail=1; }
 until df | grep -q HostFS; do sleep 1; done
 
-echo "== applications in Office"
+echo "== the suite: Office, Games, Demos"
 office=/boot/system/data/deskbar/menu/Applications/Office
-for app in ProseWriter ProseDraw ProsePaint ProseJulia; do
+games=/boot/system/data/deskbar/menu/Applications/Games
+for app in ProseWriter ProseDraw ProsePaint; do
 	if [ -e "$office/$app" ]; then ok "Office menu: $app"; else bad "Office menu has no $app ($(ls $office 2>/dev/null | tr '\n' ' '))"; fi
-	if [ -x /boot/system/apps/$app ]; then ok "installed: /boot/system/apps/$app"; else bad "not installed: $app"; fi
 done
-for app in ProseWriter ProseDraw ProsePaint ProseJulia; do
-	/boot/system/apps/$app >/dev/null 2>&1 &
+if [ -e "$games/ProseOthello" ]; then ok "Games menu: ProseOthello"; else bad "Games menu has no ProseOthello"; fi
+if [ -x /boot/system/demos/ProseJulia ]; then ok "Demos: ProseJulia"; else bad "ProseJulia is not among the demos"; fi
+for app in /boot/system/apps/ProseWriter /boot/system/apps/ProseDraw /boot/system/apps/ProsePaint /boot/system/apps/ProseOthello /boot/system/demos/ProseJulia; do
+	name=$(basename $app)
+	if [ ! -x $app ]; then bad "not installed: $app"; continue; fi
+	$app >/dev/null 2>&1 &
 	pid=$!
 	sleep 6
-	if kill -0 $pid 2>/dev/null; then ok "$app launches and stays up"; else bad "$app exited at once"; fi
-	hey $app quit >/dev/null 2>&1; sleep 2; kill -9 $pid 2>/dev/null
+	if kill -0 $pid 2>/dev/null; then ok "$name launches and stays up"; else bad "$name exited at once"; fi
+	hey $name quit >/dev/null 2>&1; sleep 2; kill -9 $pid 2>/dev/null
 done
 
 echo "== developer tools and Sisong"
@@ -53,6 +58,8 @@ if grep -a -q -- '%c -g -Wall -o %e %f -lbe' /boot/system/apps/Sisong; then ok "
 if grep -a -q prose-examples /boot/system/apps/Sisong; then ok "Sisong has File > Examples"; else bad "Sisong has no Examples menu"; fi
 [ -s /boot/system/data/sisong/api-index ] && ok "Sisong's API index: $(wc -l < /boot/system/data/sisong/api-index) names" || bad "no Sisong API index"
 [ -x /boot/system/servers/clangd_server ] && ok "clangd_server installed" || bad "no clangd_server"
+clangd --version >/dev/null 2>&1 && ok "clangd answers: $(clangd --version 2>&1 | head -1)" || bad "clangd does not run"
+ls /boot/system/packages | grep -q '^sisong-2\.16-6' && ok "Sisong 2.16-6, the one that completes as you type" || bad "Sisong is not 2.16-6: $(ls /boot/system/packages | grep sisong)"
 
 echo "== themes"
 themes=$(prosetheme --list 2>&1 | sed 's/^\* //' | tr '\n' ',')
