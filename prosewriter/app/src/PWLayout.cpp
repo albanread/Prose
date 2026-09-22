@@ -858,12 +858,16 @@ PWLayout::OffsetToXY(int32 offset, BPoint* xy, float* caretHeight) const
 
 	float x = l.x;
 	int32 b = l.startPara;
-	while (b < l.startPara + l.length && b < caretPara) {
+	// measure every byte before the caret — NOT just the line's
+	// counted length: trailing spaces don't count toward a line's
+	// wrap length, and a caret right after a typed space sits beyond
+	// it (the caret used to freeze on the last glyph until the next
+	// visible character was typed)
+	while (b < caretPara) {
 		const PWRun* r = &runs[0];
 		for (const PWRun& rr : runs)
 			if (b >= rr.start && b < rr.start + rr.length) { r = &rr; break; }
-		int32 segEnd = std::min(r->start + r->length,
-			std::min(caretPara, l.startPara + l.length));
+		int32 segEnd = std::min(r->start + r->length, caretPara);
 		if (segEnd > b) {
 			BFont f = FontForRun(*r);
 			x += f.StringWidth(text + b, segEnd - b);

@@ -2685,6 +2685,36 @@ SelfTest()
 		float h;
 		CHECK("offset 0 has a caret", layout.OffsetToXY(0, &xy, &h));
 		CHECK("caret x at left margin", xy.x == setup.marginLeft);
+
+		// the caret advances past trailing spaces (typing a word!):
+		// line wrap doesn't count trailing spaces in a line's length,
+		// and the caret's measure used to stop there — freezing the
+		// caret on the last glyph until the next visible character
+		{
+			PWDocument sdoc;
+			sdoc.Insert(0, "mm ", NULL);
+			PWLayout slayout(&sdoc);
+			slayout.SetPageSetup(setup);
+			slayout.Layout();
+			BPoint afterM, afterSpace;
+			float hh;
+			CHECK("carets resolve",
+				slayout.OffsetToXY(2, &afterM, &hh)
+				&& slayout.OffsetToXY(3, &afterSpace, &hh));
+			CHECK("caret advances past a trailing space",
+				afterSpace.x > afterM.x + 1.0f);
+			// and a mid-text space too
+			PWDocument mdoc;
+			mdoc.Insert(0, "a b", NULL);
+			PWLayout mlayout(&mdoc);
+			mlayout.SetPageSetup(setup);
+			mlayout.Layout();
+			BPoint a1, a2;
+			CHECK("mid-text space advances the caret",
+				mlayout.OffsetToXY(1, &a1, &hh)
+				&& mlayout.OffsetToXY(2, &a2, &hh)
+				&& a2.x > a1.x + 1.0f);
+		}
 	}
 
 		printf("block: search\n"); fflush(stdout);

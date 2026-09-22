@@ -335,6 +335,23 @@ and the status strip is clear (pixel-probed). The same report fixed
 ProseDraw's far worse variant — a B_FOLLOW_ALL scroll view with no
 FrameResized swallowed the inspector on resize (see its plan).
 
+**Caret, second round (2026-09-22, user re-report — rightly):** the
+blink fix was real but incomplete. Measuring precisely (typed
+"mm", space, "m", pixel-probed each step) showed the caret FROZEN
+at the last glyph's edge after the space while the layout had
+advanced the next glyph past it. Root cause: line wrap does not
+count trailing spaces in a line's length, and OffsetToXY capped its
+measure at `startPara + length` — so a caret sitting right after a
+just-typed space (always trailing, mid-word) measured nothing for
+it. Every keystroke's space was invisible to the caret until the
+next visible character arrived. The measure now runs to the caret's
+own offset. Regression selftests added (trailing-space and
+mid-text-space caret advance, 177 → 180 checks); the fix verified
+live with the same mm/space/m probe: caret at the next-character
+position, blink cycling normally. The first verification's sin,
+recorded: a 2 px pixel-tolerance eyeball read "close enough" on a
+caret that was exactly the space-width short.
+
 ### Sprint 10 — print to PDF (paper metrics as the single truth)
 
 **Goal:** a real PDF out of ProseWriter, paginated EXACTLY like the screen.
