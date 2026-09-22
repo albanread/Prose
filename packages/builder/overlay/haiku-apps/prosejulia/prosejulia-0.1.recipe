@@ -8,7 +8,7 @@ says which commit this is."
 HOMEPAGE="https://github.com/albanread/Prose"
 COPYRIGHT="2026 The Prose project"
 LICENSE="MIT"
-REVISION="1"
+REVISION="2"
 # The source is not fetched: make-source.sh beside this recipe packs the
 # committed state of prosejulia/app, and prosepkg reads a file:// source from
 # the recipe's own directory. Run it before building.
@@ -54,9 +54,10 @@ BUILD()
 
 INSTALL()
 {
-	mkdir -p $appsDir
-	cp -a ProseJulia $appsDir/ProseJulia
-	settype -t application/x-vnd.Be-elfexecutable $appsDir/ProseJulia
-	mimeset -f $appsDir/ProseJulia
-	addAppDeskbarSymlink $appsDir/ProseJulia
+	# The Deskbar's Demos menu is the demos directory itself: an app there
+	# needs no Applications entry, which is why there is no symlink
+	mkdir -p $prefix/demos
+	cp -a ProseJulia $prefix/demos/ProseJulia
+	settype -t application/x-vnd.Be-elfexecutable $prefix/demos/ProseJulia
+	mimeset -f $prefix/demos/ProseJulia
 }

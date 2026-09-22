@@ -1,0 +1,68 @@
+From 0e13b85943289addd6593c517cc49bf42bb31e74 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 16:50:04 +0100
+Subject: [PATCH] ProseOthello in Games, and ProseJulia among the Demos
+
+ProseOthello 0.1 (proseothello-0.1-1, built by prosepkg from
+proseothello/app): Reversi against the machine, every legal square
+circled, four levels from random to exact endings -- joins the games
+folder of the Deskbar's Applications menu.
+
+ProseJulia 0.1-2 moves from Office to the Deskbar's Demos menu: it
+installs into the demos directory (which is what that menu shows) and no
+longer carries an Applications entry. A fractal is a demo.
+
+Prose-Patch: 0097-proseothello-in-games-and-prosejulia-among-the-demos.patch 3b0bf6faebbf2857883574503141be2f61fd2ed26f01e0eed960ba3c77b0f78a
+---
+ build/jam/DefaultBuildProfiles          | 1 +
+ build/jam/DeskbarCategories             | 2 +-
+ build/jam/repositories/HaikuPorts/arm64 | 3 ++-
+ 3 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 39858db700..2209bfbdf2 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -318,6 +318,7 @@ rule DefineDefaultBuildProfiles
+ 				prosedraw
+ 				prosejulia
+ 				prosepaint
++				proseothello
+ 				prosewriter
+ 				querywatcher
+ 				remember
+diff --git a/build/jam/DeskbarCategories b/build/jam/DeskbarCategories
+index 814cefb293..4b8e18d79c 100644
+--- a/build/jam/DeskbarCategories
++++ b/build/jam/DeskbarCategories
+@@ -79,6 +79,7 @@ DESKBAR_CATEGORY_Games =
+ 	Connect4
+ 	HexVexed
+ 	LightsOff
++	ProseOthello
+ 	Minesweeper
+ 	Peggy
+ 	W6
+@@ -135,7 +136,6 @@ DESKBAR_CATEGORY_Office =
+ 	"Mr. Peeps!"
+ 	People
+ 	ProseDraw
+-	ProseJulia
+ 	ProsePaint
+ 	ProseWriter
+ 	TimeTracker
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 2310c39fef..3114b95bff 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -206,8 +206,9 @@ RemotePackageRepository HaikuPorts
+ 	samedi-1.2-1
+ 	shredder-1.0.0-3
+ 	prosedraw-0.1-2
+-	prosejulia-0.1-1
++	prosejulia-0.1-2
+ 	prosepaint-0.1-2
++	proseothello-0.1-1
+ 	prosewriter-0.1-5
+ 	sisong-2.16-5
+ 	slayer-1.0-2
