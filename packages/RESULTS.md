@@ -58,7 +58,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | check | 0.15.2-1 | built | check-0.15.2-1-arm64.hpkg, check_devel-0.15.2-1-arm64.hpkg |
 | cherry_blossom | 1.0-4 | built | cherry_blossom-1.0-4-arm64.hpkg |
 | clang | 23.1.0-2 | built | clang-23.1.0-2-arm64.hpkg |
-| clangd_server | 0.1-1 | built | clangd_server-0.1-1-arm64.hpkg |
+| clangd_server | 0.1-2 | built | clangd_server-0.1-2-arm64.hpkg |
 | clipdinger | 1.2.4-2 | built | clipdinger-1.2.4-2-arm64.hpkg |
 | clucene | 2.3.3.4-4 | failed | boost1.83 failed: INSTALL phase failed (exit 126) (log: /Volumes/HaikuSrc/prose-packages/logs/boost1.83.log) |
 | codec_check | 1.0-4 | built | codec_check-1.0-4-arm64.hpkg |

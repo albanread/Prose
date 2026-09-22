@@ -145,19 +145,40 @@ if kill -0 $pid 2>/dev/null; then
 	if wait_title lsp.cpp 15; then
 		hey Sisong _KYD of Window 0 with bytes="$(printf '\037')" > /dev/null 2>&1
 		hey Sisong _KYD of Window 0 with bytes="$(printf '\004')" > /dev/null 2>&1
+		# one press: it has to start the server and open the session too,
+		# and is answered all the same
 		hey Sisong '!Mnh' of Window 0 > /dev/null 2>&1
-		sleep 4
-		hey Sisong '!Mnh' of Window 0 > /dev/null 2>&1
-		sleep 6
+		sleep 10
 		hey Sisong _KYD of Window 0 with bytes="
 " > /dev/null 2>&1
 		sleep 1
 		hey Sisong '!MnF' of Window 0 > /dev/null 2>&1
 		sleep 1
 		if grep -q 'p\.x_location' $dir/lsp.cpp; then
-			say "clangd completion: p.x_lo became p.x_location"
+			say "clangd completion, first press: p.x_lo became p.x_location"
 		else
 			say "CLANGD COMPLETION: got '$(tail -1 $dir/lsp.cpp)'"; fail=1
+		fi
+		# straight after "q." there is no word at all: every member is wanted
+		printf 'struct Point { int x_location; int y_location; };\nvoid g() { Point q; q.' > $dir/member.cpp
+		"$APP" $dir/member.cpp > /dev/null 2>&1 &
+		if wait_title member.cpp 15; then
+			hey Sisong _KYD of Window 0 with bytes="$(printf '\037')" > /dev/null 2>&1
+			hey Sisong _KYD of Window 0 with bytes="$(printf '\004')" > /dev/null 2>&1
+			hey Sisong '!Mnh' of Window 0 > /dev/null 2>&1
+			sleep 6
+			hey Sisong _KYD of Window 0 with bytes="
+" > /dev/null 2>&1
+			sleep 1
+			hey Sisong '!MnF' of Window 0 > /dev/null 2>&1
+			sleep 1
+			if grep -qE 'q\.(x|y)_location' $dir/member.cpp; then
+				say "clangd members after 'q.': $(grep -oE 'q\.[a-z_]+' $dir/member.cpp | tail -1)"
+			else
+				say "NO MEMBERS AFTER 'q.': got '$(tail -1 $dir/member.cpp)'"; fail=1
+			fi
+		else
+			say "member.cpp did not open (title: $(title))"; fail=1
 		fi
 		if ps | grep -v grep | grep -q clangd_server; then
 			say "clangd_server was started by Sisong"
