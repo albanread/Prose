@@ -1,0 +1,32 @@
+From b1caade1d194f735ccba29cedc87eefe0fa81515 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 17:42:37 +0100
+Subject: [PATCH] Sisong 2.16-7: clangd's errors where they can be read
+
+The number of a line clangd faults turns red for an error, amber for a
+warning, and the pointer resting on it shows the message. A save lists
+the document's errors in the build pane in the compiler's format, so
+choosing one goes to its line; the list follows the document and goes
+when the errors do. The text goes to clangd a second after editing
+pauses, so the marks follow the typing. Before this, diagnostics went to
+a box a few characters wide. ProseApps 003e526.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0099-sisong-2-16-7-clangd-s-errors-where-they-can-be-read.patch d808cf81e2bcc1ca749fa1fa1592f179589c94c8352ca8613e80e8fbdc98e14b
+---
+ build/jam/repositories/HaikuPorts/arm64 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 47c2f9884a..a59dd9a8c6 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -210,7 +210,7 @@ RemotePackageRepository HaikuPorts
+ 	prosepaint-0.1-2
+ 	proseothello-0.1-1
+ 	prosewriter-0.1-5
+-	sisong-2.16-6
++	sisong-2.16-7
+ 	slayer-1.0-2
+ 	speex-1.2.1-2
+ 	speex_devel-1.2.1-2

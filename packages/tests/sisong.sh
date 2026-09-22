@@ -230,6 +230,48 @@ if kill -0 $pid 2>/dev/null; then
 		else
 			say "auto.cpp did not open (title: $(title))"; fail=1
 		fi
+		# clangd's errors, readable: a document with one has the number of its
+		# line in red (the host checks that on the screen); a save lists the
+		# error in the Build pane in the compiler's format; choosing it there
+		# takes the editor to the line, and saving the line put right takes
+		# the list away. The saves above left some list open: closed first.
+		items() { hey Sisong count Item of View compilelist of Window 0 2>&1 | grep '"result"' | grep -oE ': [0-9]+' | tr -dc 0-9; }
+		hey Sisong 'PPcl' of Window 0 > /dev/null 2>&1
+		printf 'int main(void)\n{\n\tint ok = 1;\n\tundefined_thing = 2;\n\treturn ok;\n}\n' > $dir/diag.c
+		"$APP" $dir/diag.c > /dev/null 2>&1 &
+		if wait_title diag.c 15; then
+			sleep 6
+			before=$(items)
+			hey Sisong _KYD of Window 0 with bytes=" " > /dev/null 2>&1
+			sleep 2
+			hey Sisong '!MnF' of Window 0 > /dev/null 2>&1
+			sleep 5
+			after=$(items)
+			if [ -z "$before" ] && [ "$after" = 3 ]; then
+				say "saving a file with an error listed it in the Build pane"
+			else
+				say "SAVING A FILE WITH AN ERROR: pane items before '$before', after '$after'"; fail=1
+			fi
+			hey Sisong do Item 1 of View compilelist of Window 0 > /dev/null 2>&1
+			sleep 1
+			for c in o k ' ' = ' ' 2 ';'; do hey Sisong _KYD of Window 0 with bytes="$c" > /dev/null 2>&1; done
+			sleep 1
+			hey Sisong '!MnF' of Window 0 > /dev/null 2>&1
+			sleep 5
+			if [ "$(sed -n 4p $dir/diag.c)" = "$(printf '\tok = 2;')" ]; then
+				say "choosing the error in the list went to its line"
+			else
+				say "CHOOSING THE ERROR: line 4 is '$(sed -n 4p $dir/diag.c)'"; fail=1
+			fi
+			gone=$(items)
+			if [ -z "$gone" ]; then
+				say "the error put right and saved: the list went away"
+			else
+				say "THE LIST STAYED after the fix: $gone items"; fail=1
+			fi
+		else
+			say "diag.c did not open (title: $(title))"; fail=1
+		fi
 		if ps | grep -v grep | grep -q clangd_server; then
 			say "clangd_server was started by Sisong"
 		else

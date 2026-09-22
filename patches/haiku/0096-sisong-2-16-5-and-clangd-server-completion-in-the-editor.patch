@@ -1,4 +1,4 @@
-From 2c797321b53e1c86da56bf2fb18e0840dddfd0b1 Mon Sep 17 00:00:00 2001
+From 0645c24c6b94c15b7bbc0fb7b6ac838cf90c788e Mon Sep 17 00:00:00 2001
 From: albanread <albanread@googlemail.com>
 Date: Tue, 22 Sep 2026 15:02:32 +0100
 Subject: [PATCH] Sisong 2.16-5 and clangd_server: completion in the editor
@@ -15,7 +15,7 @@ among the system's servers with its signature registered, and Sisong
 starts it on the first question from a C or C++ document.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-Prose-Patch: 0096-sisong-2-16-5-and-clangd-server-completion-in-the-editor.patch 9bbeae0d934f699efbb2921d61a24a83ee7105904b60588899bed9d3e7a5f072
+Prose-Patch: 0096-sisong-2-16-5-and-clangd-server-completion-in-the-editor.patch e1ae3a51a10a0951d380e5c22f4f91afbb2b75ac6adc18fa7464a071d95b1eff
 ---
  build/jam/DefaultBuildProfiles          | 1 +
  build/jam/repositories/HaikuPorts/arm64 | 3 ++-
@@ -34,14 +34,14 @@ index 732b0414bc..39858db700 100644
  				slayer
  				superprefs
 diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
-index 30d6cf001a..8dec8dc6c8 100644
+index 30d6cf001a..2310c39fef 100644
 --- a/build/jam/repositories/HaikuPorts/arm64
 +++ b/build/jam/repositories/HaikuPorts/arm64
 @@ -19,6 +19,7 @@ RemotePackageRepository HaikuPorts
  	binutils-2.41_2026_03_10_bootstrap-1
  	bison-3.8.2_bootstrap-1
  	clang-23.1.0-2
-+	clangd_server-0.1-1
++	clangd_server-0.1-2
  	make-4.4.1-1
  	mkdepend-1.7-5
  	coreutils-9.9_bootstrap-1

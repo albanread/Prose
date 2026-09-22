@@ -341,6 +341,7 @@ table there also records why each one exists.
 | 0096 | Sisong 2.16-5 with Complete Word and completions from clangd, and clangd_server, the BeOS shape around clangd |
 | 0097 | ProseOthello in Games; ProseJulia moved to Demos |
 | 0098 | Sisong 2.16-6: completion opens as you type `.` `->` `::`, and clangd's errors arrive unasked |
+| 0099 | Sisong 2.16-7: clangd's errors where they can be read (red line numbers, the message on hover, the Problems list on save) |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

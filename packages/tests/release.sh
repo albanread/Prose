@@ -59,7 +59,7 @@ if grep -a -q prose-examples /boot/system/apps/Sisong; then ok "Sisong has File 
 [ -s /boot/system/data/sisong/api-index ] && ok "Sisong's API index: $(wc -l < /boot/system/data/sisong/api-index) names" || bad "no Sisong API index"
 [ -x /boot/system/servers/clangd_server ] && ok "clangd_server installed" || bad "no clangd_server"
 clangd --version >/dev/null 2>&1 && ok "clangd answers: $(clangd --version 2>&1 | head -1)" || bad "clangd does not run"
-ls /boot/system/packages | grep -q '^sisong-2\.16-6' && ok "Sisong 2.16-6, the one that completes as you type" || bad "Sisong is not 2.16-6: $(ls /boot/system/packages | grep sisong)"
+ls /boot/system/packages | grep -q '^sisong-2\.16-7' && ok "Sisong 2.16-7, the one that completes as you type and shows clangd's errors" || bad "Sisong is not 2.16-7: $(ls /boot/system/packages | grep sisong)"
 
 echo "== themes"
 themes=$(prosetheme --list 2>&1 | sed 's/^\* //' | tr '\n' ',')
