@@ -759,6 +759,8 @@ PWPageView::Select(int32 from, int32 to)
 	int32 docLen = fDoc->Length();
 	if (from < 0) from = 0;
 	if (to > docLen) to = docLen;
+	if (from > docLen) from = docLen;	// both ends, or the anchor
+						// reads back past the end
 	fSelAnchor = from;
 	fCaret = to;
 	Invalidate();

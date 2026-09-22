@@ -352,6 +352,33 @@ position, blink cycling normally. The first verification's sin,
 recorded: a 2 px pixel-tolerance eyeball read "close enough" on a
 caret that was exactly the space-width short.
 
+**Caret, third round (2026-09-22 evening, user re-report — and the
+embarrassing one):** the second round's fix and its regression tests
+only ever exercised a paragraph's FIRST line, where the caret's
+byte offset and the line start coincide numerically. On wrapped
+continuation lines `OffsetToXY` computed `caretPara = inPara −
+l.startPara` — LINE-relative — then compared it against a measure
+loop that walks paragraph-ABSOLUTE bytes from `l.startPara` and
+indexes runs absolutely. On any line with `startPara > 0` the loop
+never ran once and the caret drew at `l.x`, the wrapped line's first
+glyph. The user's screenshot said it exactly: caret "stuck on the e"
+— the 'e' that begins the wrapped last line. The bug shipped in
+sprint 1; both earlier "fixes" were real but tested only where the
+two coordinate systems happen to agree. `caretPara` is now simply
+`inPara` (clamped to the line start); the justified-lines slack
+count no longer collects slack for trailing spaces past the counted
+line; and `Select()` clamps its anchor too (a scripted
+`Selection set "999-999"` used to read back "96-999"). Regressions:
+a 60-word wrapping paragraph — caret tracks along the continuation
+line, and a typed space at its end moves it (180 → 185 checks);
+smoke gained the selection clamp. Live-verified with the user's own
+sentence: two typed spaces moved the drawn caret 256 → 259 px, one
+space-width per keystroke, screenshots diffed per frame. Lesson
+twice over: a coordinate-space bug hides wherever the spaces
+coincide — regression tests must force them apart (wrap the
+paragraph); and "fixed" needs a test shaped like the report, not
+like the code.
+
 ### Sprint 10 — print to PDF (paper metrics as the single truth)
 
 **Goal:** a real PDF out of ProseWriter, paginated EXACTLY like the screen.

@@ -851,8 +851,13 @@ PWLayout::OffsetToXY(int32 offset, BPoint* xy, float* caretHeight) const
 		*caretHeight = l.height;
 		return true;
 	}
-	int32 caretPara = inPara - l.startPara;
-	if (caretPara < 0) caretPara = 0;
+	// inPara, l.startPara and the PWRun offsets below are all
+	// paragraph-absolute. This must NOT be line-relative: on a wrapped
+	// continuation line (startPara > 0) a line-relative caret byte made
+	// the measure loop below never run, parking the caret at l.x — the
+	// first glyph of the wrapped line — no matter where typing was.
+	int32 caretPara = inPara;
+	if (caretPara < l.startPara) caretPara = l.startPara;
 	const char* text = fDoc->ParagraphText(l.para);
 	const std::vector<PWRun>& runs = fDoc->ParagraphRuns(l.para);
 
@@ -876,8 +881,11 @@ PWLayout::OffsetToXY(int32 offset, BPoint* xy, float* caretHeight) const
 			b = UTF8Next(text, b, fDoc->ParagraphLength(l.para));
 	}
 	if (LineIsJustified(line)) {
+		// gaps live in the counted line only: trailing spaces past
+		// l.length are not gaps, and must not collect slack
 		int32 spaces = 0;
-		for (int32 i = l.startPara; i < caretPara; i++)
+		int32 counted = std::min(caretPara, l.startPara + l.length);
+		for (int32 i = l.startPara; i < counted; i++)
 			if (text[i] == ' ')
 				spaces++;
 		x += SlackPerGap(line) * spaces;

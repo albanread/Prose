@@ -2715,6 +2715,44 @@ SelfTest()
 				&& mlayout.OffsetToXY(2, &a2, &hh)
 				&& a2.x > a1.x + 1.0f);
 		}
+
+		// the re-re-report (2026-09-22): everything above only ever
+		// exercised a paragraph's FIRST line, where the caret byte and
+		// the line start coincide. On wrapped continuation lines the
+		// caret parked on the line's first glyph ("stuck on the e")
+		// and spaces moved it not at all.
+		{
+			PWDocument wdoc;
+			BString longText;
+			for (int i = 0; i < 60; i++)
+				longText << "word ";
+			longText << "end";
+			wdoc.Insert(0, longText.String(), NULL);
+			PWLayout wlayout(&wdoc);
+			wlayout.SetPageSetup(setup);
+			wlayout.Layout();
+			int32 len = wdoc.Length();
+			BPoint top, tail;
+			float hh;
+			CHECK("wrapped carets resolve",
+				wlayout.OffsetToXY(4, &top, &hh)
+				&& wlayout.OffsetToXY(len, &tail, &hh));
+			CHECK("paragraph wrapped to 2+ lines",
+				tail.y > top.y + 1.0f);
+			CHECK("caret tracks along a continuation line",
+				tail.x > top.x + 50.0f);
+			// typing a space at the end of the wrapped paragraph must
+			// move the caret, not strand it on the last glyph
+			wdoc.Insert(len, " ", NULL);
+			PWLayout wlayout2(&wdoc);
+			wlayout2.SetPageSetup(setup);
+			wlayout2.Layout();
+			BPoint afterSpace;
+			CHECK("caret resolves after the typed space",
+				wlayout2.OffsetToXY(len + 1, &afterSpace, &hh));
+			CHECK("space moves the caret on a wrapped line",
+				afterSpace.x > tail.x + 1.0f);
+		}
 	}
 
 		printf("block: search\n"); fflush(stdout);

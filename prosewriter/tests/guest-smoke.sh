@@ -49,6 +49,16 @@ r=$("$GUEST" run "hey $SIG get Text" 2>/dev/null | grep -a result)
 echo "$r" | grep -aq "smoke test one" && ok "set/get Text" \
 	|| bad "set/get Text ($r)"
 
+# 3b - selection beyond the document clamps at both ends (the anchor
+#      used to read back past the end: "14-9999")
+s=$("$GUEST" run "/boot/home/apps/pwquery $SIG Selection X set \"9999-9999\"" \
+	>/dev/null 2>&1; sleep 0.3)
+sr=$("$GUEST" run "hey $SIG get Selection" 2>/dev/null | grep -a result \
+	| tr -d '\0' | grep -aoE '[0-9]+-[0-9]+')
+a=${sr%%-*}; b=${sr##*-}
+[ -n "$a" ] && [ "$a" -le 14 ] && [ "$b" -le 14 ] \
+	&& ok "selection clamps ($sr)" || bad "selection clamp ($sr)"
+
 # 4 - save to a path: file written, title takes the name, Modified
 #     clears, and the file is TYPED (Tracker can find us without mimeset)
 n=4
