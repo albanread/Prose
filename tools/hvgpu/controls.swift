@@ -283,7 +283,9 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         let stamp = DateFormatter()
         stamp.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         let url = screenshotFolder().appendingPathComponent("Prose \(stamp.string(from: Date())).png")
-        guard let image = surfaceImage(surface), writePNG(image, to: url) else {
+        // the presented picture, so a screenshot includes any game pane
+        guard let image = presenter.presentedImage() ?? surfaceImage(surface),
+              writePNG(image, to: url) else {
             chrome?.content.statusBar.show(message: "Couldn't save the screenshot")
             return
         }
@@ -727,7 +729,8 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
             ctx.scaleBy(x: 1, y: -1)
         }
         root.render(in: ctx)
-        if let surface = presenterGPU?.surface, displaySize != nil, let image = surfaceImage(surface) {
+        if let surface = presenterGPU?.surface, displaySize != nil,
+            let image = presenter.presentedImage() ?? surfaceImage(surface) {
             let r = presenter.view.convert(presenter.imageRect(), to: nil)      // window coordinates, y up
             ctx.saveGState()
             if root.isGeometryFlipped || frameView.isFlipped {                  // undo the flip for drawing

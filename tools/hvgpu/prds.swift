@@ -23,8 +23,9 @@ protocol PresentSource: AnyObject {
     func vmDidStart()
     /// The VM is off (the window stays): nothing to show; the next start maps afresh.
     func vmDidStop()
-    /// The pool as the GPU sees it, and the game panes inside it (gamepane.swift).
-    var poolBuffer: MTLBuffer? { get }
+    /// The surface pool itself, so the presenter can wrap it with its own
+    /// Metal device, and the game panes inside it (gamepane.swift).
+    var poolMemory: (base: UnsafeMutableRawPointer, length: Int)? { get }
     var panes: [PaneState] { get }
     /// Bytes copied into the display buffer since the device was made. Drawing
     /// is measured by area, not by commit count: an idle Haiku desktop commits
@@ -37,7 +38,7 @@ extension PresentSource {
     func windowResized(width: Int, height: Int) {}
     func vmDidStart() {}
     func vmDidStop() {}
-    var poolBuffer: MTLBuffer? { nil }
+    var poolMemory: (base: UnsafeMutableRawPointer, length: Int)? { nil }
     var panes: [PaneState] { [] }
     var committedBytes: Int { 0 }
 }
@@ -461,6 +462,8 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
 
     /// The presenter's view: call it holding `presentLock`.
     var panes: [PaneState] { paneTable }
+
+    var poolMemory: (base: UnsafeMutableRawPointer, length: Int)? { (pool, poolSize) }
 
     /// Nothing to show until the guest commits: the presenter paints black, and the display
     /// buffer is cleared so uncommitted parts of a new mode do not show stale pixels.

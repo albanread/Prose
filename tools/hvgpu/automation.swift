@@ -483,7 +483,10 @@ final class Automation {
             return .failed(.noPicture, "the guest has not drawn anything yet")
         }
         let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        guard let image = controller.surfaceImage(surface), controller.writePNG(image, to: url) else {
+        // What is on the screen, not what is in the display buffer: a game pane
+        // is composited by the GPU and never lands in the buffer at all.
+        let image = controller.presenter.presentedImage() ?? controller.surfaceImage(surface)
+        guard let image, controller.writePNG(image, to: url) else {
             return .failed(.failed, "could not write \(url.path)")
         }
         return .done(["path": url.path, "size": sizeValue()])

@@ -104,7 +104,7 @@ their work produced, and everything that makes it good is theirs.
   Virtualization.framework VM with custom virtio devices of its own — a
   shared-surface display, keyboard and tablet, a MIDI port — plus networking,
   sound, and a Mac folder shared into the guest.
-- **`patches/haiku`** — 76 patches against Haiku at hrev60122, applied to a
+- **`patches/haiku`** — 101 patches against Haiku at hrev60122, applied to a
   local tree to build the guest.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
@@ -147,6 +147,26 @@ guest is writing into the Mac's memory the whole time.
 resolution — one guest pixel per screen pixel — or at the window's point size,
 magnified. Either way its screen follows the window: drag the corner and it
 changes mode.
+
+#### Retro mode
+
+A fourth kind of buffer skips app_server altogether. A **game pane** is a window
+whose pixels are 8-bit palette indices, written by the program into the same
+surface pool and read from there by a Metal fragment shader: palette lookup,
+per-scanline palettes, scrolling, sprites that scale and rotate, and a CRT
+filter, all on the Mac's GPU. Nothing is copied between the byte a program
+writes and the drawable.
+
+It is a `BDirectWindow`, for the half of `BDirectWindow` worth having. A direct
+client on Prose does get a real pointer into the front buffer and pixels written
+through it do appear — what it has no way to do is *present*, because the host
+copies the pool into the display buffer only when app_server commits.
+`BGamePane` keeps the clip list and screen geometry the direct connection
+delivers on every move, resize and hide, and throws the pointer away. Index 0 is
+transparent, so the desktop shows through; blitting is done in the guest on the
+CPU, because a byte per pixel in write-back memory is faster to bang on than to
+ask anything else about. **Retro**, in the Deskbar's Games, is the demo.
+[docs/game-pane.md](docs/game-pane.md)
 
 ### Storage
 
@@ -215,6 +235,7 @@ cd ~/examples && make
 | MIDI | The guest's MIDI played by the Mac's synthesizer and published to CoreMIDI |
 | Storage | NVMe, virtio-block, and a Mac folder mounted in the guest |
 | Automation | A portal device the guest answers on — run a command, get its exit status — and an AppleScript dictionary |
+| Games | Retro mode: indexed-palette panes composited by the Mac's GPU — per-scanline palettes, scrolling, sprites, a CRT filter ([docs/game-pane.md](docs/game-pane.md)) |
 | Look | Two conventional window frames of its own, and themes — wallpaper, colours and frame together — chosen from the host's View menu ([docs/decorators.md](docs/decorators.md)) |
 | Development | clang and lld (LLVM 23), `make`, Haiku's headers and link libraries, and six examples: the machine compiles and runs its own programs |
 | Software | ~120 applications, a web browser, codecs, OpenSSL; ProseWriter, a word processor, and Sisong, a programmer's editor, ported and built here |
@@ -343,6 +364,9 @@ table there also records why each one exists.
 | 0098 | Sisong 2.16-6: completion opens as you type `.` `->` `::`, and clangd's errors arrive unasked |
 | 0099 | Sisong 2.16-7: clangd's errors where they can be read (red line numbers, the message on hover, the Problems list on save) |
 | 0101 | ProseOthello 0.1-2: the board is the window, the score in the title |
+| 0102 | `prose_display`: a game-pane arena in the surface pool, and the four pane commands, with a retrace semaphore of its own |
+| 0103 | `libgame`: `BGamePane`, a window whose pixels are palette indices, composited by the Mac's GPU |
+| 0104 | Retro, the demo of the game pane, in the Deskbar's Games |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

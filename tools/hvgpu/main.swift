@@ -1119,6 +1119,7 @@ final class Presenter: NSObject {
     var pipeline: MTLRenderPipelineState!
     var snowPipeline: MTLRenderPipelineState!
     var panePipeline: MTLRenderPipelineState!      // retro mode (gamepane.swift)
+    private var poolBuffer: MTLBuffer?             // the surface pool, on this device
     var layer: CAMetalLayer!
     var window: NSWindow!
     var view: MetalView!
@@ -1374,7 +1375,7 @@ final class Presenter: NSObject {
             enc.setFragmentBytes(&p, length: MemoryLayout<SnowParams>.stride, index: 0)
         }
         if !covered { enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3) }
-        if hasPicture { drawPanes(gpu, enc, surface) }
+        if hasPicture { drawPanes(gpu, enc, surface, fit(for: layer.drawableSize, surface)) }
         enc.endEncoding()
         cb.present(drawable)
         cb.commit()
@@ -1383,10 +1384,73 @@ final class Presenter: NSObject {
 
     /// Retro mode: the guest's palette indices, straight from the pool, over
     /// the desktop that has just been drawn. Called holding `presentLock`.
-    private func drawPanes(_ gpu: PresentSource, _ enc: MTLRenderCommandEncoder, _ surface: FrameSurface) {
-        guard let pool = gpu.poolBuffer, panePipeline != nil else { return }
-        let fit = params(targetWidth: Double(layer.drawableSize.width),
-                         targetHeight: Double(layer.drawableSize.height), surface: surface)
+    private func fit(for size: CGSize, _ surface: FrameSurface) -> ShaderParams {
+        params(targetWidth: Double(size.width), targetHeight: Double(size.height), surface: surface)
+    }
+
+    /// The picture as it is actually presented, game panes and all, rendered
+    /// into a texture at the guest's own size. A capture taken from the display
+    /// buffer alone would show the desktop and miss everything the GPU
+    /// composites over it.
+    func presentedImage() -> CGImage? {
+        guard let gpu = presenterGPU, let surface = gpu.surface,
+              surface.width > 0, surface.height > 0, pipeline != nil, buffer != nil else { return nil }
+        let width = surface.width, height = surface.height
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+            width: width, height: height, mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: desc),
+              let cb = queue.makeCommandBuffer() else { return nil }
+
+        presentLock.lock()
+        let covered = gpu.panes.contains { $0.visible && $0.flags & Pane.flagFullscreen != 0 }
+        let rp = MTLRenderPassDescriptor()
+        rp.colorAttachments[0].texture = texture
+        rp.colorAttachments[0].loadAction = .clear
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+        rp.colorAttachments[0].storeAction = .store
+        if let enc = cb.makeRenderCommandEncoder(descriptor: rp) {
+            // the texture is the guest's own size, so the fit is the identity
+            var p = fit(for: CGSize(width: width, height: height), surface)
+            if !covered {
+                enc.setRenderPipelineState(pipeline)
+                enc.setFragmentBuffer(buffer, offset: 0, index: 0)
+                enc.setFragmentBytes(&p, length: MemoryLayout<ShaderParams>.stride, index: 1)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            }
+            drawPanes(gpu, enc, surface, p)
+            enc.endEncoding()
+        }
+        cb.commit()
+        cb.waitUntilCompleted()
+        presentLock.unlock()
+
+        let stride = width * 4
+        var bytes = [UInt8](repeating: 0, count: stride * height)
+        bytes.withUnsafeMutableBytes {
+            texture.getBytes($0.baseAddress!, bytesPerRow: stride,
+                             from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        }
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: stride, space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
+                           | CGBitmapInfo.byteOrder32Little.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false,
+                       intent: .defaultIntent)
+    }
+
+    private func drawPanes(_ gpu: PresentSource, _ enc: MTLRenderCommandEncoder,
+                           _ surface: FrameSurface, _ fit: ShaderParams) {
+        guard panePipeline != nil, let memory = gpu.poolMemory else { return }
+        // The pool has to be wrapped by the device that draws with it; the
+        // display device makes its own for compute and that is not this one.
+        if poolBuffer == nil {
+            poolBuffer = device.makeBuffer(bytesNoCopy: memory.base, length: memory.length,
+                                           options: .storageModeShared, deallocator: nil)
+        }
+        guard let pool = poolBuffer else { return }
         var bound = false
         for pane in gpu.panes where pane.visible {
             var p = PaneParams()
