@@ -1,4 +1,4 @@
-From 9634da2c24c0ad20b64abe535db166ec7d5bab8e Mon Sep 17 00:00:00 2001
+From aaa77f032862dcaeaf91714c9aaa76451d3ae90d Mon Sep 17 00:00:00 2001
 From: albanread <albanread@googlemail.com>
 Date: Tue, 22 Sep 2026 10:58:01 +0100
 Subject: [PATCH] ProsePaint in Office, and clang with clangd
@@ -14,7 +14,7 @@ knows, for the editors that speak the Language Server Protocol to it
 (one program, no new libraries; it links the LLVM and clang libraries
 the compiler already ships).
 
-Prose-Patch: 0094-prosepaint-in-office-and-clang-with-clangd.patch 08061dcc6c8315f63131cb08d303b6faafa2c6193ec64f21d7bf901c667723a6
+Prose-Patch: 0094-prosepaint-in-office-and-clang-with-clangd.patch 16b95cd9db40884a4aef606196dfcb2a46bbe50232b13be76f9c6b32ff6cec1b
 ---
  build/jam/DefaultBuildProfiles          | 1 +
  build/jam/DeskbarCategories             | 1 +
@@ -46,7 +46,7 @@ index b4e5079c98..6198a4c2af 100644
  	TimeTracker
  	Tolmach
 diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
-index 96dc37753f..503113fd10 100644
+index 96dc37753f..02ce30f572 100644
 --- a/build/jam/repositories/HaikuPorts/arm64
 +++ b/build/jam/repositories/HaikuPorts/arm64
 @@ -18,7 +18,7 @@ RemotePackageRepository HaikuPorts
@@ -62,7 +62,7 @@ index 96dc37753f..503113fd10 100644
  	samedi-1.2-1
  	shredder-1.0.0-3
  	prosedraw-0.1-2
-+	prosepaint-0.1-1
++	prosepaint-0.1-2
  	prosewriter-0.1-4
  	sisong-2.16-4
  	slayer-1.0-2
