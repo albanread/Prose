@@ -67,11 +67,38 @@ PPCanvas::Draw(BRect)
 	if (comp != NULL)
 		DrawBitmap(comp, comp->Bounds(), pageRect);
 	// transparency reads as the white page under the composite
+	// rubber-band preview for the shape tools
+	if (fShaping) {
+		SetHighColor(0, 100, 255, 255);
+		BPoint a = DocToView(fShapeAnchor);
+		BPoint b = DocToView(fLastDoc);
+		switch (fTool) {
+			case PP_TOOL_LINE:
+				StrokeLine(a, b);
+				break;
+			case PP_TOOL_RECT:
+				StrokeRect(BRect(a, b));
+				break;
+			case PP_TOOL_ELLIPSE:
+				StrokeEllipse(BRect(a, b));
+				break;
+			default:
+				break;
+		}
+	}
 	SetHighColor(180, 180, 180, 255);
 	StrokeRect(pageRect);
 }
 
 // ----------------------------------------------------------------- input --
+void
+PPCanvas::SetOpacityPercent(int32 percent)
+{
+	if (percent < 0) percent = 0;
+	if (percent > 100) percent = 100;
+	fOpacity = (uint8)(percent * 255 / 100);
+}
+
 void
 PPCanvas::PaintDab(BPoint doc)
 {
@@ -79,8 +106,17 @@ PPCanvas::PaintDab(BPoint doc)
 	switch (fTool) {
 		case PP_TOOL_PEN:
 		case PP_TOOL_BRUSH:
+		case PP_TOOL_LINE:
+		case PP_TOOL_RECT:
+		case PP_TOOL_ELLIPSE:
 			fDoc->DabColour((int32)doc.x, (int32)doc.y, fColour,
 				b.Mask(), b.MaskSize(), b.MaskBpr(), 255);
+			break;
+		case PP_TOOL_AIRBRUSH:
+			// low flow: repeated passes (or a held spray via Pulse)
+			// build the ink up
+			fDoc->DabColour((int32)doc.x, (int32)doc.y, fColour,
+				b.Mask(), b.MaskSize(), b.MaskBpr(), 40);
 			break;
 		case PP_TOOL_ERASER:
 			fDoc->DabErase((int32)doc.x, (int32)doc.y,
@@ -92,6 +128,80 @@ PPCanvas::PaintDab(BPoint doc)
 			break;
 		default:
 			break;
+	}
+}
+
+// stamp the brush along a shape path (line / rectangle edges /
+// ellipse) — the same dab pipeline as freehand strokes
+void
+PPCanvas::StampPath(float x0, float y0, float x1, float y1)
+{
+	fBrush.StampLine(x0, y0, x1, y1,
+		[](void* ctx, int32 x, int32 y)
+		{
+			((PPCanvas*)ctx)->PaintDab(BPoint(x, y));
+		}, this);
+}
+
+void
+PPCanvas::CommitShape(BPoint from, BPoint to)
+{
+	fDoc->StrokeBegin(fOpacity);
+	switch (fTool) {
+		case PP_TOOL_LINE:
+			StampPath(from.x, from.y, to.x, to.y);
+			break;
+		case PP_TOOL_RECT:
+			StampPath(from.x, from.y, to.x, from.y);
+			StampPath(to.x, from.y, to.x, to.y);
+			StampPath(to.x, to.y, from.x, to.y);
+			StampPath(from.x, to.y, from.x, from.y);
+			break;
+		case PP_TOOL_ELLIPSE:
+		{
+			float cx = (from.x + to.x) / 2, cy = (from.y + to.y) / 2;
+			float rx = fabsf(to.x - from.x) / 2, ry = fabsf(to.y - from.y) / 2;
+			float perim = 3.1416f * 1.5f * (rx + ry);
+			int32 steps = std::max(24, (int32)(perim
+				/ std::max(1.0f, fBrush.Size() / 4.0f)));
+			float px = cx + rx, py = cy;
+			for (int32 i = 1; i <= steps; i++) {
+				float t = (float)i / steps * 2.0f * 3.14159265f;
+				float nx = cx + rx * cosf(t), ny = cy + ry * sinf(t);
+				StampPath(px, py, nx, ny);
+				px = nx; py = ny;
+			}
+			break;
+		}
+		default:
+			break;
+	}
+	fDoc->StrokeEnd();
+	DocChanged();
+	UpdateStatus();
+}
+
+void
+PPCanvas::ShapeStroke(const char* spec)
+{
+	if (spec == NULL)
+		return;
+	float a = 0, b2 = 0, c = 0, d = 0;
+	if (sscanf(spec, "line %f %f %f %f", &a, &b2, &c, &d) == 4) {
+		PPTool keep = fTool;
+		fTool = PP_TOOL_LINE;
+		CommitShape(BPoint(a, b2), BPoint(c, d));
+		fTool = keep;
+	} else if (sscanf(spec, "rect %f %f %f %f", &a, &b2, &c, &d) == 4) {
+		PPTool keep = fTool;
+		fTool = PP_TOOL_RECT;
+		CommitShape(BPoint(a, b2), BPoint(a + c, b2 + d));
+		fTool = keep;
+	} else if (sscanf(spec, "ellipse %f %f %f %f", &a, &b2, &c, &d) == 4) {
+		PPTool keep = fTool;
+		fTool = PP_TOOL_ELLIPSE;
+		CommitShape(BPoint(a, b2), BPoint(a + c, b2 + d));
+		fTool = keep;
 	}
 }
 
@@ -110,7 +220,7 @@ PPCanvas::MouseDown(BPoint where)
 	BPoint doc = ViewToDoc(where);
 	switch (fTool) {
 		case PP_TOOL_FILL:
-			fDoc->StrokeBegin();
+			fDoc->StrokeBegin(fOpacity);
 			fDoc->FillAt((int32)doc.x, (int32)doc.y, fColour,
 				fFillTolerance);
 			fDoc->StrokeEnd();
@@ -120,10 +230,18 @@ PPCanvas::MouseDown(BPoint where)
 		case PP_TOOL_EYEDROPPER:
 			PickAt(doc);
 			return;
+		case PP_TOOL_LINE:
+		case PP_TOOL_RECT:
+		case PP_TOOL_ELLIPSE:
+			fShaping = true;
+			fShapeAnchor = doc;
+			fLastDoc = doc;
+			SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+			return;
 		default:
 			break;
 	}
-	fDoc->StrokeBegin();
+	fDoc->StrokeBegin(fOpacity);
 	fPainting = true;
 	fLastDoc = doc;
 	PaintDab(doc);
@@ -134,6 +252,13 @@ PPCanvas::MouseDown(BPoint where)
 void
 PPCanvas::MouseMoved(BPoint point, uint32 transit, const BMessage*)
 {
+	if (fShaping) {
+		if (transit != B_INSIDE_VIEW && transit != B_OUTSIDE_VIEW)
+			return;
+		fLastDoc = ViewToDoc(point);
+		Invalidate();	// rubber-band preview
+		return;
+	}
 	if (!fPainting || transit != B_INSIDE_VIEW)
 		return;
 	BPoint doc = ViewToDoc(point);
@@ -154,6 +279,11 @@ PPCanvas::MouseMoved(BPoint point, uint32 transit, const BMessage*)
 void
 PPCanvas::MouseUp(BPoint)
 {
+	if (fShaping) {
+		fShaping = false;
+		CommitShape(fShapeAnchor, fLastDoc);
+		return;
+	}
 	if (!fPainting)
 		return;
 	fPainting = false;
@@ -163,10 +293,20 @@ PPCanvas::MouseUp(BPoint)
 }
 
 void
+PPCanvas::Pulse()
+{
+	// the airbrush sprays while the button is held
+	if (fPainting && fTool == PP_TOOL_AIRBRUSH) {
+		PaintDab(fLastDoc);
+		Invalidate();
+	}
+}
+
+void
 PPCanvas::StrokeSegment(float x0, float y0, float x1, float y1)
 {
 	if (fTool == PP_TOOL_FILL) {
-		fDoc->StrokeBegin();
+		fDoc->StrokeBegin(fOpacity);
 		fDoc->FillAt((int32)x0, (int32)y0, fColour, fFillTolerance);
 		fDoc->StrokeEnd();
 		DocChanged();
@@ -176,7 +316,7 @@ PPCanvas::StrokeSegment(float x0, float y0, float x1, float y1)
 		PickAt(BPoint(x0, y0));
 		return;
 	}
-	fDoc->StrokeBegin();
+	fDoc->StrokeBegin(fOpacity);
 	fBrush.StampLine(x0, y0, x1, y1,
 		[](void* ctx, int32 x, int32 y)
 		{

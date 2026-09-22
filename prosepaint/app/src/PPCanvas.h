@@ -18,6 +18,7 @@ public:
 	void	MouseMoved(BPoint point, uint32 transit,
 				const BMessage* drag) override;
 	void	MouseUp(BPoint point) override;
+	void	Pulse() override;
 	void	MakeFocus(bool focus = true) override;
 
 	PPTool	Tool() const { return fTool; }
@@ -27,6 +28,9 @@ public:
 	rgb_color	Colour() const { return fColour; }
 	void	SetSmudgeStrength(uint8 s) { fSmudgeStrength = s; }
 	void	SetFillTolerance(uint8 t) { fFillTolerance = t; }
+	// stroke opacity percent (0..100) — the stroke-buffer contract
+	void	SetOpacityPercent(int32 percent);
+	int32	OpacityPercent() const { return (int32)fOpacity * 100 / 255; }
 
 	// zoom: one mapping point (DocToView/ViewToDoc below); the render
 	// scales, the composite stays 1:1 data
@@ -39,6 +43,9 @@ public:
 	void	StrokeSegment(float x0, float y0, float x1, float y1);
 	// a single dab at a point
 	void	DabAt(float x, float y);
+	// scripted shape stroke: "line x0 y0 x1 y1", "rect x y w h",
+	// "ellipse x y w h" — stroked with the current brush
+	void	ShapeStroke(const char* spec);
 
 	// the composite changed: repaint (and only what changed)
 	void	DocChanged();
@@ -56,16 +63,22 @@ public:
 private:
 	void	PaintDab(BPoint doc);
 	void	PickAt(BPoint doc);
+	void	StampPath(float x0, float y0, float x1, float y1);
+	void	CommitShape(BPoint from, BPoint to);
 	void	UpdateStatus();
 
 	PPDocument*	fDoc;
 	PPTool		fTool = PP_TOOL_BRUSH;
 	PPBrush		fBrush;
 	rgb_color	fColour { 0, 0, 0, 255 };
+	uint8		fOpacity = 255;
 	uint8		fSmudgeStrength = 128;
 	uint8		fFillTolerance = 32;
 	bool		fPainting = false;
 	BPoint		fLastDoc;
+	// shape tools: anchor + live preview
+	BPoint		fShapeAnchor;
+	bool		fShaping = false;
 	float		fZoom = 1.0f;
 };
 

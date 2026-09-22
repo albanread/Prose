@@ -89,6 +89,7 @@ static const PPColourEntry kColours[] = {
 static const int32 kColourCount = 9;
 
 // ---------------------------------------------------------------- window --
+class PPResizeWindow;
 class PPWindow : public BWindow {
 public:
 			PPWindow(BRect frame, const char* title);
@@ -142,6 +143,7 @@ private:
 	BMenu*		fRecentMenu = NULL;
 	BMenu*		fZoomMenu = NULL;
 	BString		fRecentPath;
+	PPResizeWindow*	fResizeWin = NULL;
 	BString		fFilePath;
 	BMenuItem*	fUndoItem = NULL;
 	BMenuItem*	fRedoItem = NULL;
@@ -149,11 +151,72 @@ private:
 	BMenuField*	fShapeField = NULL;
 	BMenuField*	fSizeField = NULL;
 	BMenuField*	fHardField = NULL;
+	BMenuField*	fOpaqField = NULL;
 	BTextControl*	fR = NULL, * fG = NULL, * fB = NULL;
 	int32		fPaperIndex = 0;
 	bool		fRefreshing = false;
 	bool		fQuitting = false;
 };
+
+// Resize canvas: a small ask-don't-assume panel (dimensions in,
+// one message, hide — the Insert-table pattern)
+class PPWindow;
+class PPResizeWindow : public BWindow {
+public:
+	PPResizeWindow(PPWindow* owner, int32 w, int32 h)
+		:
+		BWindow(BRect(0, 0, 220, 130), "Resize canvas",
+			B_TITLED_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
+			B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS)
+	{
+		fW = new BTextControl(BRect(8, 8, 200, 30), "w", "Width px:",
+			BString().SetToFormat("%d", (int)w).String(), NULL);
+		fH = new BTextControl(BRect(8, 38, 200, 60), "h", "Height px:",
+			BString().SetToFormat("%d", (int)h).String(), NULL);
+		fW->SetDivider(70);
+		fH->SetDivider(70);
+		AddChild(fW);
+		AddChild(fH);
+		BMessage* go = new BMessage('ppGo');
+		go->AddPointer("owner", owner);
+		BButton* ok = new BButton(BRect(60, 90, 150, 114), "ok",
+			"Resize", go);
+		AddChild(ok);
+		SetDefaultButton(ok);
+		fOwner = owner;
+	}
+
+	bool QuitRequested() override
+	{
+		if (fOwner != NULL)
+			fOwner->PostMessage('ppRq');	// panel died
+		return true;
+	}
+
+	void MessageReceived(BMessage* message) override
+	{
+		if (message->what == 'ppGo') {
+			int32 w = atoi(fW->Text());
+			int32 h = atoi(fH->Text());
+			if (fOwner != NULL && w >= 1 && h >= 1) {
+				BMessage m('ppRz');
+				m.AddInt32("w", w);
+				m.AddInt32("h", h);
+				fOwner->PostMessage(&m);
+			}
+			PostMessage(B_QUIT_REQUESTED);
+			return;
+		}
+		BWindow::MessageReceived(message);
+	}
+
+private:
+	BTextControl*	fW = NULL;
+	BTextControl*	fH = NULL;
+	PPWindow*	fOwner = NULL;
+};
+
+
 
 PPWindow::PPWindow(BRect frame, const char* title)
 	:
@@ -258,6 +321,9 @@ PPWindow::BuildMenus()
 		m->AddInt32("index", i);
 		menu->AddItem(new BMenuItem(kPapers[i].name, m));
 	}
+	menu->AddSeparatorItem();
+	menu->AddItem(new BMenuItem("Resize" B_UTF8_ELLIPSIS,
+		new BMessage('ppRs')));
 	fMenuBar->AddItem(menu);
 
 	menu = new BMenu("Layer");
@@ -294,12 +360,12 @@ PPWindow::BuildMenus()
 void
 PPWindow::BuildPalette()
 {
-	fPalette = new BView(BRect(0, 0, 84, 6 * 30 + 4), "palette",
-		B_FOLLOW_NONE, B_WILL_DRAW);
+	fPalette = new BView(BRect(0, 0, 84, PP_TOOL_COUNT * 30 + 4),
+		"palette", B_FOLLOW_NONE, B_WILL_DRAW);
 	fPalette->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 	fPalette->SetDrawingMode(B_OP_COPY);
-	const char* names[PP_TOOL_COUNT] = { "Pen", "Brush", "Eraser",
-		"Smudge", "Fill", "Pick" };
+	const char* names[PP_TOOL_COUNT] = { "Pen", "Brush", "Spray",
+		"Eraser", "Smudge", "Fill", "Pick", "Line", "Rect", "Oval" };
 	for (int32 i = 0; i < PP_TOOL_COUNT; i++) {
 		BMessage* m = new BMessage(TOOL_MSG);
 		m->AddInt32("tool", i);
@@ -368,6 +434,26 @@ PPWindow::BuildProperties()
 	fHardField->SetDivider(52);
 	fProps->AddChild(fHardField);
 
+	// stroke opacity — the stroke-buffer contract: stamps within one
+	// stroke never build up, each pass lands at this strength
+	BPopUpMenu* opaqMenu = new BPopUpMenu("opaq");
+	const int32 opaqVals[] = { 100, 75, 50, 25 };
+	for (int32 i = 0; i < 4; i++) {
+		BMessage* m = new BMessage(PROP_MSG);
+		m->AddInt32("field", 14);
+		m->AddInt32("opaq", opaqVals[i]);
+		char label[8];
+		snprintf(label, sizeof(label), "%d%%", (int)opaqVals[i]);
+		BMenuItem* it = new BMenuItem(label, m);
+		if (opaqVals[i] == 100)
+			it->SetMarked(true);
+		opaqMenu->AddItem(it);
+	}
+	fOpaqField = new BMenuField(BRect(8, 86, 212, 108), "opaq", "Ink:",
+		opaqMenu);
+	fOpaqField->SetDivider(52);
+	fProps->AddChild(fOpaqField);
+
 	// colour swatches: a plain view that reports clicks (BView has no
 	// invocation; the window is right there)
 	class PPSwatch : public BView {
@@ -394,13 +480,13 @@ PPWindow::BuildProperties()
 	};
 	for (int32 i = 0; i < kColourCount; i++)
 		fProps->AddChild(new PPSwatch(
-			BRect(10 + i * 23, 96, 10 + i * 23 + 19, 115),
+			BRect(10 + i * 23, 126, 10 + i * 23 + 19, 145),
 			kColours[i].c, i, this));
 
 	// custom RGB
-	fR = new BTextControl(BRect(8, 124, 100, 146), "r", "R:", "0", NULL);
-	fG = new BTextControl(BRect(108, 124, 200, 146), "g", "G:", "0", NULL);
-	fB = new BTextControl(BRect(8, 150, 100, 172), "b", "B:", "0", NULL);
+	fR = new BTextControl(BRect(8, 154, 100, 176), "r", "R:", "0", NULL);
+	fG = new BTextControl(BRect(108, 154, 200, 176), "g", "G:", "0", NULL);
+	fB = new BTextControl(BRect(8, 180, 100, 202), "b", "B:", "0", NULL);
 	BTextControl* rgb[3] = { fR, fG, fB };
 	for (int32 i = 0; i < 3; i++) {
 		rgb[i]->SetDivider(16);
@@ -664,6 +750,11 @@ PPWindow::MessageReceived(BMessage* message)
 				int32 hard = 200;
 				message->FindInt32("hard", &hard);
 				fCanvas->Brush().SetHardness((uint8)hard);
+			} else if (field == 14) {
+				// stroke opacity percent
+				int32 v = 100;
+				message->FindInt32("opaq", &v);
+				fCanvas->SetOpacityPercent(v);
 			} else if (field >= 10 && field <= 12) {
 				rgb_color c = fCanvas->Colour();
 				int32 v = atoi((field == 10 ? fR : field == 11 ? fG : fB)
@@ -901,6 +992,58 @@ PPWindow::MessageReceived(BMessage* message)
 			}
 			break;
 		}
+		case 'ppRs':
+			if (fResizeWin == NULL) {
+				fResizeWin = new PPResizeWindow(this, fDoc.Width(),
+					fDoc.Height());
+				fResizeWin->Show();
+			} else
+				fResizeWin->Activate();
+			break;
+		case 'ppRz':
+		{
+			int32 w = 0, h = 0;
+			message->FindInt32("w", &w);
+			message->FindInt32("h", &h);
+			fDoc.Resize(w, h);
+			fCanvas->DocChanged();
+			UpdateStatus();
+			break;
+		}
+		case 'ppRq':
+			fResizeWin = NULL;
+			break;
+		case 'ppSh':
+		{
+			BString spec;
+			if (message->FindString("spec", &spec) == B_OK)
+				fCanvas->ShapeStroke(spec.String());
+			break;
+		}
+		case 'ppOp':
+		{
+			int32 v = 100;
+			message->FindInt32("opaq", &v);
+			fCanvas->SetOpacityPercent(v);
+			// keep the menu field in step
+			if (fOpaqField != NULL) {
+				int32 best = 0;
+				int32 bestDelta = 999;
+				for (int32 i = 0; i < fOpaqField->Menu()->CountItems();
+						i++) {
+					int32 val = 100;
+					fOpaqField->Menu()->ItemAt(i)->Message()
+						->FindInt32("opaq", &val);
+					int32 delta = abs(val - v);
+					if (delta < bestDelta) {
+						bestDelta = delta;
+						best = i;
+					}
+				}
+				fOpaqField->Menu()->ItemAt(best)->SetMarked(true);
+			}
+			break;
+		}
 		case PDF_PANEL_MSG:
 			if (fPDFPanel == NULL)
 				fPDFPanel = new BFilePanel(B_SAVE_PANEL,
@@ -1000,6 +1143,21 @@ static property_info sPPProperties[] = {
 		{ B_SET_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"set the ink colour: \"r g b\"", 0, { B_STRING_TYPE } },
+	{ "Opacity",
+		{ B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"stroke opacity percent (strokes land once, at this strength)",
+		0, { B_STRING_TYPE } },
+	{ "Shape",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"shape stroke: \"line x0 y0 x1 y1\" / \"rect x y w h\" / "
+		"\"ellipse x y w h\"", 0, { B_STRING_TYPE } },
+	{ "Canvas",
+		{ B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"resize the canvas: \"w h\" pixels (undo history clears)", 0,
+		{ B_STRING_TYPE } },
 	{ "StrokeLine",
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
@@ -1219,13 +1377,21 @@ HandleScripting(PPWindow* window, BMessage* message, const char* property)
 		PPTool tool = PP_TOOL_BRUSH;
 		if (data.IStartsWith("pen")) tool = PP_TOOL_PEN;
 		else if (data.IStartsWith("brush")) tool = PP_TOOL_BRUSH;
+		else if (data.IStartsWith("air") || data.IStartsWith("spray"))
+			tool = PP_TOOL_AIRBRUSH;
 		else if (data.IStartsWith("eraser")) tool = PP_TOOL_ERASER;
 		else if (data.IStartsWith("smudge")) tool = PP_TOOL_SMUDGE;
 		else if (data.IStartsWith("fill")) tool = PP_TOOL_FILL;
 		else if (data.IStartsWith("pick") || data.IStartsWith("eyedrop"))
 			tool = PP_TOOL_EYEDROPPER;
+		else if (data.IStartsWith("line")) tool = PP_TOOL_LINE;
+		else if (data.IStartsWith("rect")) tool = PP_TOOL_RECT;
+		else if (data.IStartsWith("oval") || data.IStartsWith("ellipse"))
+			tool = PP_TOOL_ELLIPSE;
 		else {
-			ReplyError(message, "tool: pen/brush/eraser/smudge/fill/picker");
+			ReplyError(message,
+				"tool: pen/brush/airbrush/eraser/smudge/fill/picker/"
+				"line/rect/ellipse");
 			return true;
 		}
 		BMessage m(PPWindow::TOOL_MSG);
@@ -1281,6 +1447,51 @@ HandleScripting(PPWindow* window, BMessage* message, const char* property)
 		mc.AddInt32("green", g2);
 		mc.AddInt32("blue", b);
 		window->PostMessage(&mc);
+		ReplyString(message, "");
+		return true;
+	}
+	if (prop == "Opacity" && isSet) {
+		BString data;
+		int32 v = 100;
+		if (message->FindString("data", &data) != B_OK
+			|| sscanf(data.String(), "%d", &v) != 1) {
+			ReplyError(message, "data: percent required");
+			return true;
+		}
+		if (v < 0) v = 0;
+		if (v > 100) v = 100;
+		BMessage m('ppOp');
+		m.AddInt32("opaq", v);
+		window->PostMessage(&m);
+		ReplyString(message, "");
+		return true;
+	}
+	if (prop == "Shape" && isExec) {
+		BString data;
+		if (message->FindString("data", &data) != B_OK || !data.Length()) {
+			ReplyError(message,
+				"data: \"line x0 y0 x1 y1\" / \"rect|ellipse x y w h\"");
+			return true;
+		}
+		BMessage m('ppSh');
+		m.AddString("spec", data);
+		window->PostMessage(&m);
+		ReplyString(message, "");
+		return true;
+	}
+	if (prop == "Canvas" && isSet) {
+		BString data;
+		int32 w = 0, h = 0;
+		if (message->FindString("data", &data) != B_OK
+			|| sscanf(data.String(), "%d %d", &w, &h) != 2
+			|| w < 1 || h < 1) {
+			ReplyError(message, "data: \"w h\" pixels required");
+			return true;
+		}
+		BMessage m('ppRz');
+		m.AddInt32("w", w);
+		m.AddInt32("h", h);
+		window->PostMessage(&m);
 		ReplyString(message, "");
 		return true;
 	}
@@ -1709,6 +1920,109 @@ SelfTest()
 		CHECK("sniff other", PP_SniffDocument("/tmp/pp-none-x")
 			== PP_KIND_ERROR);
 		remove(path);
+	}
+
+	printf("block: opacity\n"); fflush(stdout);
+	{
+		PPDocument doc;
+		PPPaper p;
+		doc.SetCanvas(64, 32, 96.0f, p, false);
+		PPBrush b;
+		b.SetShape(PP_BRUSH_ROUND);
+		b.SetSize(3);
+		rgb_color red = { 216, 40, 40, 255 };
+		// ONE stroke, many overlapping dabs, 50% opacity: the dabs
+		// must NOT build up — the stroke lands once at half strength
+		doc.StrokeBegin(128);
+		for (int32 i = 0; i < 10; i++)
+			doc.DabColour(20, 16, red, b.Mask(), b.MaskSize(), b.MaskBpr(),
+				255);
+		doc.StrokeEnd();
+		rgb_color one = doc.PickColour(20, 16);
+		CHECK("strokes land once at opacity",
+			one.alpha == 128 && one.red == 216);
+		// a SECOND stroke over it builds toward full
+		doc.StrokeBegin(128);
+		doc.DabColour(20, 16, red, b.Mask(), b.MaskSize(), b.MaskBpr(), 255);
+		doc.StrokeEnd();
+		rgb_color two = doc.PickColour(20, 16);
+		CHECK("separate strokes build", two.alpha > 150 && two.alpha < 255);
+		// erase at half opacity halves what is there
+		doc.StrokeBegin(128);
+		doc.DabErase(20, 16, b.Mask(), b.MaskSize(), b.MaskBpr(), 255);
+		doc.StrokeEnd();
+		CHECK("erase stroke lands at opacity",
+			doc.PickColour(20, 16).alpha < two.alpha);
+		// airbrush flow: a single low-flow dab is faint, repeats build
+		doc.StrokeBegin(255);
+		doc.DabColour(40, 16, red, b.Mask(), b.MaskSize(), b.MaskBpr(), 40);
+		doc.StrokeEnd();
+		uint8 faint = doc.PickColour(40, 16).alpha;
+		doc.StrokeBegin(255);
+		for (int32 i = 0; i < 6; i++)
+			doc.DabColour(40, 16, red, b.Mask(), b.MaskSize(), b.MaskBpr(),
+				40);
+		doc.StrokeEnd();
+		uint8 built = doc.PickColour(40, 16).alpha;
+		CHECK("airbrush flow builds", faint < 80 && built > faint
+			&& built <= 255);
+	}
+
+	printf("block: shapes\n"); fflush(stdout);
+	{
+		PPDocument doc;
+		PPPaper p;
+		doc.SetCanvas(96, 64, 96.0f, p, false);
+		// emulate the canvas's shape commits at the model level: the
+		// same dab pipeline, paths the canvas walks
+		PPBrush b;
+		b.SetShape(PP_BRUSH_ROUND);
+		b.SetSize(3);
+		rgb_color red = { 216, 40, 40, 255 };
+		auto dab = [&](int32 x, int32 y)
+		{
+			doc.DabColour(x, y, red, b.Mask(), b.MaskSize(), b.MaskBpr(),
+				255);
+		};
+		// a rectangle outline: edges hit, centre empty
+		doc.StrokeBegin(255);
+		b.StampLine(10, 10, 50, 10, [](void* c, int32 x, int32 y)
+			{ ((decltype(dab)*)c)->operator()(x, y); }, &dab);
+		b.StampLine(50, 10, 50, 40, [](void* c, int32 x, int32 y)
+			{ ((decltype(dab)*)c)->operator()(x, y); }, &dab);
+		b.StampLine(50, 40, 10, 40, [](void* c, int32 x, int32 y)
+			{ ((decltype(dab)*)c)->operator()(x, y); }, &dab);
+		b.StampLine(10, 40, 10, 10, [](void* c, int32 x, int32 y)
+			{ ((decltype(dab)*)c)->operator()(x, y); }, &dab);
+		doc.StrokeEnd();
+		CHECK("rect edges painted", doc.PickColour(30, 10).alpha == 255
+			&& doc.PickColour(10, 25).alpha == 255
+			&& doc.PickColour(50, 25).alpha == 255
+			&& doc.PickColour(30, 40).alpha == 255);
+		CHECK("rect interior empty", doc.PickColour(30, 25).alpha == 0);
+	}
+
+	printf("block: resize\n"); fflush(stdout);
+	{
+		PPDocument doc;
+		PPPaper p;
+		doc.SetCanvas(32, 32, 96.0f, p, false);
+		rgb_color red = { 216, 40, 40, 255 };
+		uint8 one[1] = { 255 };
+		doc.StrokeBegin();
+		doc.DabColour(10, 10, red, one, 1, 1, 255);
+		doc.StrokeEnd();
+		CHECK("undo exists before resize", doc.CanUndo());
+		doc.Resize(64, 48);
+		CHECK("resize grows", doc.Width() == 64 && doc.Height() == 48);
+		CHECK("content anchored", doc.PickColour(10, 10).red == 216);
+		CHECK("new area transparent", doc.PickColour(60, 40).alpha == 0);
+		CHECK("resize clears undo", !doc.CanUndo());
+		doc.Resize(16, 16);
+		CHECK("shrink crops", doc.Width() == 16
+			&& doc.PickColour(10, 10).red == 216);
+		doc.Resize(0, 0);
+		CHECK("bad resize refused", doc.Width() == 16);
 	}
 
 	int passed = 0;

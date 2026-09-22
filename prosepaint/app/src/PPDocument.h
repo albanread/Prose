@@ -71,9 +71,12 @@ public:
 
 	// ---- painting (brush dab onto the active layer at canvas px)
 	// dab: blend colour into the layer under mask*a; erase: alpha-out
-	// under mask*a. Both record the dirty rect and one undo step per
-	// stroke (StrokeBegin ... dabs ... StrokeEnd).
-	void		StrokeBegin();
+	// under mask*a. Colour and erase strokes render into a stroke
+	// buffer and land on the layer once, at `opacity` — stamps within
+	// one stroke never build up (the paint-app opacity contract).
+	// StrokeBegin ... dabs ... StrokeEnd captures the dirty rect and
+	// one undo step per stroke.
+	void		StrokeBegin(uint8 opacity = 255);
 	void		StrokeEnd();
 	void		DabColour(int32 x, int32 y, rgb_color colour,
 				const uint8* mask, int32 maskSize, int32 maskBpr,
@@ -89,6 +92,10 @@ public:
 				uint8 strength);
 	BRect		DirtyRect() const { return fDirty; }
 	void		SetModified() { fModified = true; }
+
+	// resize the canvas (content anchored top-left, new area
+	// transparent, shrinking crops); the geometry change clears undo
+	void		Resize(int32 width, int32 height);
 
 	// ---- composite (over-operator, layer visibility + opacity,
 	// onto the given target bitmap; transparent where nothing paints)
@@ -123,6 +130,8 @@ private:
 	void	CaptureAfter(UndoStep& step);
 	void	ApplyStep(const UndoStep& step, bool forward);
 	void	MarkDirty(const BRect& r);
+	// lazily-created stroke buffer (see fStrokeBuf)
+	BBitmap*	StrokeBuffer();
 	int32	fWidth = 794;			// A4 @ 96 dpi
 	int32	fHeight = 1123;
 	float	fDPI = 96.0f;
@@ -143,6 +152,11 @@ private:
 	// StrokeBegin (the dirty rect only grows as dabs land, so the
 	// "before" bytes cannot be captured piecemeal)
 	std::shared_ptr<BBitmap>	fBeforeSnap;
+	// the stroke buffer: colour dabs (RGBA) or the erase mask (alpha);
+	// composited onto the layer once at StrokeEnd, at stroke opacity
+	std::shared_ptr<BBitmap>	fStrokeBuf;
+	bool			fStrokeErase = false;
+	uint8			fStrokeOpacity = 255;
 	std::vector<uint8>	fSmudgeFoot;	// footprint, maskSize²·4 bytes
 	std::vector<UndoStep>	fUndo, fRedo;
 	bool	fModified = false;

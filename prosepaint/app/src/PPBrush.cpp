@@ -114,9 +114,13 @@ PPBrush::ToolName(PPTool t)
 	switch (t) {
 		case PP_TOOL_PEN: return "Pen";
 		case PP_TOOL_BRUSH: return "Brush";
+		case PP_TOOL_AIRBRUSH: return "Airbrush";
 		case PP_TOOL_ERASER: return "Eraser";
 		case PP_TOOL_SMUDGE: return "Smudge";
 		case PP_TOOL_FILL: return "Fill";
+		case PP_TOOL_LINE: return "Line";
+		case PP_TOOL_RECT: return "Rectangle";
+		case PP_TOOL_ELLIPSE: return "Ellipse";
 		default: return "Eyedropper";
 	}
 }

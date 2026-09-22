@@ -21,10 +21,14 @@ enum PPBrushShape : uint8 {
 enum PPTool : uint8 {
 	PP_TOOL_PEN = 0,		// hard round, tiny sizes
 	PP_TOOL_BRUSH,
+	PP_TOOL_AIRBRUSH,		// low flow; sprays while held
 	PP_TOOL_ERASER,
 	PP_TOOL_SMUDGE,
 	PP_TOOL_FILL,
 	PP_TOOL_EYEDROPPER,
+	PP_TOOL_LINE,			// shape strokes, rubber-band preview
+	PP_TOOL_RECT,
+	PP_TOOL_ELLIPSE,
 	PP_TOOL_COUNT
 };
 

@@ -130,7 +130,39 @@ smoke steps for each.
 
 Smoke 8 → 11 steps, all green.
 
-### Sprint 3 — polish
+### Sprint 3 — polish (delivered 2026-09-22)
+
+**Met.**
+
+- **Stroke-buffer opacity — the paint-app contract:** colour and
+  erase strokes render into a transparent stroke buffer and land on
+  the layer ONCE, at the ink strength. Stamps within a stroke never
+  build up no matter how slow you draw or how often they overlap;
+  separate passes build toward full. Erase accumulates its mask the
+  same way. Ink control (25/50/75/100%) in the properties panel and
+  an `Opacity` scripting property.
+- **Airbrush (Spray):** low-flow dabs that build with repetition —
+  and a real spray: `Pulse` keeps dabbing while the button is held.
+  Verified numerically: three flow-40 dabs land at alpha ≈ 103
+  (40 → 74 → 102, the exact geometric build-up).
+- **Shape strokes:** line, rectangle, ellipse tools with rubber-band
+  preview on drag, stroked with the current brush through the same
+  dab pipeline (so opacity, hardness and shape all apply). Scripting:
+  `Shape do "line x y x y" / "rect|ellipse x y w h"`.
+- **Canvas resize:** model-level `Resize` (content anchored top-left,
+  growing pads transparent, shrinking crops; undo history clears —
+  pixel steps no longer map). Canvas ▸ Resize… panel and a `Canvas
+  set "w h"` scripting property.
+
+Selftest 58 → 71 (opacity contract, erase-at-opacity, airbrush
+build-up, shape edges vs interior, resize semantics); smoke 11 → 13
+steps, all green. One real bug the live check caught: the shape tools
+stamped nothing because `PaintDab`'s switch didn't route them — the
+first probe "passed" against an older stroke underneath; isolated
+probes exposed it.
+
+Still human-owed: real-mouse painting and the rubber-band previews
+by hand.
 
 Airbrush (flow + accumulation), stroke-buffer opacity (proper
 per-stroke alpha), canvas resize, palette/settings persistence,
@@ -141,11 +173,12 @@ pass on the composite.
 
 | ID | Test | Method | Pass |
 |---|---|---|---|
-| P01 | selftest | `--selftest` | PASS 58/58 |
+| P01 | selftest | `--selftest` | PASS 71/71 |
 | P02 | launch + render | launch, screenshot | PASS |
 | P03 | scripted strokes | StrokeLine → Pixel gets | PASS |
 | P04 | round trip | Save → relaunch with file → Pixel gets | PASS |
-| P05 | smoke | `prosepaint/tests/guest-smoke.sh` | PASS 11/11 |
+| P05 | smoke | `prosepaint/tests/guest-smoke.sh` | PASS 13/13 |
 | P06 | PDF export | `PDF do` → structure greps + host pixel verify | PASS |
 | P07 | zoom | scripting round trip + 200% pixel count | PASS |
 | P08 | recent files | settings file lists the run's saves | PASS |
+| P09 | opacity/shapes/airbrush/resize | smoke step 10–11, exact pixels | PASS |

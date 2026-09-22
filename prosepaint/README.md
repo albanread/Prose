@@ -43,11 +43,23 @@ prosepaint/
 - **Zoom (Sprint 2):** 25–400% (View ▸ Zoom presets; `Zoom`
   scripting property, factor or percent) — the render scales, input
   and the composite stay 1:1 data.
+- **Opacity, the paint contract (Sprint 3):** colour and erase
+  strokes render into a buffer and land ONCE at the ink strength —
+  stamps within a stroke never build up; separate passes build.
+  Ink control in the panel, `Opacity` scripting property.
+- **Airbrush (Sprint 3):** low-flow spray that builds with
+  repetition and keeps spraying while the button is held.
+- **Shape strokes (Sprint 3):** line/rectangle/ellipse tools with
+  rubber-band preview, stroked with the current brush (ink, hardness
+  and brush shape all apply); `Shape` scripting property.
+- **Canvas resize (Sprint 3):** Canvas ▸ Resize… or `Canvas set
+  "w h"` — content anchored top-left, padding transparent, cropping
+  on shrink (undo history clears).
 - **Scripting (the harness's brush):** `Tool`/`Brush`/`Colour`/
   `Zoom` set, `StrokeLine`/`Dab` do, `Layer` do (add/delete/up/down/
   visible/opacity/rename), `Pixel` get (exact composite colour),
   `LayerCount`, `Activate`, `Save`, `Open`, `PDF`, `Quit`.
-- **Selftest:** 58 checks (composite math, layer ops, dirty undo,
+- **Selftest:** 71 checks (composite math, layer ops, dirty undo,
   brush masks, stroke/erase/fill/smudge, PDF structure, persistence,
   sniffing, recent list).
 
@@ -55,18 +67,17 @@ prosepaint/
 
 | ID | Test | Result |
 |---|---|---|
-| P01 | selftest | PASS 58/58 |
+| P01 | selftest | PASS 71/71 |
 | P02 | launch + render | PASS |
 | P03 | scripted strokes + pixel reads | PASS |
 | P04 | save → relaunch-with-file round trip | PASS |
-| P05 | `tests/guest-smoke.sh` | PASS 11/11 |
+| P05 | `tests/guest-smoke.sh` | PASS 13/13 |
 | P06 | PDF export (structure + host pixel verify) | PASS |
 | P07 | zoom (scripting + 200% render) | PASS |
 | P08 | recent files persisted | PASS |
 
 ## Not yet (planned — see docs/plan.md)
 
-Airbrush/flow, stroke-buffer opacity, canvas resize, shape strokes
-(Sprint 3). Painting by real mouse is human-owed on this guest
-(the pointer is dead — everything above is driven through the
-scripting surface).
+Painting by real mouse — and the rubber-band previews by hand — are
+human-owed on this guest (the pointer is dead; everything above is
+driven and verified through the scripting surface).

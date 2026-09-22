@@ -175,15 +175,58 @@ else
 	bad "zoom ($z1/$z0/$zq)"
 fi
 
-# 10 - clean quit (unmodified after save)
+# 10 - Sprint 3: opacity contract, shapes, airbrush build-up, resize
 n=10
+"$GUEST" run "$PWQ $SIG Colour X set '216 40 40'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Brush X set 'round 8 255'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Opacity X set 50" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG StrokeLine X do '60 500 260 500'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Opacity X set 100" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Shape X do 'rect 60 530 200 100'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Shape X do 'ellipse 300 530 150 90'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Tool X set airbrush" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Colour X set '40 40 216'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Dab X do '520 600'" >/dev/null 2>&1
+"$GUEST" run "$PWQ $SIG Dab X do '520 600'" >/dev/null 2>&1
+sleep 1
+half=$(pixel '150 500')       # 50% red over white: 236 148 148
+edge=$(pixel '150 530')       # rect top edge: full red
+rim=$(pixel '375 530')        # ellipse top rim: full red
+mid=$(pixel '150 575')        # rect interior: white
+air1=$(pixel '520 600')       # two flow-40 dabs: light blue build-up
+if echo "$half" | grep -aq "235 147 147 255" \
+	&& echo "$edge" | grep -aq "216 40 40 255" \
+	&& echo "$rim" | grep -aq "216 40 40 255" \
+	&& echo "$mid" | grep -aq "255 255 255 255" \
+	&& echo "$air1" | grep -aqE "[0-9]+ [0-9]+ 2[0-9][0-9] 255"; then
+	ok "opacity contract + shapes + airbrush"
+else
+	bad "s3 ($half/$edge/$rim/$mid/$air1)"
+fi
+
+# 11 - canvas resize via scripting
+n=11
+"$GUEST" run "$PWQ $SIG Canvas X set '400 400'" >/dev/null 2>&1
+sleep 1
+t=$("$GUEST" run "hey $SIG get Title of Window 0" 2>/dev/null | grep -a result)
+p=$(pixel '450 450')   # beyond the shrunk canvas: refused probe
+if echo "$t" | grep -aq "400x400"; then
+	ok "canvas resize"
+else
+	bad "resize ($t)"
+fi
+
+# 12 - clean quit (save the edits first so the quit is unmodified)
+n=12
+"$GUEST" run "$PWQ $SIG Save X do /tmp/pp-smoke.paint" >/dev/null 2>&1
+sleep 1
 "$GUEST" run "$PWQ $SIG Quit X do" >/dev/null 2>&1
 sleep 2
 left=$("$GUEST" run 'ps' 2>/dev/null | grep -ac "apps/ProsePaint")
 [ "$left" = "0" ] && ok "clean quit exits" || bad "quit (teams left: $left)"
 
-# 11 - Open Recent persisted (this run's save is in the list)
-n=11
+# 13 - Open Recent persisted (this run's saves are in the list)
+n=13
 recent=$("$GUEST" run 'cat /boot/home/config/settings/ProsePaint/recent_files' \
 	2>/dev/null | tr -d '\r')
 first=$(echo "$recent" | head -1 | tr -d '\0')

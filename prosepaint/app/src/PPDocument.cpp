@@ -195,13 +195,16 @@ PPDocument::MarkDirty(const BRect& r)
 }
 
 void
-PPDocument::StrokeBegin()
+PPDocument::StrokeBegin(uint8 opacity)
 {
 	fInStroke = true;
 	fDirty = BRect();
 	fSmudgeFoot.clear();
 	fCurrentStep = UndoStep();
 	fCurrentStep.layerId = fActiveId;
+	fStrokeOpacity = opacity;
+	fStrokeErase = false;
+	fStrokeBuf.reset();
 	// the pristine layer, for this stroke's "before" bytes
 	PPLayer* l = ActiveLayer();
 	if (l != NULL && l->bits != NULL) {
@@ -212,6 +215,22 @@ PPDocument::StrokeBegin()
 			fBeforeSnap.reset();
 	} else
 		fBeforeSnap.reset();
+}
+
+// the buffer this stroke renders into: colour strokes paint RGBA
+// into it; erase strokes accumulate their mask in its alpha channel
+BBitmap*
+PPDocument::StrokeBuffer()
+{
+	if (fStrokeBuf == NULL) {
+		fStrokeBuf = std::make_shared<BBitmap>(
+			BRect(0, 0, fWidth - 1, fHeight - 1), B_RGBA32);
+		if (fStrokeBuf->IsValid())
+			memset(fStrokeBuf->Bits(), 0, fStrokeBuf->BitsLength());
+		else
+			fStrokeBuf.reset();
+	}
+	return fStrokeBuf.get();
 }
 
 void
@@ -240,12 +259,58 @@ PPDocument::StrokeEnd()
 	fInStroke = false;
 	if (!fCurrentStep.rect.IsValid()) {
 		fBeforeSnap.reset();
+		fStrokeBuf.reset();
 		return;		// nothing was painted
 	}
 	PPLayer* l = LayerById(fCurrentStep.layerId);
 	if (l == NULL || fBeforeSnap == NULL) {
 		fBeforeSnap.reset();
+		fStrokeBuf.reset();
 		return;
+	}
+	if (fStrokeBuf != NULL) {
+		// land the buffered stroke on the layer, once, at stroke
+		// opacity — the paint-app contract: stamps within a stroke
+		// never build up
+		uint32 srcBpr = fStrokeBuf->BytesPerRow();
+		const uint8* src = (const uint8*)fStrokeBuf->Bits();
+		uint32 dstBpr = l->bits->BytesPerRow();
+		uint8* dst = (uint8*)l->bits->Bits();
+		for (int32 y = 0; y < fHeight; y++) {
+			const uint8* srow = src + (size_t)y * srcBpr;
+			uint8* drow = dst + (size_t)y * dstBpr;
+			for (int32 x = 0; x < fWidth; x++) {
+				const uint8* s = srow + x * 4;
+				uint8* d = drow + x * 4;
+				if (fStrokeErase) {
+					uint32 m = (uint32)s[3] * fStrokeOpacity / 255;
+					if (m == 0)
+						continue;
+					uint32 a = d[3] * (255 - m) / 255;
+					d[0] = (uint8)(d[0] * a / 255);
+					d[1] = (uint8)(d[1] * a / 255);
+					d[2] = (uint8)(d[2] * a / 255);
+					d[3] = (uint8)a;
+				} else {
+					uint32 sa = (uint32)s[3] * fStrokeOpacity / 255;
+					if (sa == 0)
+						continue;
+					uint32 da = d[3];
+					uint32 outA = sa + da * (255 - sa) / 255;
+					if (outA == 0)
+						continue;
+					for (int32 c = 0; c < 3; c++) {
+						uint32 out = ((uint32)s[c] * sa
+							+ (uint32)d[c] * da * (255 - sa) / 255)
+							/ outA;
+						d[c] = (uint8)std::min(255u, out);
+					}
+					d[3] = (uint8)outA;
+				}
+			}
+		}
+		fStrokeBuf.reset();
+		MarkDirty(BRect(0, 0, fWidth - 1, fHeight - 1));
 	}
 	int32 x0 = (int32)fCurrentStep.rect.left, y0 = (int32)fCurrentStep.rect.top;
 	int32 w = (int32)fCurrentStep.rect.IntegerWidth() + 1;
@@ -275,11 +340,24 @@ PPDocument::DabColour(int32 x, int32 y, rgb_color colour,
 	PPLayer* l = ActiveLayer();
 	if (l == NULL || mask == NULL)
 		return;
+	// during a stroke this renders into the stroke buffer (landed on
+	// the layer once, at stroke opacity); outside a stroke (tests,
+	// single dabs) it paints the layer directly at full strength
+	uint8* bits;
+	uint32 bpr;
+	if (fInStroke) {
+		BBitmap* buf = StrokeBuffer();
+		if (buf == NULL)
+			return;
+		bits = (uint8*)buf->Bits();
+		bpr = buf->BytesPerRow();
+	} else {
+		bits = (uint8*)l->bits->Bits();
+		bpr = l->bits->BytesPerRow();
+	}
 	int32 half = maskSize / 2;
 	int32 x0 = x - half, y0 = y - half;
-	// blend colour into the layer under mask*flow, straight alpha
-	uint32 bpr = l->bits->BytesPerRow();
-	uint8* bits = (uint8*)l->bits->Bits();
+	// blend colour in under mask*flow, straight alpha
 	for (int32 my = 0; my < maskSize; my++) {
 		int32 py = y0 + my;
 		if (py < 0 || py >= fHeight)
@@ -326,27 +404,58 @@ PPDocument::DabErase(int32 x, int32 y,
 		return;
 	int32 half = maskSize / 2;
 	int32 x0 = x - half, y0 = y - half;
-	uint32 bpr = l->bits->BytesPerRow();
-	uint8* bits = (uint8*)l->bits->Bits();
-	for (int32 my = 0; my < maskSize; my++) {
-		int32 py = y0 + my;
-		if (py < 0 || py >= fHeight)
-			continue;
-		for (int32 mx = 0; mx < maskSize; mx++) {
-			int32 px = x0 + mx;
-			if (px < 0 || px >= fWidth)
+	uint8* bits;
+	uint32 bpr;
+	if (fInStroke) {
+		// the erase stroke accumulates its mask in the buffer's alpha
+		// channel; it lands once at stroke opacity
+		fStrokeErase = true;
+		BBitmap* buf = StrokeBuffer();
+		if (buf == NULL)
+			return;
+		bits = (uint8*)buf->Bits();
+		bpr = buf->BytesPerRow();
+		for (int32 my = 0; my < maskSize; my++) {
+			int32 py = y0 + my;
+			if (py < 0 || py >= fHeight)
 				continue;
-			uint8 m = (uint8)((uint32)mask[my * maskBpr + mx] * flow / 255);
-			if (m == 0)
+			for (int32 mx = 0; mx < maskSize; mx++) {
+				int32 px = x0 + mx;
+				if (px < 0 || px >= fWidth)
+					continue;
+				uint8 m = (uint8)((uint32)mask[my * maskBpr + mx] * flow
+					/ 255);
+				if (m == 0)
+					continue;
+				uint8* d = bits + (size_t)py * bpr + (size_t)px * 4;
+				if (m > d[3])
+					d[3] = m;
+			}
+		}
+	} else {
+		bits = (uint8*)l->bits->Bits();
+		bpr = l->bits->BytesPerRow();
+		for (int32 my = 0; my < maskSize; my++) {
+			int32 py = y0 + my;
+			if (py < 0 || py >= fHeight)
 				continue;
-			uint8* d = bits + (size_t)py * bpr + (size_t)px * 4;
-			uint32 a = d[3] * (255 - m) / 255;
-			d[3] = (uint8)a;
-			// straight alpha: colour channels scale with alpha so the
-			// pixel stays well-formed for the next blend
-			d[0] = (uint8)(d[0] * a / 255);
-			d[1] = (uint8)(d[1] * a / 255);
-			d[2] = (uint8)(d[2] * a / 255);
+			for (int32 mx = 0; mx < maskSize; mx++) {
+				int32 px = x0 + mx;
+				if (px < 0 || px >= fWidth)
+					continue;
+				uint8 m = (uint8)((uint32)mask[my * maskBpr + mx] * flow
+					/ 255);
+				if (m == 0)
+					continue;
+				uint8* d = bits + (size_t)py * bpr + (size_t)px * 4;
+				uint32 a = d[3] * (255 - m) / 255;
+				d[3] = (uint8)a;
+				// straight alpha: colour channels scale with alpha so
+				// the pixel stays well-formed for the next blend
+				d[0] = (uint8)(d[0] * a / 255);
+				d[1] = (uint8)(d[1] * a / 255);
+				d[2] = (uint8)(d[2] * a / 255);
+			}
 		}
 	}
 	MarkDirty(BRect(x0, y0, x0 + maskSize - 1, y0 + maskSize - 1));
@@ -420,6 +529,34 @@ PPDocument::DabSmudge(int32 x, int32 y,
 		else
 			fCurrentStep.rect = fCurrentStep.rect | fDirty;
 	}
+}
+
+void
+PPDocument::Resize(int32 width, int32 height)
+{
+	if (width < 1 || height < 1 || width > 8192 || height > 8192
+		|| (width == fWidth && height == fHeight))
+		return;
+	for (PPLayer& l : fLayers) {
+		std::shared_ptr<BBitmap> grown =
+			std::make_shared<BBitmap>(BRect(0, 0, width - 1, height - 1),
+				B_RGBA32);
+		if (!grown->IsValid())
+			return;
+		memset(grown->Bits(), 0, grown->BitsLength());
+		// content anchored top-left; shrinking crops, growing pads
+		BSize keep(std::min(fWidth, width), std::min(fHeight, height));
+		grown->ImportBits(l.bits.get(), BPoint(0, 0), BPoint(0, 0), keep);
+		l.bits = grown;
+	}
+	fWidth = width;
+	fHeight = height;
+	// geometry changed: pixel undo steps no longer map
+	fUndo.clear();
+	fRedo.clear();
+	fStrokeBuf.reset();
+	MarkDirty(BRect(0, 0, fWidth - 1, fHeight - 1));
+	fModified = true;
 }
 
 // -------------------------------------------------------------- composite --
