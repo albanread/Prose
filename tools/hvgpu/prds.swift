@@ -23,6 +23,9 @@ protocol PresentSource: AnyObject {
     func vmDidStart()
     /// The VM is off (the window stays): nothing to show; the next start maps afresh.
     func vmDidStop()
+    /// The pool as the GPU sees it, and the game panes inside it (gamepane.swift).
+    var poolBuffer: MTLBuffer? { get }
+    var panes: [PaneState] { get }
     /// Bytes copied into the display buffer since the device was made. Drawing
     /// is measured by area, not by commit count: an idle Haiku desktop commits
     /// constantly (the Deskbar's CPU meter) but almost nothing of it.
@@ -34,6 +37,8 @@ extension PresentSource {
     func windowResized(width: Int, height: Int) {}
     func vmDidStart() {}
     func vmDidStop() {}
+    var poolBuffer: MTLBuffer? { nil }
+    var panes: [PaneState] { [] }
     var committedBytes: Int { 0 }
 }
 
@@ -55,6 +60,10 @@ enum PRDS {
     static let cmdCommit: UInt32 = 0x0101
     static let cmdEnableEvents: UInt32 = 0x0102
     static let cmdGetInfo: UInt32 = 0x0103
+    static let cmdPaneCreate: UInt32 = 0x0200
+    static let cmdPaneConfig: UInt32 = 0x0201
+    static let cmdPanePresent: UInt32 = 0x0202
+    static let cmdPaneDestroy: UInt32 = 0x0203
     static let respOK: UInt32 = 0x1000
     static let errInvalid: UInt32 = 0x1100
     static let errUnsupported: UInt32 = 0x1101
@@ -92,6 +101,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
     private var eventElements: [VZVirtioQueueElement] = []
     private var prefWidth: Int, prefHeight: Int
     private var vsyncSeq: UInt64 = 0, hintSeq: UInt64 = 0, redrawSeq: UInt64 = 0
+    private var paneTable = [PaneState](repeating: PaneState(), count: Pane.maxPanes)
     private var commits = 0, commitRects = 0, commitBytes = 0, droppedEvents = 0
     var committedBytes: Int { commitBytes }
     private var copyNanos: UInt64 = 0, copyMaxNanos: UInt64 = 0
@@ -255,6 +265,14 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
             }
         case PRDS.cmdGetInfo:
             payload = [UInt8](configData())
+        case PRDS.cmdPaneCreate:
+            status = paneCreate(req)
+        case PRDS.cmdPaneConfig:
+            status = paneConfig(req)
+        case PRDS.cmdPanePresent:
+            status = panePresent(req)
+        case PRDS.cmdPaneDestroy:
+            status = paneDestroy(req)
         default:
             log("prds: unsupported command 0x\(String(type, radix: 16)) (\(length) bytes)")
             status = PRDS.errUnsupported
@@ -344,6 +362,105 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         seq.withLock { $0 += 1 }
         return PRDS.respOK
     }
+
+    // MARK: game panes (docs/game-pane.md)
+
+    /// Everything a pane keeps is in the pool the guest and the GPU already
+    /// share, so these four commands only ever move descriptions around: a
+    /// present is forty bytes and never a pixel.
+    private func paneCreate(_ req: Data) -> UInt32 {
+        guard req.count >= 64 else { return PRDS.errInvalid }
+        let id = Int(leU32(req, 16))
+        guard id < Pane.maxPanes else { return PRDS.errInvalid }
+        var pane = PaneState()
+        pane.format = leU32(req, 20)
+        pane.worldWidth = Int(leU32(req, 24))
+        pane.worldHeight = Int(leU32(req, 28))
+        pane.stride = Int(leU32(req, 32))
+        pane.buffers = max(1, min(Pane.maxBuffers, Int(leU32(req, 36))))
+        pane.offset = Int(leU64(req, 40))
+        pane.bufferStride = Int(leU64(req, 48))
+        pane.paletteOffset = Int(leU64(req, 56))
+        guard pane.worldWidth > 0, pane.worldHeight > 0,
+              pane.format == Pane.formatIndexed8 || pane.format == Pane.formatB8G8R8X8,
+              pane.paletteOffset % 4 == 0,
+              pane.offset >= 0, pane.bufferStride >= pane.stride * pane.worldHeight,
+              pane.offset + pane.bufferStride * pane.buffers <= poolSize,
+              pane.paletteOffset + (256 + pane.worldHeight * 16) * 4 <= poolSize
+        else { return PRDS.errBounds }
+        pane.live = true
+        presentLock.withLock { paneTable[id] = pane }
+        log("prds: pane \(id): \(pane.worldWidth)x\(pane.worldHeight) "
+            + "\(pane.format == Pane.formatIndexed8 ? "indexed" : "direct"), "
+            + "\(pane.buffers) buffer(s) at \(String(pane.offset, radix: 16))")
+        seq.withLock { $0 += 1 }
+        return PRDS.respOK
+    }
+
+    private func paneConfig(_ req: Data) -> UInt32 {
+        guard req.count >= 64 else { return PRDS.errInvalid }
+        let id = Int(leU32(req, 16))
+        guard id < Pane.maxPanes else { return PRDS.errInvalid }
+        let count = Int(leU32(req, 60))
+        guard count <= Pane.maxClipRects, req.count >= 64 + count * 16 else { return PRDS.errInvalid }
+        var clip: [(x: Int, y: Int, w: Int, h: Int)] = []
+        for i in 0..<count {
+            let o = 64 + i * 16
+            let w = Int(leU32(req, o + 8)), h = Int(leU32(req, o + 12))
+            if w > 0 && h > 0 { clip.append((Int(leU32(req, o)), Int(leU32(req, o + 4)), w, h)) }
+        }
+        return presentLock.withLock {
+            guard paneTable[id].live else { return PRDS.errState }
+            paneTable[id].flags = leU32(req, 20)
+            paneTable[id].destX = Int(leI32(req, 24))
+            paneTable[id].destY = Int(leI32(req, 28))
+            paneTable[id].destWidth = Int(leU32(req, 32))
+            paneTable[id].destHeight = Int(leU32(req, 36))
+            paneTable[id].viewWidth = Int(leU32(req, 40))
+            paneTable[id].viewHeight = Int(leU32(req, 44))
+            paneTable[id].scrollX = Int(leI32(req, 48))
+            paneTable[id].scrollY = Int(leI32(req, 52))
+            paneTable[id].effect = leU32(req, 56)
+            paneTable[id].clip = clip
+            seq.withLock { $0 += 1 }
+            return PRDS.respOK
+        }
+    }
+
+    /// A present says which buffer is live; with two or more the guest draws
+    /// one while the GPU reads the other, so nothing waits and nothing tears.
+    private func panePresent(_ req: Data) -> UInt32 {
+        guard req.count >= 40 else { return PRDS.errInvalid }
+        let id = Int(leU32(req, 16))
+        guard id < Pane.maxPanes else { return PRDS.errInvalid }
+        let index = Int(leU32(req, 20)), sprites = Int(leU32(req, 24))
+        let spriteOffset = Int(leU64(req, 32))
+        guard sprites <= Pane.maxSprites, spriteOffset % 4 == 0,
+              spriteOffset + sprites * Pane.spriteStride <= poolSize
+        else { return PRDS.errBounds }
+        return presentLock.withLock {
+            guard paneTable[id].live else { return PRDS.errState }
+            guard index < paneTable[id].buffers else { return PRDS.errBounds }
+            paneTable[id].bufferIndex = index
+            paneTable[id].spriteCount = sprites
+            paneTable[id].spriteOffset = spriteOffset
+            seq.withLock { $0 += 1 }
+            return PRDS.respOK
+        }
+    }
+
+    private func paneDestroy(_ req: Data) -> UInt32 {
+        guard req.count >= 24 else { return PRDS.errInvalid }
+        let id = Int(leU32(req, 16))
+        guard id < Pane.maxPanes else { return PRDS.errInvalid }
+        presentLock.withLock { paneTable[id] = PaneState() }
+        seq.withLock { $0 += 1 }
+        log("prds: pane \(id) destroyed")
+        return PRDS.respOK
+    }
+
+    /// The presenter's view: call it holding `presentLock`.
+    var panes: [PaneState] { paneTable }
 
     /// Nothing to show until the guest commits: the presenter paints black, and the display
     /// buffer is cleared so uncommitted parts of a new mode do not show stale pixels.

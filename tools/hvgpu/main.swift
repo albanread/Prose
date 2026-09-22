@@ -570,6 +570,7 @@ func leU32(_ d: Data, _ o: Int) -> UInt32 {
     return UInt32(d[b]) | UInt32(d[b + 1]) << 8 | UInt32(d[b + 2]) << 16 | UInt32(d[b + 3]) << 24
 }
 func leU64(_ d: Data, _ o: Int) -> UInt64 { UInt64(leU32(d, o)) | UInt64(leU32(d, o + 4)) << 32 }
+func leI32(_ d: Data, _ o: Int) -> Int32 { Int32(bitPattern: leU32(d, o)) }
 
 final class Resource {
     let id: UInt32
@@ -1117,6 +1118,7 @@ final class Presenter: NSObject {
     var buffer: MTLBuffer!
     var pipeline: MTLRenderPipelineState!
     var snowPipeline: MTLRenderPipelineState!
+    var panePipeline: MTLRenderPipelineState!      // retro mode (gamepane.swift)
     var layer: CAMetalLayer!
     var window: NSWindow!
     var view: MetalView!
@@ -1175,6 +1177,20 @@ final class Presenter: NSObject {
             pipeline = try device.makeRenderPipelineState(descriptor: desc)
             desc.fragmentFunction = library.makeFunction(name: "fsnow")
             snowPipeline = try device.makeRenderPipelineState(descriptor: desc)
+
+            // Game panes draw over the desktop, so index 0 has to let it through:
+            // the shader discards transparent fragments and blends the rest.
+            let paneLibrary = try device.makeLibrary(source: paneShaderSource, options: nil)
+            let paneDesc = MTLRenderPipelineDescriptor()
+            paneDesc.vertexFunction = paneLibrary.makeFunction(name: "pane_vmain")
+            paneDesc.fragmentFunction = paneLibrary.makeFunction(name: "pane_fmain")
+            paneDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            paneDesc.colorAttachments[0].isBlendingEnabled = true
+            paneDesc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            paneDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            paneDesc.colorAttachments[0].sourceAlphaBlendFactor = .one
+            paneDesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            panePipeline = try device.makeRenderPipelineState(descriptor: paneDesc)
         } catch {
             log("FATAL: shader: \(error)")
             exit(1)
@@ -1327,13 +1343,21 @@ final class Presenter: NSObject {
         presentLock.lock()
         defer { presentLock.unlock() }
         lastPresentedSeq = flushed
+        // A full-screen game pane covers the desktop: drawing it underneath
+        // would be a whole screen of pixels nobody sees.
+        let covered = hasPicture && gpu.panes.contains {
+            $0.visible && $0.flags & Pane.flagFullscreen != 0
+        }
         let cb = queue.makeCommandBuffer()!
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = drawable.texture
         rp.colorAttachments[0].storeAction = .store
-        rp.colorAttachments[0].loadAction = .dontCare
+        rp.colorAttachments[0].loadAction = covered ? .clear : .dontCare
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
         let enc = cb.makeRenderCommandEncoder(descriptor: rp)!
-        if hasPicture {
+        if covered {
+            // nothing underneath to draw
+        } else if hasPicture {
             var p = params(targetWidth: Double(layer.drawableSize.width),
                            targetHeight: Double(layer.drawableSize.height), surface: surface)
             enc.setRenderPipelineState(pipeline)
@@ -1349,11 +1373,55 @@ final class Presenter: NSObject {
             enc.setRenderPipelineState(snowPipeline)
             enc.setFragmentBytes(&p, length: MemoryLayout<SnowParams>.stride, index: 0)
         }
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        if !covered { enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3) }
+        if hasPicture { drawPanes(gpu, enc, surface) }
         enc.endEncoding()
         cb.present(drawable)
         cb.commit()
         cb.waitUntilCompleted()     // the surface may be written again only after the GPU read it
+    }
+
+    /// Retro mode: the guest's palette indices, straight from the pool, over
+    /// the desktop that has just been drawn. Called holding `presentLock`.
+    private func drawPanes(_ gpu: PresentSource, _ enc: MTLRenderCommandEncoder, _ surface: FrameSurface) {
+        guard let pool = gpu.poolBuffer, panePipeline != nil else { return }
+        let fit = params(targetWidth: Double(layer.drawableSize.width),
+                         targetHeight: Double(layer.drawableSize.height), surface: surface)
+        var bound = false
+        for pane in gpu.panes where pane.visible {
+            var p = PaneParams()
+            p.worldWidth = UInt32(pane.worldWidth)
+            p.worldHeight = UInt32(pane.worldHeight)
+            p.strideBytes = UInt32(pane.stride)
+            p.bufferOffset = UInt32(pane.liveOffset)
+            p.paletteWords = UInt32(pane.paletteOffset / 4)
+            p.format = pane.format
+            p.flags = pane.flags
+            p.effect = pane.effect
+            p.scroll = SIMD2<Int32>(Int32(pane.scrollX), Int32(pane.scrollY))
+            p.view = SIMD2<UInt32>(UInt32(pane.viewWidth), UInt32(pane.viewHeight))
+            p.dest = SIMD4<Float>(Float(pane.destX), Float(pane.destY),
+                                  Float(pane.destWidth), Float(pane.destHeight))
+            p.scale = fit.scale
+            p.bias = fit.bias
+            p.guest = SIMD2<Float>(Float(surface.width), Float(surface.height))
+            p.clipCount = UInt32(pane.clip.count)
+            p.spriteCount = UInt32(pane.spriteCount)
+            p.spriteWords = UInt32(pane.spriteOffset / 4)
+
+            var clip = pane.clip.map {
+                SIMD4<UInt32>(UInt32($0.x), UInt32($0.y), UInt32($0.w), UInt32($0.h))
+            }
+            if !bound {
+                enc.setRenderPipelineState(panePipeline)
+                enc.setFragmentBuffer(pool, offset: 0, index: 0)
+                enc.setFragmentBuffer(pool, offset: 0, index: 2)
+                bound = true
+            }
+            enc.setFragmentBytes(&p, length: MemoryLayout<PaneParams>.stride, index: 1)
+            enc.setFragmentBytes(&clip, length: MemoryLayout<SIMD4<UInt32>>.stride * clip.count, index: 3)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
     }
 }
 
