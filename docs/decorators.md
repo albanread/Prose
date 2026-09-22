@@ -445,10 +445,11 @@ telling colours apart), a black title bar on the window in front and white
 ones behind, on a white desktop. All nine list every colour, so switching
 back restores everything.
 
-Dark themes share one fault that is Haiku's, not theirs: the control look
-fills a disabled scroll bar's thumb with a light tint of the panel colour, so
-on Prose Dark and Manuscript Night an empty document's scroll bars come out
-pale, and StyledEdit's status field shows light text on them.
+Dark themes used to show pale scroll bars on anything with nothing to
+scroll: Haiku's control look drew a disabled thumb and its arrows in tints
+that take any colour towards white, and StyledEdit's status bar kept a copied
+light ground under a dark theme's light text. Patch 0092 keeps them near the
+panel colour under dark panels; light themes are unchanged pixel for pixel.
 
 **On the host: View ▸ Theme.** The submenu is filled from `prosetheme --list`
 when the guest's portal daemon says hello (a couple of seconds into a boot),

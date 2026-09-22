@@ -1,0 +1,109 @@
+From d8f317d38e3426489b403f58512b6e0f47dd013c Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 02:28:19 +0100
+Subject: [PATCH] Dark themes: disabled scroll bars and StyledEdit's status bar
+
+Two faults showed on a dark theme (Prose Dark, Manuscript Night) as soon
+as a window had nothing to scroll.
+
+HaikuControlLook drew a disabled scroll bar in tints that take any colour
+towards white: DrawScrollBarThumb filled the thumb with B_LIGHTEN_2_TINT
+of the thumb colour and edged it lighter still, and DrawScrollBarButton
+lightened the arrows' boxes and the arrows themselves. Under dark panels
+an empty document's scroll bars were the brightest thing in the window.
+There the disabled thumb now stays near its own colour, a little lighter
+with a lighter top edge, and a disabled arrow keeps the panel colour with
+the arrow dimmed towards it. Under light panels -- decided by the panel
+colour, since High Contrast has a dark thumb on white -- nothing changes:
+a light theme's window compares pixel for pixel with the build before.
+
+StyledEdit's status bar copied its parent's view colour once, when
+attached, but asks for B_PANEL_TEXT_COLOR on every draw; after a theme
+was applied with the window open it kept the old light ground under the
+new light text. It now follows the parent's system colour, as the rest
+of the window does.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0092-dark-themes-disabled-scroll-bars-and-stylededit-s-status-bar.patch 2b92a692d44aaf7975c35ffa6b7e225bc087e334b0db74c2a7c8e64d9503479a
+---
+ src/apps/stylededit/StatusView.cpp      | 26 +++++++++++++++++--------
+ src/kits/interface/HaikuControlLook.cpp | 17 ++++++++++++++--
+ 2 files changed, 33 insertions(+), 10 deletions(-)
+
+diff --git a/src/apps/stylededit/StatusView.cpp b/src/apps/stylededit/StatusView.cpp
+index e6daeab4b4..6285f31c99 100644
+--- a/src/apps/stylededit/StatusView.cpp
++++ b/src/apps/stylededit/StatusView.cpp
+@@ -75,15 +75,25 @@ StatusView::AttachedToWindow()
+ 	BScrollBar* scrollBar = fScrollView->ScrollBar(B_HORIZONTAL);
+ 	MoveTo(0., scrollBar->Frame().top);
+ 
+-	rgb_color color = B_TRANSPARENT_COLOR;
++	// PROSE fork: follow the parent's system colour rather than copying its
++	// value, so that colours changed while the window is open -- a theme --
++	// reach the bar as they reach the text drawn on it (B_PANEL_TEXT_COLOR,
++	// asked for on every Draw()); a copied light background under a dark
++	// theme's light text could not be read.
+ 	BView* parent = Parent();
+-	if (parent != NULL)
+-		color = parent->ViewColor();
+-
+-	if (color == B_TRANSPARENT_COLOR)
+-		color = ui_color(B_PANEL_BACKGROUND_COLOR);
+-
+-	SetViewColor(color);
++	float tint = B_NO_TINT;
++	color_which which = parent != NULL ? parent->ViewUIColor(&tint)
++		: B_NO_COLOR;
++	if (which != B_NO_COLOR)
++		SetViewUIColor(which, tint);
++	else {
++		rgb_color color = parent != NULL
++			? parent->ViewColor() : B_TRANSPARENT_COLOR;
++		if (color == B_TRANSPARENT_COLOR)
++			SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
++		else
++			SetViewColor(color);
++	}
+ 
+ 	ResizeToPreferred();
+ }
+diff --git a/src/kits/interface/HaikuControlLook.cpp b/src/kits/interface/HaikuControlLook.cpp
+index af764e8058..88dc7dcf01 100644
+--- a/src/kits/interface/HaikuControlLook.cpp
++++ b/src/kits/interface/HaikuControlLook.cpp
+@@ -638,12 +638,17 @@ HaikuControlLook::DrawScrollBarButton(BView* view, BRect rect,
+ 
+ 	bool isEnabled = (flags & B_DISABLED) == 0;
+ 
+-	rgb_color buttonColor = isEnabled ? base : tint_color(base, B_LIGHTEN_1_TINT);
++	// PROSE fork: disabled is paler on a light base and dimmer on a dark one;
++	// lightening a dark base and light text made pale boxes of the arrows
++	bool dark = base.IsDark();
++	rgb_color buttonColor = isEnabled || dark
++		? base : tint_color(base, B_LIGHTEN_1_TINT);
+ 	DrawButtonBackground(view, rect, updateRect, buttonColor, flags,
+ 		BControlLook::B_ALL_BORDERS, orientation);
+ 
+ 	rect.InsetBy(-1, -1);
+-	rgb_color textColor = isEnabled ? text : tint_color(text, B_LIGHTEN_1_TINT);
++	rgb_color textColor = isEnabled ? text
++		: tint_color(text, dark ? B_DARKEN_2_TINT : B_LIGHTEN_1_TINT);
+ 	DrawArrowShape(view, rect, updateRect, textColor, direction, flags, 1);
+ 
+ 	// revert clipping constraints
+@@ -782,6 +787,14 @@ HaikuControlLook::DrawScrollBarThumb(BView* view, BRect& rect,
+ 		dark = tint_color(base, B_DARKEN_3_TINT);
+ 		dark1 = tint_color(base, B_DARKEN_1_TINT);
+ 		dark2 = tint_color(base, B_DARKEN_2_TINT);
++	} else if (ui_color(B_PANEL_BACKGROUND_COLOR).IsDark()) {
++		// PROSE fork: under dark panels a disabled thumb stays near its own
++		// colour. The tints below take any colour to a pale grey, which on a
++		// dark theme is the brightest thing in the window.
++		light = tint_color(base, 0.75);
++		dark = tint_color(base, B_DARKEN_2_TINT);
++		dark1 = tint_color(base, 0.9);
++		dark2 = tint_color(base, 1.1);
+ 	} else {
+ 		light = tint_color(base, B_LIGHTEN_MAX_TINT);
+ 		dark = tint_color(base, B_DARKEN_2_TINT);

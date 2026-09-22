@@ -334,6 +334,7 @@ table there also records why each one exists.
 | 0089 | icu74 built with its data in the library: numbers format again, everywhere |
 | 0090 | ProseDraw 0.1-2 and ProseWriter 0.1-4: their client areas stop drawing over their own scroll bars and panels |
 | 0091 | Themes: Manuscript and Manuscript Night, for long writing in the brand's colours, and High Contrast |
+| 0092 | Dark themes: disabled scroll bars stay dark, and StyledEdit's status bar follows a theme applied with the window open |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series
