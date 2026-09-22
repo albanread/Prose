@@ -53,6 +53,14 @@ wait_title() {	# <substring> <seconds>
 pid=$!
 if wait_title probe.c 30; then
 	say "opened the file named on the command line: $(title)"
+	# a C file opened is a C file sent: the server and a clangd start with
+	# nothing asked, and clangd's diagnostics come back on their own
+	sleep 4
+	if ps | grep -v grep | grep -q clangd_server && ps | grep -v grep | grep -qw clangd; then
+		say "opening a C file started clangd_server and clangd"
+	else
+		say "OPENING A C FILE STARTED NO LANGUAGE SERVER"; fail=1
+	fi
 else
 	say "FAILED to open probe.c (title: $(title)): $(head -c 300 /tmp/sisong.out | tr '\n' ' ')"; fail=1
 fi
@@ -179,6 +187,48 @@ if kill -0 $pid 2>/dev/null; then
 			fi
 		else
 			say "member.cpp did not open (title: $(title))"; fail=1
+		fi
+		# typed, not asked: "r." opens the list by itself and "y" narrows it;
+		# "s->" opens it too; "3." is a number and opens nothing
+		printf 'struct Point { int x_location; int y_location; };\nvoid k() { Point r; Point *s = &r; r' > $dir/auto.cpp
+		"$APP" $dir/auto.cpp > /dev/null 2>&1 &
+		if wait_title auto.cpp 15; then
+			hey Sisong _KYD of Window 0 with bytes="$(printf '\037')" > /dev/null 2>&1
+			hey Sisong _KYD of Window 0 with bytes="$(printf '\004')" > /dev/null 2>&1
+			hey Sisong _KYD of Window 0 with bytes="." > /dev/null 2>&1
+			sleep 6
+			hey Sisong _KYD of Window 0 with bytes="y" > /dev/null 2>&1
+			sleep 1
+			hey Sisong _KYD of Window 0 with bytes="
+" > /dev/null 2>&1
+			for c in ';' ' ' s - '>'; do hey Sisong _KYD of Window 0 with bytes="$c" > /dev/null 2>&1; done
+			sleep 6
+			hey Sisong _KYD of Window 0 with bytes="
+" > /dev/null 2>&1
+			for c in ';' ' ' 3 .; do hey Sisong _KYD of Window 0 with bytes="$c" > /dev/null 2>&1; done
+			sleep 4
+			hey Sisong _KYD of Window 0 with bytes="
+" > /dev/null 2>&1
+			sleep 1
+			hey Sisong '!MnF' of Window 0 > /dev/null 2>&1
+			sleep 1
+			if grep -q 'r\.y_location' $dir/auto.cpp; then
+				say "typing 'r.' opened the list, 'y' narrowed it: r.y_location"
+			else
+				say "TYPING 'r.' DID NOT COMPLETE: $(sed -n 2p $dir/auto.cpp)"; fail=1
+			fi
+			if grep -qE 's->(x|y)_location' $dir/auto.cpp; then
+				say "typing 's->' opened the list: $(grep -oE 's->[a-z_]+' $dir/auto.cpp | tail -1)"
+			else
+				say "TYPING 's->' DID NOT COMPLETE: $(sed -n 2p $dir/auto.cpp)"; fail=1
+			fi
+			if grep -q '3\.$' $dir/auto.cpp; then
+				say "'3.' opened no list: a number is not a member"
+			else
+				say "'3.' WAS TREATED AS A MEMBER: $(sed -n 2,3p $dir/auto.cpp | tr '\n' '|')"; fail=1
+			fi
+		else
+			say "auto.cpp did not open (title: $(title))"; fail=1
 		fi
 		if ps | grep -v grep | grep -q clangd_server; then
 			say "clangd_server was started by Sisong"

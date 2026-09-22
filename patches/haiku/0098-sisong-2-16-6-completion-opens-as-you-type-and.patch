@@ -1,0 +1,32 @@
+From 5690657c647df111aa5dcc824b5024a96a0a5c3f Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 17:02:13 +0100
+Subject: [PATCH] Sisong 2.16-6: completion opens as you type . -> and ::
+
+Typing "thing." or "thing->" or "Class::" in a C or C++ document opens
+the completion list by itself with the members clangd knows, and letters
+typed while it is open narrow it; "3." opens nothing. A C or C++
+document goes to clangd_server when it is opened, brought to the front
+and saved, so clangd's diagnostics reach the message pane unasked and
+the server is running before the first completion is wanted. ProseApps
+eefd78e.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0098-sisong-2-16-6-completion-opens-as-you-type-and.patch e6c9b9bd37409c5c32365a8ace49890e18fc718f4804f4657587cde5445db423
+---
+ build/jam/repositories/HaikuPorts/arm64 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 3114b95bff..47c2f9884a 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -210,7 +210,7 @@ RemotePackageRepository HaikuPorts
+ 	prosepaint-0.1-2
+ 	proseothello-0.1-1
+ 	prosewriter-0.1-5
+-	sisong-2.16-5
++	sisong-2.16-6
+ 	slayer-1.0-2
+ 	speex-1.2.1-2
+ 	speex_devel-1.2.1-2
