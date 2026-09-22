@@ -1,0 +1,67 @@
+SUMMARY="clangd, the C and C++ language server, for Haiku editors"
+DESCRIPTION="clangd speaks the Language Server Protocol as JSON-RPC over its \
+own standard input and output, which no Haiku editor can be talked to in. \
+clangd_server owns that: it runs one clangd per editor session and faces \
+editors with BMessages -- completions, definitions and diagnostics for C and \
+C++ documents. Sisong uses it for Edit > Complete Word. It is developed in the \
+Prose repository (clangdserver/) and packaged from there; SOURCE_STATE in the \
+source says which commit this is."
+HOMEPAGE="https://github.com/albanread/Prose"
+COPYRIGHT="2026 The Prose project"
+LICENSE="MIT"
+REVISION="1"
+# The source is not fetched: make-source.sh beside this recipe packs the
+# committed state of clangdserver/app, and prosepkg reads a file:// source from
+# the recipe's own directory. Run it before building.
+SOURCE_URI="file://clangd_server-$portVersion.tar.gz"
+SOURCE_DIR="clangd_server-$portVersion"
+
+ARCHITECTURES="arm64 ?x86_64"
+
+PROVIDES="
+	clangd_server = $portVersion
+	app:clangd_server = $portVersion
+	"
+REQUIRES="
+	haiku
+	cmd:clangd
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	"
+BUILD_PREREQUIRES="
+	cmd:g++
+	cmd:make
+	cmd:rc
+	cmd:xres
+	"
+
+BUILD()
+{
+	# The Makefile is the developers': it names the tree's cross compiler,
+	# ProseWriter's sysroot and the tree's rc and xres. Here they are the
+	# g++ on the PATH (prosepkg's wrapper) and the host tools. make's errors
+	# do not stop the build by themselves, so the programs are checked for.
+	make $jobArgs XGXX=g++ INCS="-Isrc" LIBS="" RC=rc XRES=xres \
+		CXXFLAGS="-O2 -Wall -Wno-unused-parameter -std=c++17" \
+		clangd_server clangd_client
+	test -x clangd_server || { echo "clangd_server did not build" >&2; exit 1; }
+}
+
+TEST()
+{
+	# the codec and the column arithmetic; the live test needs a clangd
+	# running on Haiku, which a build host is not
+	true
+}
+
+INSTALL()
+{
+	# a server among the system's servers; its signature is registered so
+	# the roster can start it when an editor first asks
+	mkdir -p $prefix/servers
+	cp -a clangd_server $prefix/servers/clangd_server
+	settype -t application/x-vnd.Be-elfexecutable $prefix/servers/clangd_server
+	mimeset -f $prefix/servers/clangd_server
+}

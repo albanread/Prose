@@ -1,0 +1,56 @@
+From 2c797321b53e1c86da56bf2fb18e0840dddfd0b1 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 15:02:32 +0100
+Subject: [PATCH] Sisong 2.16-5 and clangd_server: completion in the editor
+
+Sisong 2.16-5 (ProseApps 831c322) gains Edit > Complete Word: the word
+before the caret completed from an index of the Be/Haiku API that the
+package installs as data/sisong/api-index, and, for C and C++, from
+clangd through clangd_server, whose diagnostics show in the editor's
+message pane. It also gains a choice of fixed font in its preferences.
+
+clangd_server is new: Prose's BeOS shape around clangd, which speaks
+the Language Server Protocol over its own stdin and stdout. It installs
+among the system's servers with its signature registered, and Sisong
+starts it on the first question from a C or C++ document.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0096-sisong-2-16-5-and-clangd-server-completion-in-the-editor.patch 9bbeae0d934f699efbb2921d61a24a83ee7105904b60588899bed9d3e7a5f072
+---
+ build/jam/DefaultBuildProfiles          | 1 +
+ build/jam/repositories/HaikuPorts/arm64 | 3 ++-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 732b0414bc..39858db700 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -326,6 +326,7 @@ rule DefineDefaultBuildProfiles
+ 				romannumbers
+ 				samedi
+ 				shredder
++				clangd_server
+ 				sisong
+ 				slayer
+ 				superprefs
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 30d6cf001a..8dec8dc6c8 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -19,6 +19,7 @@ RemotePackageRepository HaikuPorts
+ 	binutils-2.41_2026_03_10_bootstrap-1
+ 	bison-3.8.2_bootstrap-1
+ 	clang-23.1.0-2
++	clangd_server-0.1-1
+ 	make-4.4.1-1
+ 	mkdepend-1.7-5
+ 	coreutils-9.9_bootstrap-1
+@@ -208,7 +209,7 @@ RemotePackageRepository HaikuPorts
+ 	prosejulia-0.1-1
+ 	prosepaint-0.1-2
+ 	prosewriter-0.1-5
+-	sisong-2.16-4
++	sisong-2.16-5
+ 	slayer-1.0-2
+ 	speex-1.2.1-2
+ 	speex_devel-1.2.1-2

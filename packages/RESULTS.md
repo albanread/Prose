@@ -57,7 +57,8 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | cdrtools | 3.02~a09-2 | failed | BUILD phase failed (exit 2) |
 | check | 0.15.2-1 | built | check-0.15.2-1-arm64.hpkg, check_devel-0.15.2-1-arm64.hpkg |
 | cherry_blossom | 1.0-4 | built | cherry_blossom-1.0-4-arm64.hpkg |
-| clang | 23.1.0-1 | built | clang-23.1.0-1-arm64.hpkg |
+| clang | 23.1.0-2 | built | clang-23.1.0-2-arm64.hpkg |
+| clangd_server | 0.1-1 | built | clangd_server-0.1-1-arm64.hpkg |
 | clipdinger | 1.2.4-2 | built | clipdinger-1.2.4-2-arm64.hpkg |
 | clucene | 2.3.3.4-4 | failed | boost1.83 failed: INSTALL phase failed (exit 126) (log: /Volumes/HaikuSrc/prose-packages/logs/boost1.83.log) |
 | codec_check | 1.0-4 | built | codec_check-1.0-4-arm64.hpkg |
@@ -233,7 +234,9 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | projectconceptor | 0.1.1-1 | failed | INSTALL phase failed (exit 1) |
 | prose_examples | 1.0-1 | built | prose_examples-1.0-1-any.hpkg |
 | prosedraw | 0.1-2 | built | prosedraw-0.1-2-arm64.hpkg |
-| prosewriter | 0.1-4 | built | prosewriter-0.1-4-arm64.hpkg |
+| prosejulia | 0.1-1 | built | prosejulia-0.1-1-arm64.hpkg |
+| prosepaint | 0.1-2 | built | prosepaint-0.1-2-arm64.hpkg |
+| prosewriter | 0.1-5 | built | prosewriter-0.1-5-arm64.hpkg |
 | puri | 0.3.9.2-1 | failed | lib3ds failed: cannot download d477b7dc451ec88a739cc28e6d9a7564123569d0.tar.gz (log: /Volumes/HaikuSrc/prose-packages/logs/lib3ds.log) |
 | python3.10 | 3.10.21-1 | failed | BUILD phase failed (exit 1) |
 | python3.14 | 3.14.7-1 | failed | BUILD phase failed (exit 1) |
@@ -261,7 +264,7 @@ Recipes: haikuports at commit 4250cdf (`/Volumes/HaikuSrc/prose-packages/haikupo
 | sequitur | 2.2.0-4 | failed | BUILD phase failed (exit 2) |
 | setuptools | 82.0.1-1 | failed | INSTALL phase failed (exit 127) |
 | shredder | 1.0.0-3 | built | shredder-1.0.0-3-arm64.hpkg |
-| sisong | 2.16-4 | built | sisong-2.16-4-arm64.hpkg |
+| sisong | 2.16-5 | built | sisong-2.16-5-arm64.hpkg |
 | slayer | 1.0-2 | built | slayer-1.0-2-arm64.hpkg |
 | soxr | 0.1.3-2 | built | soxr-0.1.3-2-arm64.hpkg, soxr_devel-0.1.3-2-arm64.hpkg |
 | speex | 1.2.1-2 | built | speex-1.2.1-2-arm64.hpkg, speex_devel-1.2.1-2-arm64.hpkg |

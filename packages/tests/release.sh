@@ -51,6 +51,8 @@ if make -C /boot/system/data/prose-examples/01-hello -f Makefile -n >/dev/null 2
 if [ -x /boot/system/apps/Sisong ]; then ok "Sisong installed ($(ls /boot/system/packages | grep -o 'sisong-[^ ]*hpkg'))"; else bad "Sisong missing"; fi
 if grep -a -q -- '%c -g -Wall -o %e %f -lbe' /boot/system/apps/Sisong; then ok "Sisong compiles with clang (%c)"; else bad "Sisong's build command is not the clang one"; fi
 if grep -a -q prose-examples /boot/system/apps/Sisong; then ok "Sisong has File > Examples"; else bad "Sisong has no Examples menu"; fi
+[ -s /boot/system/data/sisong/api-index ] && ok "Sisong's API index: $(wc -l < /boot/system/data/sisong/api-index) names" || bad "no Sisong API index"
+[ -x /boot/system/servers/clangd_server ] && ok "clangd_server installed" || bad "no clangd_server"
 
 echo "== themes"
 themes=$(prosetheme --list 2>&1 | sed 's/^\* //' | tr '\n' ',')

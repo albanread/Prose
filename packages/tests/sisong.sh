@@ -6,7 +6,9 @@
 # understand but must not damage, no newline at the end),
 # take a second file from a second launch into the same window (single
 # launch), survive the two things that crashed it most simply (a very long
-# word, Find with the find box open), and quit cleanly when asked. It is driven through messages:
+# word, Find with the find box open), complete a word from the api index
+# (Edit > Complete Word: !Mnh), and quit cleanly when asked. It is driven
+# through messages:
 # hey sends the window the key-down and menu messages a user would cause
 # (a verb of four characters is a message code: _KYD is B_KEY_DOWN, !MnF and
 # !MnW are Sisong's File > Save and File > Exit, src/messages.h).
@@ -91,6 +93,81 @@ if kill -0 $pid 2>/dev/null; then
 	hey Sisong '!Mnk' of Window 0 > /dev/null 2>&1
 	sleep 2
 	if kill -0 $pid 2>/dev/null; then say "find box asked for twice: still running"; else say "DIED when the find box was asked for twice"; fail=1; fi
+
+	# Edit > Complete Word (!Mnh) completes the word before the caret from the
+	# index of the Be/Haiku API (data/sisong/api-index): a word only one thing
+	# can be is finished without a list, a word many things can be opens one
+	# and the enter key takes the first. The arrow keys walk it: four downs
+	# from BText reach BTextView.
+	api_idx=""
+	for idx in /boot/system/data/sisong/api-index /boot/home/config/non-packaged/data/sisong/api-index; do
+		[ -e "$idx" ] && api_idx=$idx
+	done
+	if [ -n "$api_idx" ]; then
+		say "api index: $api_idx ($(wc -l < $api_idx) symbols)"
+		printf "" > $dir/apic.cpp
+		"$APP" $dir/apic.cpp > /dev/null 2>&1 &
+		apicpid=$!
+		if wait_title apic.cpp 15; then
+			for c in B T e x t V; do hey Sisong _KYD of Window 0 with bytes=$c > /dev/null 2>&1; done
+			hey Sisong '!Mnh' of Window 0 > /dev/null 2>&1
+			sleep 1
+			for c in ' ' B T e x t; do hey Sisong _KYD of Window 0 with bytes="$c" > /dev/null 2>&1; done
+			hey Sisong '!Mnh' of Window 0 > /dev/null 2>&1
+			sleep 1
+			i=0; while [ $i -lt 4 ]; do hey Sisong _KYD of Window 0 with bytes="$(printf '\037')" > /dev/null 2>&1; i=$((i + 1)); done
+			hey Sisong _KYD of Window 0 with bytes="
+" > /dev/null 2>&1
+			hey Sisong '!MnF' of Window 0 > /dev/null 2>&1
+			sleep 1
+			printf 'BTextView BTextView' > $dir/apic-expected
+			if [ "$(sha256sum < $dir/apic.cpp)" = "$(sha256sum < $dir/apic-expected)" ]; then
+				say "complete word: BTextV finished itself, BText + 4 downs + enter gave BTextView"
+			else
+				say "COMPLETE WORD: got '$(cat $dir/apic.cpp)'"; fail=1
+			fi
+		else
+			say "apic.cpp did not open (title: $(title))"; fail=1
+		fi
+		wait $apicpid 2>/dev/null
+	else
+		say "NO api index: neither data directory has sisong/api-index"; fail=1
+	fi
+
+	# The same command in a C or C++ document also asks clangd, through
+	# clangd_server -- which nothing has started: Sisong must start it. The
+	# caret goes after "p.x_lo" in a file whose struct has x_location, a
+	# name only clangd can know; the first question opens the session, the
+	# second carries the text, the answer joins the list, enter takes it.
+	printf 'struct Point { int x_location; };\nvoid f() { Point p; p.x_lo' > $dir/lsp.cpp
+	"$APP" $dir/lsp.cpp > /dev/null 2>&1 &
+	lsppid=$!
+	if wait_title lsp.cpp 15; then
+		hey Sisong _KYD of Window 0 with bytes="$(printf '\037')" > /dev/null 2>&1
+		hey Sisong _KYD of Window 0 with bytes="$(printf '\004')" > /dev/null 2>&1
+		hey Sisong '!Mnh' of Window 0 > /dev/null 2>&1
+		sleep 4
+		hey Sisong '!Mnh' of Window 0 > /dev/null 2>&1
+		sleep 6
+		hey Sisong _KYD of Window 0 with bytes="
+" > /dev/null 2>&1
+		sleep 1
+		hey Sisong '!MnF' of Window 0 > /dev/null 2>&1
+		sleep 1
+		if grep -q 'p\.x_location' $dir/lsp.cpp; then
+			say "clangd completion: p.x_lo became p.x_location"
+		else
+			say "CLANGD COMPLETION: got '$(tail -1 $dir/lsp.cpp)'"; fail=1
+		fi
+		if ps | grep -v grep | grep -q clangd_server; then
+			say "clangd_server was started by Sisong"
+		else
+			say "CLANGD_SERVER IS NOT RUNNING: Sisong did not start it"; fail=1
+		fi
+	else
+		say "lsp.cpp did not open (title: $(title))"; fail=1
+	fi
+	wait $lsppid 2>/dev/null
 
 	# File > Exit: everything is saved, so nothing may ask
 	hey Sisong '!MnW' of Window 0 > /dev/null 2>&1
