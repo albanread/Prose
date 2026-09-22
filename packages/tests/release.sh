@@ -11,7 +11,7 @@
 #     "35:click x=1691 y=1069,45:click x=1691 y=1069,60:run command=sh /HostFS/release.sh >/dev/null 2>&1 &,165:shutdown"
 #   and read <folder>/release-check.log; its last line is PASS or FAIL.
 #
-# It checks: ProseWriter and ProseDraw installed, in the Deskbar's Office folder,
+# It checks: ProseWriter, ProseDraw, ProsePaint and ProseJulia installed, in the Deskbar's Office folder,
 # and staying up; clang, clang++, lld and make, with a Be API program built and
 # run; the examples; Sisong with its clang build command and File > Examples;
 # every shipped theme and window frame, and a theme applying; an MP3 decoded
@@ -25,11 +25,11 @@ until df | grep -q HostFS; do sleep 1; done
 
 echo "== applications in Office"
 office=/boot/system/data/deskbar/menu/Applications/Office
-for app in ProseWriter ProseDraw; do
+for app in ProseWriter ProseDraw ProsePaint ProseJulia; do
 	if [ -e "$office/$app" ]; then ok "Office menu: $app"; else bad "Office menu has no $app ($(ls $office 2>/dev/null | tr '\n' ' '))"; fi
 	if [ -x /boot/system/apps/$app ]; then ok "installed: /boot/system/apps/$app"; else bad "not installed: $app"; fi
 done
-for app in ProseWriter ProseDraw; do
+for app in ProseWriter ProseDraw ProsePaint ProseJulia; do
 	/boot/system/apps/$app >/dev/null 2>&1 &
 	pid=$!
 	sleep 6
@@ -38,7 +38,7 @@ for app in ProseWriter ProseDraw; do
 done
 
 echo "== developer tools and Sisong"
-for t in clang clang++ lld ld.lld make; do
+for t in clang clang++ clangd lld ld.lld make; do
 	if which $t >/dev/null 2>&1; then ok "$t: $(which $t)"; else bad "no $t"; fi
 done
 cat > /tmp/win.cpp <<'CPP'

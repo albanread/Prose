@@ -1,0 +1,59 @@
+From 2c2f3d8ed661312c831433b7e9200a9764e69af1 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 14:02:56 +0100
+Subject: [PATCH] Prose profile: ProseJulia, and ProseWriter 0.1-5, in Office
+
+ProseJulia, the animated Julia-set fractal developed in the Prose
+repository (prosejulia/), ships for the first time, in the Deskbar's
+Office folder with the other Prose applications. ProseWriter moves to
+0.1-5: the caret advances past spaces, and tracks on wrapped lines,
+which were three user reports with one coordinate-space bug under them.
+Both packed from the committed state of their trees.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0095-prose-profile-prosejulia-and-prosewriter-0-1-5-in-office.patch c8f1b55b87ff7199d2c71d398b6bcae30919456b549142afe5efd593e28dc8d1
+---
+ build/jam/DefaultBuildProfiles          | 1 +
+ build/jam/DeskbarCategories             | 1 +
+ build/jam/repositories/HaikuPorts/arm64 | 3 ++-
+ 3 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index af067b5f87..732b0414bc 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -316,6 +316,7 @@ rule DefineDefaultBuildProfiles
+ 				ponyexpress
+ 				ppviewer
+ 				prosedraw
++				prosejulia
+ 				prosepaint
+ 				prosewriter
+ 				querywatcher
+diff --git a/build/jam/DeskbarCategories b/build/jam/DeskbarCategories
+index 6198a4c2af..814cefb293 100644
+--- a/build/jam/DeskbarCategories
++++ b/build/jam/DeskbarCategories
+@@ -135,6 +135,7 @@ DESKBAR_CATEGORY_Office =
+ 	"Mr. Peeps!"
+ 	People
+ 	ProseDraw
++	ProseJulia
+ 	ProsePaint
+ 	ProseWriter
+ 	TimeTracker
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 02ce30f572..30d6cf001a 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -205,8 +205,9 @@ RemotePackageRepository HaikuPorts
+ 	samedi-1.2-1
+ 	shredder-1.0.0-3
+ 	prosedraw-0.1-2
++	prosejulia-0.1-1
+ 	prosepaint-0.1-2
+-	prosewriter-0.1-4
++	prosewriter-0.1-5
+ 	sisong-2.16-4
+ 	slayer-1.0-2
+ 	speex-1.2.1-2

@@ -1,0 +1,62 @@
+SUMMARY="An animated Julia-set fractal for Prose"
+DESCRIPTION="ProseJulia animates a Julia-set fractal: the constant c rides a \
+circle round the origin, and the set morphs between connected snowflakes and \
+drifting Cantor dust, drawn in smooth escape-time colour. It can be scripted, \
+and it makes postcards of a frame as PDF. It is developed in the Prose \
+repository (prosejulia/) and packaged from there; SOURCE_STATE in the source \
+says which commit this is."
+HOMEPAGE="https://github.com/albanread/Prose"
+COPYRIGHT="2026 The Prose project"
+LICENSE="MIT"
+REVISION="1"
+# The source is not fetched: make-source.sh beside this recipe packs the
+# committed state of prosejulia/app, and prosepkg reads a file:// source from
+# the recipe's own directory. Run it before building.
+SOURCE_URI="file://prosejulia-$portVersion.tar.gz"
+SOURCE_DIR="prosejulia-$portVersion"
+
+ARCHITECTURES="arm64 ?x86_64"
+
+PROVIDES="
+	prosejulia = $portVersion
+	app:ProseJulia = $portVersion
+	"
+REQUIRES="
+	haiku
+	lib:libz
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	devel:libz
+	"
+BUILD_PREREQUIRES="
+	cmd:g++
+	cmd:make
+	cmd:rc
+	cmd:xres
+	"
+
+BUILD()
+{
+	# The Makefile is the developers': it names the tree's cross compiler,
+	# ProseWriter's sysroot and a zlib of its own. Here the compiler is the g++
+	# on the PATH, prosepkg's wrapper, which knows where the headers and
+	# libraries are, and zlib is the system's. make's errors do not stop the
+	# build by themselves, so the binary is checked for.
+	make $jobArgs XGXX=g++ INCS="-I. -Isrc" LIBS="" ZLIBDIR=. \
+		CXXFLAGS="-O2 -Wall -Wno-multichar -Wno-unused-parameter -std=c++17" \
+		ProseJulia
+	test -x ProseJulia || { echo "ProseJulia did not build" >&2; exit 1; }
+	rc -o ProseJulia.rsrc ProseJulia.rdef
+	xres -o ProseJulia ProseJulia.rsrc
+}
+
+INSTALL()
+{
+	mkdir -p $appsDir
+	cp -a ProseJulia $appsDir/ProseJulia
+	settype -t application/x-vnd.Be-elfexecutable $appsDir/ProseJulia
+	mimeset -f $appsDir/ProseJulia
+	addAppDeskbarSymlink $appsDir/ProseJulia
+}

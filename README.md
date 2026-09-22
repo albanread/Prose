@@ -337,6 +337,7 @@ table there also records why each one exists.
 | 0092 | Dark themes: disabled scroll bars stay dark, and StyledEdit's status bar follows a theme applied with the window open |
 | 0093 | virtio-sound: every play keeps real time (the node's clock was poisoned between sessions) |
 | 0094 | ProsePaint in Office; clangd beside clang |
+| 0095 | ProseJulia, and ProseWriter 0.1-5 with the caret fixes, in the image and in Office |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series
