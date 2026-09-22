@@ -28,7 +28,6 @@
 #include <PropertyInfo.h>
 #include <Screen.h>
 #include <String.h>
-#include <StringView.h>
 #include <Window.h>
 
 #include <stdio.h>
@@ -628,9 +627,6 @@ private:
 	void	AnnounceEnd();
 
 	BoardView*	fBoard;
-	BStringView*	fScoreView;
-	BStringView*	fTurnView;
-	BStringView*	fMessageView;
 	BMenuBar*	fMenuBar;
 
 	Position	fGame;
@@ -756,9 +752,6 @@ private:
 };
 
 
-static const rgb_color kPanelText = { 40, 40, 40, 255 };
-
-
 GameWindow::GameWindow(BRect frame)
 	:
 	BWindow(frame, "ProseOthello", B_TITLED_WINDOW,
@@ -803,23 +796,14 @@ GameWindow::GameWindow(BRect frame)
 	AddChild(fMenuBar);
 
 	const float menuHeight = fMenuBar->Bounds().Height() + 1;
-	fBoard = new BoardView(BRect(0, menuHeight, Bounds().right - 180,
+	fBoard = new BoardView(BRect(0, menuHeight, Bounds().right,
 		Bounds().bottom), this);
 	AddChild(fBoard);
 
-	BRect panel(Bounds().right - 176, menuHeight + 8, Bounds().right - 8,
-		Bounds().bottom - 8);
-	fScoreView = new BStringView(panel, "score", "", B_FOLLOW_NONE);
-	fScoreView->SetHighColor(kPanelText);
-	fScoreView->SetFontSize(20);
-	AddChild(fScoreView);
-	fTurnView = new BStringView(panel, "turn", "", B_FOLLOW_NONE);
-	AddChild(fTurnView);
-	fMessageView = new BStringView(panel, "message", "", B_FOLLOW_NONE);
-	fMessageView->SetHighColor(kPanelText);
-	AddChild(fMessageView);
-
-	SetSizeLimits(560, 4000, 520, 4000);
+	// the board is the window (no side panel: white space nobody asked for);
+	// the score, the turn and the state live in the title's tail, the way
+	// ProsePaint's status does
+	SetSizeLimits(360, 4000, 400, 4000);
 	LayoutChildren();
 	UpdatePanel();
 }
@@ -831,19 +815,7 @@ GameWindow::LayoutChildren()
 	const float menuHeight = fMenuBar->Bounds().Height() + 1;
 	fMenuBar->ResizeTo(Bounds().Width(), menuHeight - 1);
 	fBoard->MoveTo(0, menuHeight);
-	fBoard->ResizeTo(Bounds().right - 180, Bounds().bottom - menuHeight);
-
-	const float left = Bounds().right - 172;
-	float y = menuHeight + 16;
-	fScoreView->MoveTo(left, y);
-	font_height fh;
-	fScoreView->GetFontHeight(&fh);
-	y += fh.ascent + fh.descent + 18;
-	fTurnView->MoveTo(left, y);
-	fTurnView->GetFontHeight(&fh);
-	y += fh.ascent + fh.descent + 10;
-	fMessageView->MoveTo(left, y);
-	fMessageView->ResizeTo(164, Bounds().bottom - y - 12);
+	fBoard->ResizeTo(Bounds().right, Bounds().bottom - menuHeight);
 	fBoard->Invalidate();
 }
 
@@ -855,9 +827,11 @@ GameWindow::StatusText() const
 	fGame.Counts(black, white);
 	BString s;
 	if (fGame.Over()) {
-		s.SetToFormat("game over: %s wins %d" B_UTF8_ELLIPSIS " %d",
-			black > white ? "black" : white > black ? "white" : "nobody",
-			black, white);
+		s.SetToFormat("%s %d" B_UTF8_ELLIPSIS "%d",
+			black > white ? "you win" : white > black ? "the machine wins"
+				: "a draw",
+			black > white ? black : white > black ? white : black,
+			black > white ? white : white > black ? black : black);
 	} else if (fGame.Turn() == kBlack) {
 		int moves[64];
 		int count = fGame.LegalMoves(kBlack, moves);
@@ -873,19 +847,11 @@ GameWindow::UpdatePanel()
 {
 	int black, white;
 	fGame.Counts(black, white);
-	BString score;
-	score.SetToFormat("%d   " B_UTF8_ELLIPSIS "   %d", black, white);
-	fScoreView->SetText(score.String());
-	BString turn;
-	turn.SetToFormat("%s to play (%s opponent)",
-		fGame.Turn() == kBlack ? "black" : "white", kLevelNames[fLevel]);
-	fTurnView->SetText(turn.String());
-	fMessageView->SetText(StatusText().String());
+	BString title;
+	title.SetToFormat("ProseOthello — %d" B_UTF8_ELLIPSIS "%d — %s",
+		black, white, StatusText().String());
+	SetTitle(title.String());
 	fBoard->Invalidate();
-	SetTitle(BString("ProseOthello — ")
-		.Append(fGame.Over() ? "game over"
-			: fGame.Turn() == kBlack ? "your move" : "thinking")
-		.String());
 }
 
 

@@ -14,8 +14,8 @@ Four levels (Options ▸ Difficulty):
 
 Game ▸ New (⌘N) starts over, Game ▸ Undo (⌘Z) takes back your move and the
 machine's answer, and the machine's last move carries a small orange ring so
-the change is findable at a glance. The score sits beside the board, and the
-window's title tail says whose move it is.
+the change is findable at a glance. The board is the window, and its title
+carries everything else: "ProseOthello — 3…3 — your move (4)".
 
 ## The engine
 
