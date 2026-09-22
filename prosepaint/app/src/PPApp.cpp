@@ -34,6 +34,8 @@
 #include "PPBrush.h"
 #include "PPCanvas.h"
 #include "PPDocument.h"
+#include "PPPDF.h"
+#include "PPRecent.h"
 
 // ---------------------------------------------------------------- helpers --
 static bool
@@ -104,6 +106,7 @@ public:
 
 	enum {
 		OPEN_PANEL_MSG = 'ppOf', SAVE_PANEL_MSG = 'ppSf',
+		PDF_PANEL_MSG = 'ppFf', ZOOM_MSG = 'ppZm',
 		TOOL_MSG = 'ppTl', PROP_MSG = 'ppPr', SWATCH_MSG = 'ppSw',
 		LAYER_MSG = 'ppLy', STATUS_MSG = 'ppUp'
 	};
@@ -116,7 +119,10 @@ private:
 	void	LayoutChildren();
 	void	UpdateStatus();
 	void	RefreshLayers();
+	void	RebuildRecentMenu();
+	void	RememberRecent(const BString& path);
 	void	DoSave(const BString& path);
+	void	DoExportPDF(const BString& path);
 	status_t	OpenFile(const entry_ref& ref);
 	void	RegisterDocumentType();
 	void	SetPaper(int32 index);
@@ -131,6 +137,11 @@ private:
 	BListView*	fLayerList = NULL;
 	BFilePanel*	fOpenPanel = NULL;
 	BFilePanel*	fSavePanel = NULL;
+	BFilePanel*	fPDFPanel = NULL;
+	PPRecent	fRecent;
+	BMenu*		fRecentMenu = NULL;
+	BMenu*		fZoomMenu = NULL;
+	BString		fRecentPath;
 	BString		fFilePath;
 	BMenuItem*	fUndoItem = NULL;
 	BMenuItem*	fRedoItem = NULL;
@@ -150,6 +161,18 @@ PPWindow::PPWindow(BRect frame, const char* title)
 		B_QUIT_ON_WINDOW_CLOSE | B_ASYNCHRONOUS_CONTROLS)
 {
 	RegisterDocumentType();
+	// the Open Recent list lives in the user settings directory
+	{
+		BPath settings;
+		if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings) == B_OK) {
+			settings.Append("ProsePaint/recent_files");
+			fRecentPath = settings.Path();
+			BPath parent(settings);
+			parent.GetParent(&parent);
+			create_directory(parent.Path(), 0755);
+			fRecent.Load(fRecentPath.String());
+		}
+	}
 	fCanvas = new PPCanvas(&fDoc);
 
 	fMenuBar = new BMenuBar(BRect(0, 0, 200, 20), "menubar");
@@ -207,6 +230,12 @@ PPWindow::BuildMenus()
 	menu->AddItem(new BMenuItem("Save as" B_UTF8_ELLIPSIS,
 		new BMessage(SAVE_PANEL_MSG), 'S', B_COMMAND_KEY | B_SHIFT_KEY));
 	menu->AddSeparatorItem();
+	menu->AddItem(new BMenuItem("Print to PDF" B_UTF8_ELLIPSIS,
+		new BMessage(PDF_PANEL_MSG), 'P', B_COMMAND_KEY));
+	menu->AddSeparatorItem();
+	fRecentMenu = new BMenu("Open Recent");
+	menu->AddItem(fRecentMenu);
+	RebuildRecentMenu();
 	BMenuItem* quit = new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED),
 		'Q', B_COMMAND_KEY);
 	quit->SetTarget(be_app);
@@ -240,6 +269,25 @@ PPWindow::BuildMenus()
 	menu->AddSeparatorItem();
 	menu->AddItem(new BMenuItem("Toggle visible",
 		new BMessage('ppLv')));
+	fMenuBar->AddItem(menu);
+
+	menu = new BMenu("View");
+	fZoomMenu = new BMenu("Zoom");
+	const float zooms[5] = { 0.5f, 0.75f, 1.0f, 1.5f, 2.0f };
+	for (int32 i = 0; i < 5; i++) {
+		BMessage* m = new BMessage(ZOOM_MSG);
+		m->AddFloat("zoom", zooms[i]);
+		char label[12];
+		snprintf(label, sizeof(label), "%.0f%%", zooms[i] * 100);
+		BMenuItem* it = new BMenuItem(label, m);
+		if (zooms[i] == 1.0f) {
+			it->SetMarked(true);
+			it->SetShortcut('0', B_COMMAND_KEY);
+		}
+		fZoomMenu->AddItem(it);
+	}
+	fZoomMenu->SetRadioMode(true);
+	menu->AddItem(fZoomMenu);
 	fMenuBar->AddItem(menu);
 }
 
@@ -450,6 +498,52 @@ PPWindow::UpdateStatus()
 }
 
 void
+PPWindow::RebuildRecentMenu()
+{
+	if (fRecentMenu == NULL)
+		return;
+	while (fRecentMenu->CountItems() > 0)
+		delete fRecentMenu->RemoveItem((int32)0);
+	if (fRecent.Items().empty()) {
+		BMenuItem* none = new BMenuItem("(no recent files)", NULL);
+		none->SetEnabled(false);
+		fRecentMenu->AddItem(none);
+		return;
+	}
+	for (const BString& path : fRecent.Items()) {
+		BMessage* m = new BMessage('ppRc');
+		m->AddString("path", path);
+		fRecentMenu->AddItem(
+			new BMenuItem(BPath(path.String()).Leaf(), m));
+	}
+}
+
+void
+PPWindow::RememberRecent(const BString& path)
+{
+	fRecent.Remember(path);
+	RebuildRecentMenu();
+	if (fRecentPath.Length() > 0)
+		fRecent.Save(fRecentPath.String());
+}
+
+void
+PPWindow::DoExportPDF(const BString& pathStr)
+{
+	// exports never touch document state
+	status_t err = PP_WritePDF(fDoc, pathStr.String());
+	if (err == B_OK) {
+		WriteAttrOn(pathStr.String(), "BEOS:TYPE", "application/pdf");
+		UpdateStatus();
+	} else {
+		BString msg;
+		msg.SetToFormat("Could not write %s: %s", pathStr.String(),
+			strerror(err));
+		(new BAlert("ProsePaint", msg.String(), "OK"))->Go(NULL);
+	}
+}
+
+void
 PPWindow::DoSave(const BString& pathStr)
 {
 	status_t err = fDoc.SaveToFile(pathStr.String());
@@ -457,6 +551,7 @@ PPWindow::DoSave(const BString& pathStr)
 		fFilePath = pathStr;
 		fDoc.SavedClean();
 		WriteAttrOn(pathStr.String(), "BEOS:TYPE", PPDocument::kDocType);
+		RememberRecent(pathStr);
 	} else {
 		BString msg;
 		msg.SetToFormat("Could not save %s: %s", pathStr.String(),
@@ -487,6 +582,7 @@ PPWindow::OpenFile(const entry_ref& ref)
 		return err;
 	}
 	fFilePath = path.Path();
+	RememberRecent(fFilePath);
 	fCanvas->DocChanged();
 	RefreshLayers();
 	UpdateStatus();
@@ -788,6 +884,72 @@ PPWindow::MessageReceived(BMessage* message)
 		{
 			// a scripted save adopted this path
 			message->FindString("path", &fFilePath);
+			BString adopted = fFilePath;
+			if (adopted.Length() > 0)
+				RememberRecent(adopted);
+			UpdateStatus();
+			break;
+		}
+		case 'ppRc':
+		{
+			// Open Recent selection
+			BString path;
+			if (message->FindString("path", &path) == B_OK) {
+				entry_ref ref;
+				if (get_ref_for_path(path.String(), &ref) == B_OK)
+					OpenFile(ref);
+			}
+			break;
+		}
+		case PDF_PANEL_MSG:
+			if (fPDFPanel == NULL)
+				fPDFPanel = new BFilePanel(B_SAVE_PANEL,
+					new BMessenger(this), NULL, B_FILE_NODE, false,
+					new BMessage('ppPf'));
+			{
+				BString suggested = fFilePath.Length()
+					? BString(BPath(fFilePath.String()).Leaf())
+					: BString("Untitled");
+				fPDFPanel->SetSaveText(
+					WithExtension(suggested, ".pdf").String());
+			}
+			fPDFPanel->Show();
+			break;
+		case 'ppPf':
+		{
+			entry_ref ref;
+			if (message->FindRef("directory", &ref) == B_OK) {
+				BPath path(&ref);
+				BString name;
+				message->FindString("name", &name);
+				path.Append(WithExtension(name, ".pdf").String());
+				DoExportPDF(BString(path.Path()));
+			}
+			break;
+		}
+		case 'ppPx':
+		{
+			// scripted PDF export — runs on the window thread
+			BString path;
+			if (message->FindString("path", &path) == B_OK
+				&& path.Length())
+				DoExportPDF(path);
+			break;
+		}
+		case ZOOM_MSG:
+		{
+			float z = 1.0f;
+			message->FindFloat("zoom", &z);
+			fCanvas->SetZoom(z);
+			if (fZoomMenu != NULL) {
+				for (int32 i = 0; i < fZoomMenu->CountItems(); i++) {
+					float itemZoom = 0;
+					fZoomMenu->ItemAt(i)->Message()
+						->FindFloat("zoom", &itemZoom);
+					fZoomMenu->ItemAt(i)->SetMarked(
+						itemZoom == fCanvas->Zoom());
+				}
+			}
 			UpdateStatus();
 			break;
 		}
@@ -809,6 +971,11 @@ static property_info sPPProperties[] = {
 		{ B_GET_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"number of layers", 0, { B_INT32_TYPE } },
+	{ "Zoom",
+		{ B_GET_PROPERTY, B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"canvas zoom percent (set: 25..400)", 0,
+		{ B_INT32_TYPE, B_INT32_TYPE } },
 	{ "Pixel",
 		{ B_GET_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
@@ -851,6 +1018,11 @@ static property_info sPPProperties[] = {
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"save the painting (data: path)", 0, { B_STRING_TYPE } },
+	{ "PDF",
+		{ B_EXECUTE_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"export the painting as a PDF page (data: path)", 0,
+		{ B_STRING_TYPE } },
 	{ "Open",
 		{ B_EXECUTE_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
@@ -984,6 +1156,31 @@ HandleScripting(PPWindow* window, BMessage* message, const char* property)
 
 	if (prop == "LayerCount" && isGet) {
 		ReplyInt(message, doc.CountLayers());
+		return true;
+	}
+	if (prop == "Zoom" && isGet) {
+		ReplyInt(message, (int32)roundf(window->Canvas()->Zoom() * 100));
+		return true;
+	}
+	if (prop == "Zoom" && isSet) {
+		// factor or percent, hey sends ints and pwquery strings
+		float z = -1.0f;
+		float f = 0.0f;
+		int32 i = 0;
+		BString s;
+		if (message->FindFloat("data", &f) == B_OK)
+			z = f;
+		else if (message->FindInt32("data", &i) == B_OK)
+			z = i;
+		else if (message->FindString("data", &s) == B_OK)
+			z = atof(s.String());
+		if (z > 4.0f && z <= 400.0f)
+			z /= 100.0f;	// percent
+		BMessage zoom(PPWindow::ZOOM_MSG);
+		zoom.AddFloat("zoom", z);
+		window->PostMessage(&zoom);
+		z = fminf(4.0f, fmaxf(0.25f, z));
+		ReplyInt(message, (int32)roundf(z * 100));
 		return true;
 	}
 	if (prop == "Pixel" && isGet) {
@@ -1150,6 +1347,21 @@ HandleScripting(PPWindow* window, BMessage* message, const char* property)
 				ReplyString(message, "");
 			else
 				ReplyError(message, strerror(err));
+		} else
+			ReplyError(message, "data: path required");
+		return true;
+	}
+	if (prop == "PDF" && isExec) {
+		BString path;
+		if (message->FindString("data", &path) == B_OK
+			&& path.Length()) {
+			// pure output: no document state changes. The export
+			// itself runs on the window thread via the panel path's
+			// message so the composite read is thread-safe.
+			BMessage m('ppPx');
+			m.AddString("path", path);
+			window->PostMessage(&m);
+			ReplyString(message, "");
 		} else
 			ReplyError(message, "data: path required");
 		return true;
@@ -1394,9 +1606,80 @@ SelfTest()
 			(doc.DeleteLayer(bg), doc.CountLayers() == 1));
 	}
 
-	printf("block: persist\n"); fflush(stdout);
+	printf("block: pdf\n"); fflush(stdout);
 	{
 		PPDocument doc;
+		PPPaper p;
+		p.name = "A4";
+		p.widthPt = 595.0f;
+		p.heightPt = 842.0f;
+		doc.SetCanvas(40, 30, 96.0f, p, true);
+		rgb_color red = { 216, 40, 40, 255 };
+		uint8 one[1] = { 255 };
+		doc.StrokeBegin();
+		doc.DabColour(10, 10, red, one, 1, 1, 255);
+		doc.StrokeEnd();
+		CHECK("bad pdf path rejected", PP_WritePDF(doc, "") == B_BAD_VALUE);
+		const char* pdfPath = "/tmp/pp-selftest.pdf";
+		CHECK("pdf write", PP_WritePDF(doc, pdfPath) == B_OK);
+		std::string pdf;
+		{
+			BFile f;
+			if (f.SetTo(pdfPath, B_READ_ONLY) == B_OK) {
+				char buf[4096];
+				ssize_t n;
+				while ((n = f.Read(buf, sizeof(buf))) > 0)
+					pdf.append(buf, n);
+			}
+		}
+		CHECK("pdf magic", pdf.compare(0, 8, "%PDF-1.4") == 0);
+		CHECK("pdf a4 mediabox",
+			pdf.find("/MediaBox [0 0 595 842]") != std::string::npos);
+		CHECK("pdf image xobject",
+			pdf.find("/Subtype /Image") != std::string::npos
+			&& pdf.find("/Filter /FlateDecode") != std::string::npos
+			&& pdf.find("/Width 40") != std::string::npos
+			&& pdf.find("/Height 30") != std::string::npos);
+		CHECK("pdf image painted",
+			pdf.find("/Im0 Do") != std::string::npos);
+		{
+			size_t at = pdf.rfind("startxref\n");
+			bool ok = at != std::string::npos;
+			if (ok) {
+				long long off = atoll(pdf.c_str() + at + 10);
+				ok = off > 0 && off < (long long)pdf.size()
+					&& pdf[off] == 'x';
+			}
+			CHECK("pdf xref offset", ok);
+		}
+		remove(pdfPath);
+	}
+
+	printf("block: recent\n"); fflush(stdout);
+	{
+		PPRecent r;
+		r.Remember("/tmp/a.paint");
+		r.Remember("/tmp/b.paint");
+		r.Remember("/tmp/a.paint");
+		CHECK("recent order", r.Items().size() == 2
+			&& r.Items()[0] == "/tmp/a.paint");
+		for (int i = 0; i < 12; i++) {
+			BString p2;
+			p2.SetToFormat("/tmp/many%d.paint", i);
+			r.Remember(p2);
+		}
+		CHECK("recent capped", (int32)r.Items().size() == PPRecent::kMax);
+		const char* rp = "/tmp/pp-recent-test";
+		CHECK("recent save", r.Save(rp) == B_OK);
+		PPRecent q;
+		CHECK("recent load", q.Load(rp) == B_OK);
+		CHECK("recent round trip", q.Items().size() == r.Items().size()
+			&& q.Items()[0] == r.Items()[0]);
+		remove(rp);
+	}
+
+	printf("block: persist\n"); fflush(stdout);
+	{		PPDocument doc;
 		PPPaper p;
 		doc.SetCanvas(40, 30, 96.0f, p, false);
 		int32 l2 = doc.AddLayer("Art");

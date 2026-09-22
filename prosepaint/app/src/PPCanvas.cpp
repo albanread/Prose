@@ -27,6 +27,19 @@ PPCanvas::MakeFocus(bool focus)
 }
 
 void
+PPCanvas::SetZoom(float zoom)
+{
+	if (zoom < 0.25f)
+		zoom = 0.25f;
+	if (zoom > 4.0f)
+		zoom = 4.0f;
+	if (zoom == fZoom)
+		return;
+	fZoom = zoom;
+	DocChanged();
+}
+
+void
 PPCanvas::DocChanged()
 {
 	ResizeTo((fDoc->Width() + 2 * kMargin) * fZoom,

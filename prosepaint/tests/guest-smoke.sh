@@ -144,12 +144,51 @@ else
 	bad "reopen ($p/$c/$t)"
 fi
 
-# 8 - clean quit (unmodified after save)
+# 8 - PDF export: image page at paper size, painted and well-formed
 n=8
+"$GUEST" run "$PWQ $SIG PDF X do /tmp/pp-smoke.pdf" >/dev/null 2>&1
+sleep 1
+magic=$("$GUEST" run 'head -c 8 /tmp/pp-smoke.pdf; echo' 2>/dev/null \
+	| head -1 | tr -d '\0\r\n')
+box=$("$GUEST" run 'grep -a MediaBox /tmp/pp-smoke.pdf' 2>/dev/null \
+	| head -1 | tr -d '\0\r')
+img=$("$GUEST" run 'grep -ac "Subtype /Image" /tmp/pp-smoke.pdf' \
+	2>/dev/null | head -1 | tr -d '\0\r\n')
+if [ "$magic" = "%PDF-1.4" ] \
+	&& echo "$box" | grep -aq "\[0 0 595 842\]" && [ "$img" -ge 1 ]; then
+	ok "pdf export (A4 image page)"
+else
+	bad "pdf ($magic/$box/$img)"
+fi
+
+# 9 - zoom round trip through the scripting property
+n=9
+z1=$("$GUEST" run "hey $SIG set Zoom to 2" 2>/dev/null | grep -a result \
+	| sed -n 's/.*: \([0-9]*\).*/\1/p')
+z0=$("$GUEST" run "hey $SIG set Zoom to 1" 2>/dev/null | grep -a result \
+	| sed -n 's/.*: \([0-9]*\).*/\1/p')
+zq=$("$GUEST" run "hey $SIG get Zoom" 2>/dev/null | grep -a result \
+	| sed -n 's/.*: \([0-9]*\).*/\1/p')
+if [ "$z1" = "200" ] && [ "$z0" = "100" ] && [ "$zq" = "100" ]; then
+	ok "zoom scripting"
+else
+	bad "zoom ($z1/$z0/$zq)"
+fi
+
+# 10 - clean quit (unmodified after save)
+n=10
 "$GUEST" run "$PWQ $SIG Quit X do" >/dev/null 2>&1
 sleep 2
 left=$("$GUEST" run 'ps' 2>/dev/null | grep -ac "apps/ProsePaint")
 [ "$left" = "0" ] && ok "clean quit exits" || bad "quit (teams left: $left)"
+
+# 11 - Open Recent persisted (this run's save is in the list)
+n=11
+recent=$("$GUEST" run 'cat /boot/home/config/settings/ProsePaint/recent_files' \
+	2>/dev/null | tr -d '\r')
+first=$(echo "$recent" | head -1 | tr -d '\0')
+echo "$recent" | grep -aq "pp-smoke.paint" \
+	&& ok "recent files persisted" || bad "recent ($first)"
 
 "$QMP" shot "$OUT/pp-smoke-desk.png" >/dev/null 2>&1
 echo "final screenshot: $OUT/pp-smoke-desk.png"

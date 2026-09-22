@@ -105,6 +105,31 @@ tolerance), eyedropper, PDF export (flattened Flate image page —
 PWPDF pattern), zoom (25–400%, the ProseDraw mapping), recent files,
 smoke steps for each.
 
+### Sprint 2 — the finishing kit (delivered 2026-09-22)
+
+**Met.**
+
+- **PDF export:** `PPPDF` writes the flattened composite over white
+  as one Flate image page — MediaBox is the paper in points, so an
+  A4 painting prints on A4. File ▸ Print to PDF… panel (suggests
+  name.pdf) and the `PDF` scripting property; exports are typed
+  `application/pdf` and never touch document state. Selftest grew
+  46 → 58 (PDF structure: magic, MediaBox, image XObject, xref
+  offset; recent list ordering/round trip). The exported PDF was
+  fetched to the host and pixel-verified: strokes land at their
+  document coordinates, transparent canvas reads as white paper.
+- **Zoom:** 25–400% through the canvas's single mapping point —
+  render scales, input and the composite stay 1:1 data. View ▸ Zoom
+  presets (radio marks) and a `Zoom` get/set property that accepts a
+  factor or a percent. Verified live at 200% (pixel-counted strokes)
+  and through the smoke's round trip.
+- **Open Recent:** `PPRecent` (the ProseDraw pattern: most-recent-
+  first, deduped, capped at 8, persisted in user settings). Every
+  path adoption — open, panel save, scripted save — goes through one
+  funnel. Verified by the smoke's settings-file check.
+
+Smoke 8 → 11 steps, all green.
+
 ### Sprint 3 — polish
 
 Airbrush (flow + accumulation), stroke-buffer opacity (proper
@@ -116,8 +141,11 @@ pass on the composite.
 
 | ID | Test | Method | Pass |
 |---|---|---|---|
-| P01 | selftest | `--selftest` | PASS 46/46 |
+| P01 | selftest | `--selftest` | PASS 58/58 |
 | P02 | launch + render | launch, screenshot | PASS |
 | P03 | scripted strokes | StrokeLine → Pixel gets | PASS |
 | P04 | round trip | Save → relaunch with file → Pixel gets | PASS |
-| P05 | smoke | `prosepaint/tests/guest-smoke.sh` | PASS 8/8 |
+| P05 | smoke | `prosepaint/tests/guest-smoke.sh` | PASS 11/11 |
+| P06 | PDF export | `PDF do` → structure greps + host pixel verify | PASS |
+| P07 | zoom | scripting round trip + 200% pixel count | PASS |
+| P08 | recent files | settings file lists the run's saves | PASS |

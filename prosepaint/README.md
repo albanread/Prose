@@ -33,28 +33,40 @@ prosepaint/
 - **Undo/redo:** per-stroke dirty rectangles (before/after bytes of
   the touched region only — one full-layer snapshot during a stroke).
 - **Files:** atomic saves, `BEOS:TYPE` stamped, content sniffed
-  (`HMF1` + `&tPp`), `.paint` extension; launch-with-file opens.
-- **Scripting (the harness's brush):** `Tool`/`Brush`/`Colour` set,
-  `StrokeLine`/`Dab` do, `Layer` do (add/delete/up/down/visible/
-  opacity/rename), `Pixel` get (exact composite colour), `LayerCount`,
-  `Activate`, `Save`, `Open`, `Quit`.
-- **Selftest:** 46 checks (composite math, layer ops, dirty undo,
-  brush masks, stroke/erase/fill/smudge, persistence, sniffing).
+  (`HMF1` + `&tPp`), `.paint` extension; launch-with-file opens;
+  Open Recent (8 entries, persisted in user settings).
+- **Print to PDF (Sprint 2):** the flattened painting as one
+  Flate-compressed image page, MediaBox = the paper (A4 painting →
+  A4 PDF); transparent canvas reads as white paper. Via File ▸ Print
+  to PDF… or the `PDF` scripting property; exports are typed
+  `application/pdf`.
+- **Zoom (Sprint 2):** 25–400% (View ▸ Zoom presets; `Zoom`
+  scripting property, factor or percent) — the render scales, input
+  and the composite stay 1:1 data.
+- **Scripting (the harness's brush):** `Tool`/`Brush`/`Colour`/
+  `Zoom` set, `StrokeLine`/`Dab` do, `Layer` do (add/delete/up/down/
+  visible/opacity/rename), `Pixel` get (exact composite colour),
+  `LayerCount`, `Activate`, `Save`, `Open`, `PDF`, `Quit`.
+- **Selftest:** 58 checks (composite math, layer ops, dirty undo,
+  brush masks, stroke/erase/fill/smudge, PDF structure, persistence,
+  sniffing, recent list).
 
 ## Test status
 
 | ID | Test | Result |
 |---|---|---|
-| P01 | selftest | PASS 46/46 |
+| P01 | selftest | PASS 58/58 |
 | P02 | launch + render | PASS |
 | P03 | scripted strokes + pixel reads | PASS |
 | P04 | save → relaunch-with-file round trip | PASS |
-| P05 | `tests/guest-smoke.sh` | PASS 8/8 |
+| P05 | `tests/guest-smoke.sh` | PASS 11/11 |
+| P06 | PDF export (structure + host pixel verify) | PASS |
+| P07 | zoom (scripting + 200% render) | PASS |
+| P08 | recent files persisted | PASS |
 
 ## Not yet (planned — see docs/plan.md)
 
-PDF export (flattened image page), zoom, recent files (Sprint 2);
-airbrush/flow, stroke-buffer opacity, canvas resize, shape strokes
+Airbrush/flow, stroke-buffer opacity, canvas resize, shape strokes
 (Sprint 3). Painting by real mouse is human-owed on this guest
 (the pointer is dead — everything above is driven through the
 scripting surface).

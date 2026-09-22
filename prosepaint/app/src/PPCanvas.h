@@ -28,6 +28,11 @@ public:
 	void	SetSmudgeStrength(uint8 s) { fSmudgeStrength = s; }
 	void	SetFillTolerance(uint8 t) { fFillTolerance = t; }
 
+	// zoom: one mapping point (DocToView/ViewToDoc below); the render
+	// scales, the composite stays 1:1 data
+	void	SetZoom(float zoom);
+	float	Zoom() const { return fZoom; }
+
 	// scripted painting: one full stroke along a segment (the test
 	// workhorse — the guest's pointer is dead, the scripting IS the
 	// brush)
