@@ -14,6 +14,9 @@
 #   ~/Library/Application Support/Prose/Machines/Prose.image  the machine
 #   ~/Documents/HostFS                                        made by Prose, never touched
 #
+# and inside the machine, put-userguide.sh adds /boot/home/Desktop/
+# "Prose User Guide.pdf" — the guide ships with the thing it describes.
+#
 # and it can take them away again. Drag-and-drop could only ever replace the
 # application, which is how a newer Prose came to boot an older machine.
 #
@@ -52,7 +55,7 @@ APP_ID="${PROSE_SIGN_APP:-$(security find-identity -v -p codesigning 2>/dev/null
 
 notarize() {  # what it is, path
 	[ "$NOTARIZE" = 1 ] || { say "not notarizing $1 (--no-notarize)"; return 0; }
-	say "notarizing $1 with the “$PROFILE” profile (this waits for Apple)"
+	say "notarizing $1 with the “${PROFILE}” profile (this waits for Apple)"
 	local submission="$2"
 	if [ -d "$2" ]; then			# a bundle is submitted zipped
 		submission="$OUT/$(basename "$2").zip"
@@ -83,6 +86,11 @@ cp -R "$ROOT/build/Installer.app" "$INSTALLER"
 say "putting the machine inside Prose ($(du -m "$IMAGE" | cut -f1) MiB)"
 cp "$IMAGE" "$APP/Contents/Resources/prose.image"
 
+# the guide travels inside the machine it describes: /boot/home/Desktop from
+# the first boot. Runs on the copy above, before anything is signed.
+say "putting the user guide inside the machine"
+bash "$ROOT/scripts/put-userguide.sh" "$APP/Contents/Resources/prose.image"
+
 for bundle in "$APP" "$INSTALLER"; do
 	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SHORT" \
 		-c "Set :CFBundleVersion $VERSION" "$bundle/Contents/Info.plist" >/dev/null
@@ -91,7 +99,7 @@ done
 # ------------------------------------------------------- sign and notarize
 # Hardened runtime is what notarization requires; the virtualization
 # entitlement works inside it. Only Prose needs that entitlement.
-say "signing Prose as “$APP_ID”"
+say "signing Prose as “${APP_ID}”"
 codesign --force --timestamp --options runtime \
 	--entitlements "$ROOT/tools/common/vz.entitlements" --sign "$APP_ID" "$APP"
 codesign --verify --deep --strict "$APP"
@@ -101,12 +109,13 @@ say "putting Prose inside the installer"
 mkdir -p "$INSTALLER/Contents/Resources"
 cp -R "$APP" "$INSTALLER/Contents/Resources/Prose.app"
 
-say "signing the installer as “$APP_ID”"
+say "signing the installer as “${APP_ID}”"
 # inside out: the nested application is already signed and stapled, and sealing
 # the installer over it must not disturb that
 codesign --force --timestamp --options runtime --sign "$APP_ID" "$INSTALLER"
 codesign --verify --deep --strict "$INSTALLER"
-xcrun stapler validate "$INSTALLER/Contents/Resources/Prose.app" >/dev/null \
+[ "$NOTARIZE" = 0 ] || \
+	xcrun stapler validate "$INSTALLER/Contents/Resources/Prose.app" >/dev/null \
 	|| die "the nested Prose lost its ticket when the installer was signed"
 notarize "the installer" "$INSTALLER"
 

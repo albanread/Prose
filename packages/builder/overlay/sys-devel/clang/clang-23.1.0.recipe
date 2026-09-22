@@ -1,4 +1,4 @@
-SUMMARY="The clang C and C++ compiler, with the lld linker"
+SUMMARY="The clang C and C++ compiler, with the lld linker and the clangd language server"
 DESCRIPTION="clang compiles C, C++ and Objective-C, and lld links what it \
 compiles. Together they are a whole toolchain in two programs: clang \
 assembles the code it generates itself, so there is no separate assembler, \
@@ -6,16 +6,23 @@ and lld needs no help from anything else. The headers and libraries they \
 compile against are Haiku's own (haiku_devel), and the C++ runtime is the \
 one the system already carries (gcc_syslibs).
 
+clangd is the language server that knows what clang knows about a C or C++ \
+program: an editor that speaks the Language Server Protocol to it can \
+complete, jump to definitions and show diagnostics as the program is typed. \
+It links the same LLVM and clang libraries the compiler does, so it adds \
+one program and no libraries.
+
 This is Prose's own recipe. The community's llvm recipe builds the whole \
 LLVM project natively on Haiku, which cannot be done here: there is no \
 compiler on the machine yet to build it with. This one is cross-compiled on \
 the build host and holds what a person needs to compile a program on Prose \
--- clang, clang++, lld, and the LLVM tools that go with them -- and not the \
-libraries, bindings and runtimes that a compiler of LLVM itself wants."
+-- clang, clang++, lld, clangd, and the LLVM tools that go with them -- and \
+not the libraries, bindings and runtimes that a compiler of LLVM itself \
+wants."
 HOMEPAGE="https://llvm.org/"
 COPYRIGHT="2003-2026 LLVM contributors"
 LICENSE="Apache v2 with LLVM Exception"
-REVISION="1"
+REVISION="2"
 SOURCE_URI="https://github.com/llvm/llvm-project/releases/download/llvmorg-$portVersion/llvm-project-$portVersion.src.tar.xz"
 CHECKSUM_SHA256="ab1f0e3ec52448c33e8782eaf0422504b87c7b016b22514653ee0d8fcee479ff"
 SOURCE_DIR="llvm-project-$portVersion.src"
@@ -30,6 +37,7 @@ PROVIDES="
 	clang = $portVersion
 	cmd:clang = $portVersion
 	cmd:clang++ = $portVersion
+	cmd:clangd = $portVersion
 	cmd:ld.lld = $portVersion
 	cmd:llvm_ar = $portVersion
 	"
@@ -56,17 +64,20 @@ BUILD()
 	# the build host's own compiler, not the cross one the recipe environment
 	# provides. Anything missing here makes LLVM configure a second native
 	# build of its own inside the cross build, which then inherits the cross
-	# compiler and fails.
+	# compiler and fails. clang-tidy-confusable-chars-gen is of that kind:
+	# clang-tidy (in clang-tools-extra, with clangd) generates its table of
+	# look-alike characters with a program run while it builds.
 	local hostCMake=$(type -Pp cmake)
 	local hostTools="llvm-tblgen llvm-min-tblgen clang-tblgen clang llvm-as \
-		llvm-config llvm-link llvm-nm llvm-readobj opt"
+		llvm-config llvm-link llvm-nm llvm-readobj opt \
+		clang-tidy-confusable-chars-gen"
 
 	"$hostCMake" -S llvm -B build-native -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_C_COMPILER=/usr/bin/clang \
 		-DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
 		-DLLVM_TARGETS_TO_BUILD=AArch64 \
-		-DLLVM_ENABLE_PROJECTS="clang" \
+		-DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra" \
 		-DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
 		-DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
 		-DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -90,7 +101,7 @@ BUILD()
 		-DLLVM_HOST_TRIPLE="$effectiveTargetMachineTriple" \
 		-DLLVM_DEFAULT_TARGET_TRIPLE="$effectiveTargetMachineTriple" \
 		-DLLVM_TARGETS_TO_BUILD=AArch64 \
-		-DLLVM_ENABLE_PROJECTS="clang;lld" \
+		-DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld" \
 		-DLLVM_ENABLE_RUNTIMES="" \
 		-DLLVM_ENABLE_RTTI=ON \
 		-DLLVM_LINK_LLVM_DYLIB=ON \
@@ -122,7 +133,7 @@ INSTALL()
 	rm -f $libDir/libclang.so*
 
 	local keep="cc c++ clang clang++ clang-23 clang-cpp clang-format
-		clang-scan-deps ld.lld lld
+		clang-scan-deps clangd ld.lld lld
 		llvm-addr2line llvm-ar llvm-as llvm-config llvm-cov llvm-cxxfilt
 		llvm-dis llvm-dwarfdump llvm-link llvm-mc llvm-nm llvm-objcopy
 		llvm-objdump llvm-profdata llvm-ranlib llvm-readelf llvm-readobj llvm-size

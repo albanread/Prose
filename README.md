@@ -336,6 +336,7 @@ table there also records why each one exists.
 | 0091 | Themes: Manuscript and Manuscript Night, for long writing in the brand's colours, and High Contrast |
 | 0092 | Dark themes: disabled scroll bars stay dark, and StyledEdit's status bar follows a theme applied with the window open |
 | 0093 | virtio-sound: every play keeps real time (the node's clock was poisoned between sessions) |
+| 0094 | ProsePaint in Office; clangd beside clang |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

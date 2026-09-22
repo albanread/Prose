@@ -1,0 +1,61 @@
+SUMMARY="The painting application for Prose"
+DESCRIPTION="ProsePaint is a raster painting application for Prose: layers \
+of RGBA over a paper-sized canvas, pen, brush, airbrush and shapes, an \
+eraser to transparency, .paint documents with content sniffing, and PDF \
+export. It is developed in the Prose repository (prosepaint/) and packaged \
+from there; SOURCE_STATE in the source says which state of the tree this is."
+HOMEPAGE="https://github.com/albanread/Prose"
+COPYRIGHT="2026 The Prose project"
+LICENSE="MIT"
+REVISION="1"
+# The source is not fetched: make-source.sh beside this recipe packs the
+# committed state of prosepaint/app, and prosepkg reads a file:// source from the
+# recipe's own directory. Run it before building.
+SOURCE_URI="file://prosepaint-$portVersion.tar.gz"
+SOURCE_DIR="prosepaint-$portVersion"
+
+ARCHITECTURES="arm64 ?x86_64"
+
+PROVIDES="
+	prosepaint = $portVersion
+	app:ProsePaint = $portVersion
+	"
+REQUIRES="
+	haiku
+	lib:libz
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	devel:libz
+	"
+BUILD_PREREQUIRES="
+	cmd:g++
+	cmd:make
+	cmd:rc
+	cmd:xres
+	"
+
+BUILD()
+{
+	# The Makefile is the developers': it names the tree's cross compiler and
+	# a sysroot of its own. Here the compiler is the g++ on the PATH, prosepkg's
+	# wrapper, which knows where the headers and libraries are (zlib's among
+	# them), so those settings are replaced. The binary is checked for: an
+	# empty package looked like success once.
+	make $jobArgs XGXX=g++ INCS="-I. -Isrc" LIBS="" \
+		CXXFLAGS="-O2 -Wall -Wno-multichar -Wno-unused-parameter -Wno-missing-field-initializers -std=c++17" \
+		ProsePaint
+	test -x ProsePaint || { echo "ProsePaint did not build" >&2; exit 1; }
+	rc -o ProsePaint.rsrc ProsePaint.rdef
+	xres -o ProsePaint ProsePaint.rsrc
+}
+
+INSTALL()
+{
+	mkdir -p $appsDir
+	cp -a ProsePaint $appsDir/ProsePaint
+	settype -t application/x-vnd.Be-elfexecutable $appsDir/ProsePaint
+	mimeset -f $appsDir/ProsePaint
+	addAppDeskbarSymlink $appsDir/ProsePaint
+}
