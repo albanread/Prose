@@ -49,6 +49,7 @@ public:
 
 	// the composite changed: repaint (and only what changed)
 	void	DocChanged();
+	void	UpdateScrollBars();
 
 	BPoint	DocToView(BPoint p) const
 	{

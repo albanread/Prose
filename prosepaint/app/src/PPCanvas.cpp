@@ -44,11 +44,31 @@ PPCanvas::DocChanged()
 {
 	ResizeTo((fDoc->Width() + 2 * kMargin) * fZoom,
 		(fDoc->Height() + 2 * kMargin) * fZoom);
-	BScrollView* sc = dynamic_cast<BScrollView*>(Parent());
-	if (sc != NULL && sc->ScrollBar(B_VERTICAL) != NULL)
-		sc->ScrollBar(B_VERTICAL)->SetRange(0,
-			std::max(0.0f, Bounds().Height() - sc->Bounds().Height()));
+	UpdateScrollBars();
 	Invalidate();
+}
+
+
+/*!	Both scroll bars, always: the range is what makes a bar a bar -- a bar
+	whose range was never set (the horizontal one, until now) shows no knob
+	and pans nothing, which reads as the canvas having paved over it.
+*/
+void
+PPCanvas::UpdateScrollBars()
+{
+	BScrollView* sc = dynamic_cast<BScrollView*>(Parent());
+	if (sc == NULL)
+		return;
+	float rangeX = std::max(0.0f, Bounds().Width() - sc->Bounds().Width());
+	float rangeY = std::max(0.0f, Bounds().Height() - sc->Bounds().Height());
+	if (BScrollBar* bar = sc->ScrollBar(B_HORIZONTAL)) {
+		bar->SetRange(0, rangeX);
+		bar->SetProportion(sc->Bounds().Width() / Bounds().Width());
+	}
+	if (BScrollBar* bar = sc->ScrollBar(B_VERTICAL)) {
+		bar->SetRange(0, rangeY);
+		bar->SetProportion(sc->Bounds().Height() / Bounds().Height());
+	}
 }
 
 // ------------------------------------------------------------------ draw --

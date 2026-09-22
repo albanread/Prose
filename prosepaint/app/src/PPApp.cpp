@@ -553,10 +553,15 @@ PPWindow::LayoutChildren()
 	fProps->MoveTo(Bounds().right - 220, menuH);
 	fLayers->MoveTo(Bounds().right - 220, menuH + 330);
 	fScroll->MoveTo(84, menuH);
-	fScroll->ResizeTo(Bounds().right - 220 - 84,
-		Bounds().bottom - 18 - menuH + 1);
-	if (fCanvas != NULL)
+	// exactly to the window's bottom edge: this app has no status strip (the
+	// status lives in the title), and the +1 that ProseDraw once grew past
+	// its chrome by is not repeated here
+	fScroll->ResizeTo(Bounds().right - 220 - 84, Bounds().bottom - menuH);
+	if (fCanvas != NULL) {
+		// the bars' ranges span the scroll view, which just changed size
+		fCanvas->UpdateScrollBars();
 		fCanvas->Invalidate();
+	}
 }
 
 void
