@@ -71,7 +71,16 @@ LspSession::Start(const char* clangdPath)
 
 		char argLog[] = "--log=error";
 		char argIndex[] = "--background-index=false";
-		char* argv[] = { (char*)"clangd", argIndex, argLog, NULL };
+		// A question that arrives before clangd has parsed the file -- a
+		// document just opened, the first question of a session -- is
+		// otherwise answered in its "fallback" mode: words from the text and
+		// keywords, no meaning at all, so after "p." it offers "struct". Wait
+		// for the parse instead: the answer is a moment later and right.
+		char argParse[] = "--completion-parse=always";
+		// completions are names, not edits to the file's #include lines
+		char argHeaders[] = "--header-insertion=never";
+		char* argv[] = { (char*)"clangd", argIndex, argParse, argHeaders,
+			argLog, NULL };
 		execv(clangdPath, argv);
 
 		// _exit, not exit: we are a fork of a program with other threads and
