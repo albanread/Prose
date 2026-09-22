@@ -1,0 +1,6 @@
+# built on this Mac by make: objects, dependencies, resources, the programs
+*.o
+*.d
+*.rsrc
+app/clangd_server
+app/clangd_client

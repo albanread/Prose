@@ -1,0 +1,2 @@
+resource app_signature "application/x-vnd.prose.clangd_server";
+resource app_flags B_SINGLE_LAUNCH;
