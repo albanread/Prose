@@ -1,0 +1,471 @@
+From 9ad64101f54753b37a6d237d15cd55055a8b1e5c Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 19:41:37 +0100
+Subject: [PATCH] Retro: a demo of the game pane
+
+An indexed sky whose colour comes from the scanline palette, so a raster
+bar costs one palette write a line rather than a repaint; hills drawn a
+column at a time; a keyed blit; and a sprite the host scales and turns.
+1, 2 and 3 switch the filter between plain, scanlines and a tube.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0104-retro-a-demo-of-the-game-pane.patch 4d169a0af9e478255d10cb20f277b6ab83c5911afa7ef24bd583cb66625783ac
+---
+ build/jam/DeskbarCategories          |   3 +-
+ build/jam/images/definitions/regular |   2 +
+ src/apps/Jamfile                     |   1 +
+ src/apps/retro/Jamfile               |   7 +
+ src/apps/retro/Retro.cpp             | 356 +++++++++++++++++++++++++++
+ src/apps/retro/Retro.rdef            |  18 ++
+ 6 files changed, 386 insertions(+), 1 deletion(-)
+ create mode 100644 src/apps/retro/Jamfile
+ create mode 100644 src/apps/retro/Retro.cpp
+ create mode 100644 src/apps/retro/Retro.rdef
+
+diff --git a/build/jam/DeskbarCategories b/build/jam/DeskbarCategories
+index 4b8e18d79c..4480a57d5b 100644
+--- a/build/jam/DeskbarCategories
++++ b/build/jam/DeskbarCategories
+@@ -79,9 +79,10 @@ DESKBAR_CATEGORY_Games =
+ 	Connect4
+ 	HexVexed
+ 	LightsOff
+-	ProseOthello
+ 	Minesweeper
+ 	Peggy
++	ProseOthello
++	Retro
+ 	W6
+ 	;
+ 
+diff --git a/build/jam/images/definitions/regular b/build/jam/images/definitions/regular
+index f214790ad7..b56c45347c 100644
+--- a/build/jam/images/definitions/regular
++++ b/build/jam/images/definitions/regular
+@@ -48,6 +48,7 @@ SYSTEM_APPS += [ FFilterByBuildFeatures
+ 	PoorMan
+ 	PowerStatus
+ 	RemoteDesktop
++	Retro
+ 	Screenshot
+ 	SerialConnect
+ 	SoftwareUpdater
+@@ -66,6 +67,7 @@ DESKBAR_APPLICATIONS +=
+ 	MidiPlayer
+ 	People
+ 	PoorMan
++	Retro
+ 	SerialConnect
+ 	SoftwareUpdater
+ 	SoundRecorder
+diff --git a/src/apps/Jamfile b/src/apps/Jamfile
+index c883cf7b07..fb4b41fd17 100644
+--- a/src/apps/Jamfile
++++ b/src/apps/Jamfile
+@@ -46,6 +46,7 @@ HaikuSubInclude processcontroller ;
+ HaikuSubInclude pulse ;
+ HaikuSubInclude remotedesktop ;
+ HaikuSubInclude resedit ;
++HaikuSubInclude retro ;
+ HaikuSubInclude screenshot ;
+ HaikuSubInclude serialconnect ;
+ HaikuSubInclude showimage ;
+diff --git a/src/apps/retro/Jamfile b/src/apps/retro/Jamfile
+new file mode 100644
+index 0000000000..c2b903f52d
+--- /dev/null
++++ b/src/apps/retro/Jamfile
+@@ -0,0 +1,7 @@
++SubDir HAIKU_TOP src apps retro ;
++
++Application Retro :
++	Retro.cpp
++	: be game [ TargetLibstdc++ ] [ TargetLibsupc++ ]
++	: Retro.rdef
++;
+diff --git a/src/apps/retro/Retro.cpp b/src/apps/retro/Retro.cpp
+new file mode 100644
+index 0000000000..2a08ac236f
+--- /dev/null
++++ b/src/apps/retro/Retro.cpp
+@@ -0,0 +1,356 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Retro: what a game pane does. An indexed world buffer with a per-scanline
++ * sky, hills drawn a column at a time, a keyed blit, a host-transformed
++ * sprite, and a CRT filter — all of it eight bits per pixel, none of it
++ * copied on its way to the screen.
++ *
++ * 1, 2, 3   the filter: plain, scanlines, tube
++ * space     stop and start the scroll
++ */
++
++
++#include <Alert.h>
++#include <Application.h>
++#include <GamePane.h>
++#include <View.h>
++
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++
++static const char* kSignature = "application/x-vnd.Prose-Retro";
++
++static const uint32 kWorldWidth = 640;
++static const uint32 kWorldHeight = 200;
++static const uint32 kViewWidth = 320;
++static const uint32 kViewHeight = 200;
++static const uint32 kHorizon = 120;
++
++// Index 0 is transparent, 1 is the sky (its colour comes from the row), and
++// everything from 16 up is a global colour.
++enum {
++	kSky		= 1,
++	kGround		= 16,
++	kHill		= 17,
++	kHillLit	= 18,
++	kStar		= 19,
++	kLogo		= 20,
++	kShipFirst	= 24		// the ship's eight
++};
++
++static const uint32 kStars = 120;
++
++
++class RetroPane : public BGamePane {
++public:
++								RetroPane();
++	virtual						~RetroPane();
++
++	virtual	bool				QuitRequested();
++
++			void				Key(int32 key);
++			void				Loop();
++
++private:
++			void				_MakePalette();
++			void				_MakeShip();
++			void				_MakeLogo();
++			void				_DrawSky(double t);
++			void				_DrawLand();
++			void				_DrawStars(int32 frame);
++
++			thread_id			fThread;
++			bool				fQuit;
++			bool				fScrolling;
++			int32				fShip;
++			uint8				fLogo[32 * 32];
++			int32				fStarX[kStars];
++			int32				fStarY[kStars];
++};
++
++
++class KeyView : public BView {
++public:
++	KeyView(BRect frame)
++		:
++		BView(frame, "keys", B_FOLLOW_ALL, B_WILL_DRAW)
++	{
++		// The pane is composited over this, so whatever it leaves transparent
++		// shows the window itself: black is the honest background for a game.
++		SetViewColor(0, 0, 0);
++	}
++
++	virtual void AttachedToWindow() { MakeFocus(true); }
++
++	virtual void KeyDown(const char* bytes, int32 numBytes)
++	{
++		if (numBytes == 1)
++			((RetroPane*)Window())->Key(bytes[0]);
++		else
++			BView::KeyDown(bytes, numBytes);
++	}
++};
++
++
++static int32
++retro_thread(void* data)
++{
++	((RetroPane*)data)->Loop();
++	return 0;
++}
++
++
++RetroPane::RetroPane()
++	:
++	BGamePane(BRect(0, 0, kViewWidth * 2 - 1, kViewHeight * 2 - 1), "Retro",
++		kWorldWidth, kWorldHeight, 2, B_GAME_PANE_SCANLINE_PALETTE),
++	fThread(-1),
++	fQuit(false),
++	fScrolling(true),
++	fShip(-1)
++{
++	AddChild(new KeyView(Bounds()));
++	CenterOnScreen();
++
++	if (InitCheck() != B_OK)
++		return;
++
++	SetView(kViewWidth, kViewHeight);
++	SetEffect(B_GAME_PANE_CRT);
++	_MakePalette();
++	_MakeShip();
++	_MakeLogo();
++
++	srand(1);
++	for (uint32 i = 0; i < kStars; i++) {
++		fStarX[i] = rand() % kWorldWidth;
++		fStarY[i] = rand() % (kHorizon - 8);
++	}
++
++	fThread = spawn_thread(retro_thread, "retro", B_DISPLAY_PRIORITY, this);
++	if (fThread >= 0)
++		resume_thread(fThread);
++}
++
++
++RetroPane::~RetroPane()
++{
++	fQuit = true;
++	if (fThread >= 0)
++		wait_for_thread(fThread, NULL);
++}
++
++
++bool
++RetroPane::QuitRequested()
++{
++	fQuit = true;
++	if (fThread >= 0) {
++		wait_for_thread(fThread, NULL);
++		fThread = -1;
++	}
++	be_app->PostMessage(B_QUIT_REQUESTED);
++	return true;
++}
++
++
++void
++RetroPane::Key(int32 key)
++{
++	switch (key) {
++		case '1': SetEffect(B_GAME_PANE_PLAIN); break;
++		case '2': SetEffect(B_GAME_PANE_SCANLINES); break;
++		case '3': SetEffect(B_GAME_PANE_CRT); break;
++		case ' ': fScrolling = !fScrolling; break;
++		case B_ESCAPE: PostMessage(B_QUIT_REQUESTED); break;
++	}
++}
++
++
++//	#pragma mark - the artwork
++
++
++void
++RetroPane::_MakePalette()
++{
++	rgb_color ground = { 24, 40, 24, 255 };
++	rgb_color hill = { 40, 64, 40, 255 };
++	rgb_color lit = { 96, 128, 72, 255 };
++	rgb_color star = { 255, 255, 224, 255 };
++	rgb_color logo = { 255, 176, 32, 255 };
++	SetColor(kGround, ground);
++	SetColor(kHill, hill);
++	SetColor(kHillLit, lit);
++	SetColor(kStar, star);
++	SetColor(kLogo, logo);
++
++	// the ship: a ramp from deep red to white hot
++	for (uint32 i = 0; i < 8; i++) {
++		rgb_color c;
++		c.red = 120 + i * 19;
++		c.green = i * 32;
++		c.blue = i * 28;
++		c.alpha = 255;
++		SetColor(kShipFirst + i, c);
++	}
++}
++
++
++void
++RetroPane::_MakeShip()
++{
++	// A blunt little delta, shaded from its nose back.
++	uint8 pixels[16 * 16];
++	memset(pixels, 0, sizeof(pixels));
++	for (uint32 y = 0; y < 16; y++) {
++		uint32 half = y / 2 + 1;
++		for (uint32 x = 8 - half; x < 8 + half && x < 16; x++) {
++			uint32 shade = 7 - (y * 7) / 15;
++			pixels[y * 16 + x] = kShipFirst + shade;
++		}
++	}
++	fShip = DefineSprite(pixels, 16, 16);
++}
++
++
++void
++RetroPane::_MakeLogo()
++{
++	// Something to blit: a keyed checkerboard ring, transparent in the middle.
++	memset(fLogo, 0, sizeof(fLogo));
++	for (uint32 y = 0; y < 32; y++) {
++		for (uint32 x = 0; x < 32; x++) {
++			float dx = (float)x - 15.5f, dy = (float)y - 15.5f;
++			float r = sqrtf(dx * dx + dy * dy);
++			if (r > 9.0f && r < 15.0f && ((x / 4 + y / 4) & 1) == 0)
++				fLogo[y * 32 + x] = kLogo;
++		}
++	}
++}
++
++
++//	#pragma mark - the frame
++
++
++void
++RetroPane::_DrawSky(double t)
++{
++	// One index for the whole sky; the colour comes from the row. A raster bar
++	// is then a palette write per line, not a repaint.
++	FillRect(0, 0, kWorldWidth, kHorizon, kSky);
++	double bar = fmod(t * 40.0, (double)kHorizon + 40.0) - 20.0;
++	for (uint32 y = 0; y < kHorizon; y++) {
++		float k = (float)y / kHorizon;
++		rgb_color c;
++		c.red = (uint8)(8 + k * 120);
++		c.green = (uint8)(12 + k * 60);
++		c.blue = (uint8)(48 + k * 90);
++		c.alpha = 255;
++		double d = fabs((double)y - bar);
++		if (d < 14.0) {
++			float glow = (float)(1.0 - d / 14.0);
++			c.red = (uint8)min_c(255.0f, c.red + glow * 200);
++			c.green = (uint8)min_c(255.0f, c.green + glow * 150);
++			c.blue = (uint8)min_c(255.0f, c.blue + glow * 60);
++		}
++		SetScanlineColor(y, kSky, c);
++	}
++}
++
++
++void
++RetroPane::_DrawLand()
++{
++	FillRect(0, kHorizon, kWorldWidth, kWorldHeight - kHorizon, kGround);
++	for (uint32 x = 0; x < kWorldWidth; x++) {
++		double a = sin(x * 0.013) * 18.0 + sin(x * 0.041 + 1.3) * 9.0
++			+ sin(x * 0.007 + 0.4) * 24.0;
++		int32 top = (int32)(kHorizon - 4 + a);
++		if (top < 0)
++			top = 0;
++		if ((uint32)top >= kWorldHeight)
++			continue;
++		FillRect(x, top, 1, kWorldHeight - top, kHill);
++		FillRect(x, top, 1, 2, kHillLit);
++	}
++}
++
++
++void
++RetroPane::_DrawStars(int32 frame)
++{
++	for (uint32 i = 0; i < kStars; i++) {
++		if (((frame / 6) + i) % 17 == 0)
++			continue;			// a slow twinkle
++		Plot(fStarX[i], fStarY[i], kStar);
++	}
++}
++
++
++void
++RetroPane::Loop()
++{
++	int32 frame = 0;
++	int32 scroll = 0;
++	bigtime_t start = system_time();
++
++	while (!fQuit) {
++		double t = (system_time() - start) / 1000000.0;
++
++		_DrawSky(t);
++		_DrawStars(frame);
++		_DrawLand();
++
++		// the CPU blitter, keyed: the ring keeps the sky behind it
++		Blit(fLogo, 32, (int32)(scroll + 24), (int32)(20 + sin(t * 1.7) * 8.0),
++			32, 32, B_GAME_COPY_KEYED);
++
++		// and a sprite, which the host scales and turns
++		if (fShip >= 0) {
++			ClearSprites();
++			DrawSprite(fShip, scroll + kViewWidth / 2 - 16,
++				(int32)(70 + sin(t * 2.3) * 22.0), 2.0f, (float)sin(t) * 0.35f);
++		}
++
++		SetScroll(scroll, 0);
++		Present();
++		if (WaitForRetrace() != B_OK)
++			snooze(16000);
++
++		if (fScrolling) {
++			scroll += 1;
++			if (scroll > (int32)(kWorldWidth - kViewWidth) || scroll < 0)
++				scroll = 0;
++		}
++		frame++;
++	}
++}
++
++
++//	#pragma mark -
++
++
++int
++main()
++{
++	BApplication app(kSignature);
++	RetroPane* pane = new RetroPane();
++	if (pane->InitCheck() != B_OK) {
++		char text[256];
++		snprintf(text, sizeof(text), "Retro needs the Prose display: no game "
++			"pane here (%s).", strerror(pane->InitCheck()));
++		pane->Quit();
++		BAlert* alert = new BAlert("Retro", text, "All right");
++		alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
++		alert->Go();
++		return 1;
++	}
++	pane->Show();
++	app.Run();
++	return 0;
++}
+diff --git a/src/apps/retro/Retro.rdef b/src/apps/retro/Retro.rdef
+new file mode 100644
+index 0000000000..55a1e17962
+--- /dev/null
++++ b/src/apps/retro/Retro.rdef
+@@ -0,0 +1,18 @@
++
++resource app_signature "application/x-vnd.Prose-Retro";
++
++resource app_name_catalog_entry "x-vnd.Prose-Retro:System name:Retro";
++
++resource app_version {
++	major  = 1,
++	middle = 0,
++	minor  = 0,
++
++	variety = B_APPV_FINAL,
++	internal = 0,
++
++	short_info = "Retro",
++	long_info  = "Retro — what a game pane does"
++};
++
++resource app_flags B_SINGLE_LAUNCH;

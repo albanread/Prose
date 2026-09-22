@@ -1,0 +1,567 @@
+From 0ab375765bec99456d7b789b6e9e7b2f91493630 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 19:41:28 +0100
+Subject: [PATCH] prose_display: a game-pane arena and the pane commands
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The pool already held app_server's two buffers; what is left of it after
+them is now an arena a program can ask for a piece of. A pane is one
+allocation — its world buffers, its palette and its sprites — and every
+offset the client sends is relative to it, so nothing above the kit
+thinks in pool offsets.
+
+Four commands forward to the host (create, configure, present, destroy)
+and four ioctls carry them, plus a retrace semaphore of its own so a
+game waiting for vsync does not eat app_server's. Panes are bounds
+checked against the pool, only their owning team may move or present
+them, and one whose team has died is reclaimed — a game that crashes
+must not leave a picture composited over the desktop.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0102-prose-display-a-game-pane-arena-and-the-pane-commands.patch b1b746a9d73809626ace44d04b1d0678eb56a0cbf209270c95f695961a2ddc01
+---
+ .../graphics/prose_display/prose_display.h    | 135 +++++++++
+ .../graphics/prose_display/prose_display.cpp  | 283 ++++++++++++++++++
+ 2 files changed, 418 insertions(+)
+
+diff --git a/headers/private/graphics/prose_display/prose_display.h b/headers/private/graphics/prose_display/prose_display.h
+index caa62751e8..7c0597fb7f 100644
+--- a/headers/private/graphics/prose_display/prose_display.h
++++ b/headers/private/graphics/prose_display/prose_display.h
+@@ -28,12 +28,39 @@
+ #define PRDS_MAX_COMMIT_RECTS		64
+ #define PRDS_EVENT_SIZE				32
+ 
++/* Game panes: an 8-bit indexed surface in the pool, composited by the host's
++   GPU over the desktop. See HaikuArmQemu/docs/game-pane.md. */
++#define PRDS_MAX_PANES				8
++#define PRDS_MAX_CLIP_RECTS			32
++#define PRDS_MAX_SPRITES			64
++#define PRDS_PANE_BUFFERS_MAX		3
++
++#define PRDS_PANE_INDEXED8			1	/* one byte per pixel, 0 transparent */
++#define PRDS_PANE_B8G8R8X8			2	/* four bytes per pixel, opaque */
++
++#define PRDS_PANE_F_VISIBLE			(1 << 0)
++#define PRDS_PANE_F_SCANLINE		(1 << 1)	/* indices 1-15 from the per-row palette */
++#define PRDS_PANE_F_FULLSCREEN		(1 << 2)	/* covers the screen: skip the desktop pass */
++
++#define PRDS_EFFECT_NONE			0
++#define PRDS_EFFECT_SCANLINES		1
++#define PRDS_EFFECT_CRT				2
++
++#define PRDS_SPRITE_F_SCREEN		(1 << 0)	/* placed in view space, unaffected by scroll */
++#define PRDS_SPRITE_F_FLIP_X		(1 << 1)
++#define PRDS_SPRITE_F_FLIP_Y		(1 << 2)
++
+ enum {
+ 	PRDS_CMD_SET_MODE			= 0x0100,
+ 	PRDS_CMD_COMMIT				= 0x0101,
+ 	PRDS_CMD_ENABLE_EVENTS		= 0x0102,
+ 	PRDS_CMD_GET_INFO			= 0x0103,
+ 
++	PRDS_CMD_PANE_CREATE		= 0x0200,
++	PRDS_CMD_PANE_CONFIG		= 0x0201,
++	PRDS_CMD_PANE_PRESENT		= 0x0202,
++	PRDS_CMD_PANE_DESTROY		= 0x0203,
++
+ 	PRDS_RESP_OK				= 0x1000,
+ 	PRDS_RESP_ERR_INVALID		= 0x1100,
+ 	PRDS_RESP_ERR_UNSUPPORTED	= 0x1101,
+@@ -107,6 +134,66 @@ struct prds_enable_events {
+ 	uint32	reserved;
+ } _PACKED;
+ 
++struct prds_pane_create {
++	struct prds_hdr	hdr;
++	uint32	pane_id;
++	uint32	format;
++	uint32	world_width;
++	uint32	world_height;
++	uint32	stride;				/* bytes per row of one world buffer */
++	uint32	buffers;			/* 1..PRDS_PANE_BUFFERS_MAX */
++	uint64	offset;				/* pool offset of buffer 0 */
++	uint64	buffer_stride;		/* bytes between buffer n and n+1 */
++	uint64	palette_offset;		/* pool offset of 256 + world_height * 16 BGRA entries */
++} _PACKED;
++
++struct prds_pane_config {
++	struct prds_hdr	hdr;
++	uint32	pane_id;
++	uint32	flags;
++	int32	dest_x;				/* top left on the guest's screen, in guest pixels */
++	int32	dest_y;
++	uint32	dest_width;			/* size on screen; the view is scaled to fill it */
++	uint32	dest_height;
++	uint32	view_width;			/* how much of the world is shown */
++	uint32	view_height;
++	int32	scroll_x;			/* top left of the view within the world */
++	int32	scroll_y;
++	uint32	effect;
++	uint32	clip_count;			/* 0: nothing is visible */
++	struct prds_rect	clip[PRDS_MAX_CLIP_RECTS];	/* screen pixels */
++} _PACKED;
++
++struct prds_pane_present {
++	struct prds_hdr	hdr;
++	uint32	pane_id;
++	uint32	buffer_index;
++	uint32	sprite_count;
++	uint32	reserved;
++	uint64	sprite_offset;		/* pool offset of sprite_count prds_sprite */
++} _PACKED;
++
++struct prds_pane_destroy {
++	struct prds_hdr	hdr;
++	uint32	pane_id;
++	uint32	reserved;
++} _PACKED;
++
++/* A sprite lives in the pool, so a present carries no pixels. */
++struct prds_sprite {
++	int32	x;					/* world pixels, or view pixels with F_SCREEN */
++	int32	y;
++	uint32	width;
++	uint32	height;
++	uint64	offset;				/* pool offset of the sprite's 8-bit pixels */
++	uint32	stride;
++	uint32	flags;
++	float	scale;				/* 1.0 = one world pixel per sprite pixel */
++	float	rotation;			/* radians, about the sprite's centre */
++	float	alpha;				/* 0..1 */
++	uint32	palette_base;		/* added to each non-zero index */
++} _PACKED;
++
+ struct prds_resp {
+ 	struct prds_hdr	hdr;
+ } _PACKED;
+@@ -159,6 +246,49 @@ struct prds_mode_hint {
+ 	bigtime_t		timeout;			/* in: how long to wait for a new hint */
+ };
+ 
++/* One allocation holds a pane's buffers, palette and sprites; every offset the
++   client gives is relative to it, so nothing outside the kit thinks in pool
++   offsets. The pool itself arrives through PRDS_CLONE_POOL. */
++struct prds_pane_alloc {
++	uint64	size;				/* in: bytes of arena wanted */
++	uint32	format;				/* in */
++	uint32	world_width;		/* in */
++	uint32	world_height;		/* in */
++	uint32	stride;				/* in */
++	uint32	buffers;			/* in */
++	uint32	reserved;
++	uint64	buffer_offset;		/* in: buffer 0, within the allocation */
++	uint64	buffer_stride;		/* in */
++	uint64	palette_offset;		/* in: within the allocation */
++	uint64	pool_offset;		/* out: where the allocation landed */
++	uint32	pane_id;			/* out */
++	uint32	reserved2;
++};
++
++struct prds_pane_config_request {
++	uint32	pane_id;
++	uint32	flags;
++	int32	dest_x;
++	int32	dest_y;
++	uint32	dest_width;
++	uint32	dest_height;
++	uint32	view_width;
++	uint32	view_height;
++	int32	scroll_x;
++	int32	scroll_y;
++	uint32	effect;
++	uint32	clip_count;
++	struct prds_rect	clip[PRDS_MAX_CLIP_RECTS];
++};
++
++struct prds_pane_present_request {
++	uint32	pane_id;
++	uint32	buffer_index;
++	uint32	sprite_count;
++	uint32	reserved;
++	uint64	sprite_offset;		/* within the allocation */
++};
++
+ struct prds_commit_request {
+ 	uint32				rect_count;		/* 0: the whole surface */
+ 	struct prds_rect	rects[PRDS_MAX_COMMIT_RECTS];
+@@ -173,6 +303,11 @@ enum {
+ 	PRDS_COMMIT,										/* prds_commit_request* */
+ 	PRDS_ENABLE_EVENTS,									/* uint32* mask */
+ 	PRDS_WAIT_MODE_HINT,								/* prds_mode_hint*: blocks until the next hint or timeout */
++	PRDS_PANE_ALLOC,									/* prds_pane_alloc* */
++	PRDS_PANE_CONFIGURE,								/* prds_pane_config_request* */
++	PRDS_PANE_PRESENT,									/* prds_pane_present_request* */
++	PRDS_PANE_FREE,										/* uint32* pane_id */
++	PRDS_PANE_WAIT_RETRACE,								/* bigtime_t*: blocks until vsync or timeout */
+ };
+ 
+ 
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index c6b3410062..6e4129ae83 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -43,6 +43,15 @@
+ #define ALIGN_UP(x, a) ((((x) + (a) - 1) / (a)) * (a))
+ 
+ 
++// A game pane's arena allocation, and who owns it. See docs/game-pane.md.
++struct prds_pane {
++	bool						used;
++	team_id						team;
++	uint64						offset;			// in the pool
++	uint64						size;
++};
++
++
+ struct prds_info {
+ 	device_node*				node;
+ 	int32						id;
+@@ -75,6 +84,7 @@ struct prds_info {
+ 	struct prds_shared_info*	shared;
+ 	sem_id						retrace_sem;
+ 	sem_id						hint_sem;			// kernel-owned, waited on inside ioctl
++	sem_id						pane_retrace_sem;	// kernel-owned: game panes wait here
+ 
+ 	uint32						mode_width;
+ 	uint32						mode_height;
+@@ -86,6 +96,11 @@ struct prds_info {
+ 	int64						redraw_count;
+ 	int32						need_redraw;
+ 
++	uint64						arena_offset;		// the game-pane arena: pool after app_server
++	uint64						arena_size;
++	mutex						pane_lock;
++	struct prds_pane			panes[PRDS_MAX_PANES];
++
+ 	thread_id					test_thread;
+ 	bool						quit;
+ };
+@@ -157,6 +172,8 @@ prds_event_callback(void* driverCookie, void* cookie)
+ 				int32 waiting;
+ 				if (get_sem_count(info->retrace_sem, &waiting) == B_OK && waiting < 0)
+ 					release_sem_etc(info->retrace_sem, -waiting, B_DO_NOT_RESCHEDULE);
++				if (get_sem_count(info->pane_retrace_sem, &waiting) == B_OK && waiting < 0)
++					release_sem_etc(info->pane_retrace_sem, -waiting, B_DO_NOT_RESCHEDULE);
+ 				break;
+ 			}
+ 			case PRDS_EVT_MODE_HINT:
+@@ -277,6 +294,208 @@ prds_enable_events(prds_info* info, uint32 mask)
+ }
+ 
+ 
++//	#pragma mark - game panes
++
++
++/// Panes whose team has gone take their pixels with them: a game that crashes
++/// must not leave a picture composited over the desktop for ever.
++static void
++prds_pane_reap(prds_info* info)
++{
++	for (uint32 i = 0; i < PRDS_MAX_PANES; i++) {
++		team_info teamInfo;
++		if (!info->panes[i].used || get_team_info(info->panes[i].team, &teamInfo) == B_OK)
++			continue;
++		struct prds_pane_destroy request = {};
++		struct prds_resp response = {};
++		request.hdr.type = PRDS_CMD_PANE_DESTROY;
++		request.pane_id = i;
++		prds_command(info, &request, sizeof(request), &response, sizeof(response));
++		INFO("pane %" B_PRIu32 ": owner gone, reclaimed\n", i);
++		info->panes[i].used = false;
++	}
++}
++
++
++/// First fit over the arena. Eight panes at most, so a linear scan of the
++/// in-use ranges is the whole allocator.
++static status_t
++prds_pane_alloc(prds_info* info, struct prds_pane_alloc* alloc)
++{
++	if (info->arena_size == 0)
++		return B_DEVICE_NOT_FOUND;
++	if (alloc->size == 0 || alloc->size > info->arena_size)
++		return B_BAD_VALUE;
++	if (alloc->buffers < 1 || alloc->buffers > PRDS_PANE_BUFFERS_MAX)
++		return B_BAD_VALUE;
++	if (alloc->world_width == 0 || alloc->world_height == 0)
++		return B_BAD_VALUE;
++	if (alloc->format != PRDS_PANE_INDEXED8 && alloc->format != PRDS_PANE_B8G8R8X8)
++		return B_BAD_VALUE;
++
++	MutexLocker locker(info->pane_lock);
++	prds_pane_reap(info);
++
++	uint64 size = ALIGN_UP(alloc->size, PRDS_SHM_ALIGNMENT);
++	int32 slot = -1;
++	for (uint32 i = 0; i < PRDS_MAX_PANES && slot < 0; i++) {
++		if (!info->panes[i].used)
++			slot = i;
++	}
++	if (slot < 0)
++		return B_BUSY;
++
++	// walk the arena from the bottom, stepping over every in-use range
++	uint64 at = info->arena_offset;
++	bool moved = true;
++	while (moved) {
++		moved = false;
++		for (uint32 i = 0; i < PRDS_MAX_PANES; i++) {
++			if (!info->panes[i].used)
++				continue;
++			uint64 end = info->panes[i].offset + info->panes[i].size;
++			if (at < end && at + size > info->panes[i].offset) {
++				at = end;
++				moved = true;
++			}
++		}
++	}
++	if (at + size > info->arena_offset + info->arena_size)
++		return B_NO_MEMORY;
++
++	// the layout the client asked for has to stay inside its allocation
++	if (alloc->buffer_offset >= size || alloc->palette_offset >= size
++		|| alloc->stride < (alloc->format == PRDS_PANE_B8G8R8X8
++			? alloc->world_width * 4 : alloc->world_width)
++		|| alloc->buffer_stride < (uint64)alloc->stride * alloc->world_height
++		|| alloc->buffer_offset + alloc->buffer_stride * alloc->buffers > size)
++		return B_BAD_VALUE;
++
++	struct prds_pane_create request = {};
++	struct prds_resp response = {};
++	request.hdr.type = PRDS_CMD_PANE_CREATE;
++	request.pane_id = slot;
++	request.format = alloc->format;
++	request.world_width = alloc->world_width;
++	request.world_height = alloc->world_height;
++	request.stride = alloc->stride;
++	request.buffers = alloc->buffers;
++	request.offset = at + alloc->buffer_offset;
++	request.buffer_stride = alloc->buffer_stride;
++	request.palette_offset = at + alloc->palette_offset;
++	status_t status = prds_command(info, &request, sizeof(request), &response, sizeof(response));
++	if (status != B_OK)
++		return status;
++
++	thread_info threadInfo;
++	get_thread_info(find_thread(NULL), &threadInfo);
++	info->panes[slot].used = true;
++	info->panes[slot].team = threadInfo.team;
++	info->panes[slot].offset = at;
++	info->panes[slot].size = size;
++	alloc->pool_offset = at;
++	alloc->pane_id = slot;
++	INFO("pane %" B_PRId32 ": %" B_PRIu32 "x%" B_PRIu32 ", %" B_PRIu64 " KiB at pool offset %#"
++		B_PRIx64 "\n", slot, alloc->world_width, alloc->world_height, size >> 10, at);
++	return B_OK;
++}
++
++
++static status_t
++prds_pane_free(prds_info* info, uint32 id)
++{
++	if (id >= PRDS_MAX_PANES)
++		return B_BAD_VALUE;
++	MutexLocker locker(info->pane_lock);
++	if (!info->panes[id].used)
++		return B_BAD_VALUE;
++	thread_info threadInfo;
++	if (get_thread_info(find_thread(NULL), &threadInfo) != B_OK
++		|| threadInfo.team != info->panes[id].team)
++		return B_PERMISSION_DENIED;
++	struct prds_pane_destroy request = {};
++	struct prds_resp response = {};
++	request.hdr.type = PRDS_CMD_PANE_DESTROY;
++	request.pane_id = id;
++	status_t status = prds_command(info, &request, sizeof(request), &response, sizeof(response));
++	info->panes[id].used = false;
++	return status;
++}
++
++
++/// The owner of a pane is the only team that may move or present it.
++static status_t
++prds_pane_check(prds_info* info, uint32 id)
++{
++	if (id >= PRDS_MAX_PANES || !info->panes[id].used)
++		return B_BAD_VALUE;
++	thread_info threadInfo;
++	if (get_thread_info(find_thread(NULL), &threadInfo) != B_OK
++		|| threadInfo.team != info->panes[id].team)
++		return B_PERMISSION_DENIED;
++	return B_OK;
++}
++
++
++static status_t
++prds_pane_configure(prds_info* info, struct prds_pane_config_request* config)
++{
++	MutexLocker locker(info->pane_lock);
++	status_t status = prds_pane_check(info, config->pane_id);
++	if (status != B_OK)
++		return status;
++	if (config->clip_count > PRDS_MAX_CLIP_RECTS)
++		return B_BAD_VALUE;
++
++	struct prds_pane_config request = {};
++	struct prds_resp response = {};
++	request.hdr.type = PRDS_CMD_PANE_CONFIG;
++	request.pane_id = config->pane_id;
++	request.flags = config->flags;
++	request.dest_x = config->dest_x;
++	request.dest_y = config->dest_y;
++	request.dest_width = config->dest_width;
++	request.dest_height = config->dest_height;
++	request.view_width = config->view_width;
++	request.view_height = config->view_height;
++	request.scroll_x = config->scroll_x;
++	request.scroll_y = config->scroll_y;
++	request.effect = config->effect;
++	request.clip_count = config->clip_count;
++	memcpy(request.clip, config->clip, config->clip_count * sizeof(struct prds_rect));
++	return prds_command(info, &request,
++		offsetof(struct prds_pane_config, clip) + config->clip_count * sizeof(struct prds_rect),
++		&response, sizeof(response));
++}
++
++
++static status_t
++prds_pane_present(prds_info* info, struct prds_pane_present_request* present)
++{
++	MutexLocker locker(info->pane_lock);
++	status_t status = prds_pane_check(info, present->pane_id);
++	if (status != B_OK)
++		return status;
++	if (present->sprite_count > PRDS_MAX_SPRITES)
++		return B_BAD_VALUE;
++	uint64 base = info->panes[present->pane_id].offset;
++	uint64 size = info->panes[present->pane_id].size;
++	if (present->sprite_count > 0
++		&& (present->sprite_offset >= size
++			|| present->sprite_offset + present->sprite_count * sizeof(struct prds_sprite) > size))
++		return B_BAD_VALUE;
++
++	struct prds_pane_present request = {};
++	struct prds_resp response = {};
++	request.hdr.type = PRDS_CMD_PANE_PRESENT;
++	request.pane_id = present->pane_id;
++	request.buffer_index = present->buffer_index;
++	request.sprite_count = present->sprite_count;
++	request.sprite_offset = base + present->sprite_offset;
++	return prds_command(info, &request, sizeof(request), &response, sizeof(response));
++}
++
++
+ //	#pragma mark - milestone A test pattern
+ 
+ 
+@@ -423,6 +642,8 @@ prds_teardown(prds_info* info)
+ 		delete_sem(info->retrace_sem);
+ 	if (info->hint_sem >= 0)
+ 		delete_sem(info->hint_sem);
++	if (info->pane_retrace_sem >= 0)
++		delete_sem(info->pane_retrace_sem);
+ 	if (info->command_done >= 0)
+ 		delete_sem(info->command_done);
+ 	if (info->shared_area >= 0)
+@@ -434,6 +655,7 @@ prds_teardown(prds_info* info)
+ 	if (info->pool_area >= 0)
+ 		delete_area(info->pool_area);
+ 	mutex_destroy(&info->command_lock);
++	mutex_destroy(&info->pane_lock);
+ 	free(info);
+ }
+ 
+@@ -447,8 +669,10 @@ prds_init_driver(device_node* node, void** _cookie)
+ 	info->node = node;
+ 	info->pool_area = info->command_area = info->event_area = info->shared_area = -1;
+ 	info->command_done = info->retrace_sem = info->hint_sem = -1;
++	info->pane_retrace_sem = -1;
+ 	info->test_thread = -1;
+ 	mutex_init(&info->command_lock, "prose display commands");
++	mutex_init(&info->pane_lock, "prose display panes");
+ 
+ 	device_node* parent = sDeviceManager->get_parent_node(node);
+ 	sDeviceManager->get_driver(parent, (driver_module_info**)&info->virtio,
+@@ -522,6 +746,7 @@ prds_init_driver(device_node* node, void** _cookie)
+ 	info->command_done = create_sem(0, "prose display command");
+ 	info->retrace_sem = create_sem(0, "prose display retrace");
+ 	info->hint_sem = create_sem(0, "prose display mode hint");
++	info->pane_retrace_sem = create_sem(0, "prose display pane retrace");
+ 	if (info->command_done < 0 || info->retrace_sem < 0 || info->hint_sem < 0) {
+ 		status = info->command_done < 0 ? info->command_done : info->retrace_sem;
+ 		ERROR("creating semaphores failed: %s\n", strerror(status));
+@@ -562,6 +787,11 @@ prds_init_driver(device_node* node, void** _cookie)
+ 			info->shared->bb_size = frontMax;
+ 			INFO("back buffer region at pool offset %#" B_PRIx64 ", %" B_PRIu64 " KiB\n",
+ 				frontMax, frontMax >> 10);
++			// whatever is left is the game-pane arena (docs/game-pane.md)
++			info->arena_offset = frontMax * 2;
++			info->arena_size = info->pool_size - info->arena_offset;
++			INFO("game-pane arena at pool offset %#" B_PRIx64 ", %" B_PRIu64 " KiB\n",
++				info->arena_offset, info->arena_size >> 10);
+ 		} else
+ 			INFO("pool too small for a back buffer region (%" B_PRIu64 " KiB)\n", info->pool_size >> 10);
+ 	}
+@@ -777,6 +1007,59 @@ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 			return prds_enable_events(info, mask);
+ 		}
+ 
++		case PRDS_PANE_ALLOC:
++		{
++			struct prds_pane_alloc alloc;
++			if (length < sizeof(alloc) || user_memcpy(&alloc, buffer, sizeof(alloc)) != B_OK)
++				return B_BAD_ADDRESS;
++			status_t status = prds_pane_alloc(info, &alloc);
++			if (status != B_OK)
++				return status;
++			if (user_memcpy(buffer, &alloc, sizeof(alloc)) != B_OK) {
++				prds_pane_free(info, alloc.pane_id);
++				return B_BAD_ADDRESS;
++			}
++			return B_OK;
++		}
++
++		case PRDS_PANE_CONFIGURE:
++		{
++			struct prds_pane_config_request config;
++			if (length < sizeof(config) || user_memcpy(&config, buffer, sizeof(config)) != B_OK)
++				return B_BAD_ADDRESS;
++			return prds_pane_configure(info, &config);
++		}
++
++		case PRDS_PANE_PRESENT:
++		{
++			struct prds_pane_present_request present;
++			if (length < sizeof(present) || user_memcpy(&present, buffer, sizeof(present)) != B_OK)
++				return B_BAD_ADDRESS;
++			return prds_pane_present(info, &present);
++		}
++
++		case PRDS_PANE_WAIT_RETRACE:
++		{
++			// app_server owns the other retrace semaphore; a game waits on this
++			// one, so neither eats the other's vsync.
++			bigtime_t timeout;
++			if (length < sizeof(timeout) || user_memcpy(&timeout, buffer, sizeof(timeout)) != B_OK)
++				return B_BAD_ADDRESS;
++			status_t status = acquire_sem_etc(info->pane_retrace_sem, 1,
++				B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT, timeout);
++			if (status == B_TIMED_OUT || status == B_WOULD_BLOCK)
++				return B_TIMED_OUT;
++			return status;
++		}
++
++		case PRDS_PANE_FREE:
++		{
++			uint32 id;
++			if (length < sizeof(id) || user_memcpy(&id, buffer, sizeof(id)) != B_OK)
++				return B_BAD_ADDRESS;
++			return prds_pane_free(info, id);
++		}
++
+ 		case PRDS_WAIT_MODE_HINT:
+ 		{
+ 			// the semaphore stays kernel-owned; the wait happens here on the caller's behalf
