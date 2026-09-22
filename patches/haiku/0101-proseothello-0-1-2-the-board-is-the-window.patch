@@ -1,0 +1,34 @@
+From b792dcd351f776ed504c01101f682aaf33a9daa9 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Tue, 22 Sep 2026 18:40:09 +0100
+Subject: [PATCH] ProseOthello 0.1-2: the board is the window
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The side panel is gone (white space nobody asked for): the board fills
+the window below the menu bar, and the title carries the score, the
+turn and the state -- "ProseOthello -- 3…3 -- your move (4)" -- the
+way ProsePaint's status does. ProseJulia moves to 0.1-3 (rebuilt).
+
+Prose-Patch: 0101-proseothello-0-1-2-the-board-is-the-window.patch 570fe9ee1f66d3456ae935d270e9f909524215ffa859d405a9ee86343f09b261
+---
+ build/jam/repositories/HaikuPorts/arm64 | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index a59dd9a8c6..b6ad3ef173 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -206,9 +206,9 @@ RemotePackageRepository HaikuPorts
+ 	samedi-1.2-1
+ 	shredder-1.0.0-3
+ 	prosedraw-0.1-2
+-	prosejulia-0.1-2
++	prosejulia-0.1-3
+ 	prosepaint-0.1-2
+-	proseothello-0.1-1
++	proseothello-0.1-2
+ 	prosewriter-0.1-5
+ 	sisong-2.16-7
+ 	slayer-1.0-2
