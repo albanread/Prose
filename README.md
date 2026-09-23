@@ -404,6 +404,11 @@ table there also records why each one exists.
 | 0122 | `sisong` 2.16-8: Compile and Run builds a folder that has a makefile with `make`, so an example that needs a library links |
 | 0123 | The interrupt controller reaches CPUs past the sixteenth, so a machine can have more than sixteen processors |
 | 0124 | A CPU that never starts is named in the boot log, instead of the machine silently spinning at boot |
+| 0125 | `prose_chip` in Haiku's coding style |
+| 0126 | `prose_display` in Haiku's coding style |
+| 0127 | The display and chip drivers survive a command that times out, instead of reading every later command's predecessor's answer |
+| 0128 | `prose_portal` in Haiku's coding style |
+| 0129 | `prose_midi` in Haiku's coding style |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

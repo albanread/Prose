@@ -1,0 +1,227 @@
+From 6ecde5a8d15efbd7404041bf46413a7d70dc2643 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 17:24:21 +0100
+Subject: [PATCH] prose_chip: Haiku's coding style, and nothing else
+
+Includes in the guidelines' groups, alphabetical within each; C++ comments
+rather than blocks, and doc comments that close on their own line; C++ casts --
+static_cast from void*, reinterpret_cast between unrelated pointers, so the
+safe ones are still checked -- and an operator that starts a wrapped line
+rather than ending one.
+
+No change in behaviour. The goto-based cleanup in prch_init_driver() stays: the
+guidelines say avoid rather than never, it is how Haiku's drivers unwind a
+partial initialisation, and changing it here would be a change of logic in a
+change of style.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0125-prose-chip-haiku-s-coding-style-and-nothing-else.patch 4a18fc3dd709070e6e0944ac47ca9536c3b3aa326fd18e0625959a087d5fcf15
+---
+ .../drivers/misc/prose_chip/prose_chip.cpp    | 67 ++++++++++---------
+ 1 file changed, 35 insertions(+), 32 deletions(-)
+
+diff --git a/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp b/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp
+index 98bfe4d19b..61a7954bce 100644
+--- a/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp
++++ b/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp
+@@ -18,17 +18,18 @@
+  */
+ 
+ 
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
+ #include <KernelExport.h>
+ #include <device_manager.h>
++
+ #include <kernel.h>
+ #include <lock.h>
++#include <prose_chip.h>
+ #include <util/AutoLock.h>
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+-
+ #include <virtio.h>
+-#include <prose_chip.h>
+ 
+ 
+ #define PRCH_DRIVER_MODULE_NAME		"drivers/audio/hmulti/prose_chip/driver_v1"
+@@ -38,9 +39,9 @@
+ #define INFO(x...)	dprintf("prose_chip: " x)
+ #define ERROR(x...)	dprintf("prose_chip: " x)
+ 
+-/* The command page: a request of at most a header plus one tune, then the
+-   answer. Both live in one contiguous allocation, so a request is two
+-   physical entries into the same page and never a scatter list. */
++// The command page: a request of at most a header plus one tune, then the
++// answer. Both live in one contiguous allocation, so a request is two physical
++// entries into the same page and never a scatter list.
+ #define PRCH_REQUEST_MAX	(sizeof(struct prose_chip_play) + PROSE_CHIP_TEXT_MAX)
+ #define PRCH_RESPONSE_AT	ROUNDUP(PRCH_REQUEST_MAX, 64)
+ #define PRCH_RESPONSE_MAX	64
+@@ -76,7 +77,7 @@ static device_manager_info* sDeviceManager;
+ static void
+ prch_callback(void* driverCookie, void* cookie)
+ {
+-	prch_info* info = (prch_info*)cookie;
++	prch_info* info = static_cast<prch_info*>(cookie);
+ 	release_sem_etc(info->done, 1, B_DO_NOT_RESCHEDULE);
+ }
+ 
+@@ -84,7 +85,8 @@ prch_callback(void* driverCookie, void* cookie)
+ /*!	One command, there and back. The queue carries a request buffer the host
+ 	reads and a response buffer it writes; the caller waits for the answer,
+ 	because every one of these is a thing the player asked for and wants the
+-	result of. */
++	result of.
++*/
+ static status_t
+ prch_command(prch_info* info, const void* request, size_t requestSize,
+ 	struct prose_chip_resp* response)
+@@ -94,7 +96,7 @@ prch_command(prch_info* info, const void* request, size_t requestSize,
+ 
+ 	MutexLocker locker(info->lock);
+ 	memcpy(info->buffer, request, requestSize);
+-	((struct prose_chip_hdr*)info->buffer)->seq = ++info->seq;
++	reinterpret_cast<struct prose_chip_hdr*>(info->buffer)->seq = ++info->seq;
+ 	memset(info->buffer + PRCH_RESPONSE_AT, 0, PRCH_RESPONSE_MAX);
+ 
+ 	physical_entry entries[2] = {
+@@ -114,8 +116,8 @@ prch_command(prch_info* info, const void* request, size_t requestSize,
+ 	while (!info->virtio->queue_dequeue(info->queue, NULL, NULL))
+ 		spin(10);
+ 
+-	struct prose_chip_resp* answer =
+-		(struct prose_chip_resp*)(info->buffer + PRCH_RESPONSE_AT);
++	struct prose_chip_resp* answer
++		= reinterpret_cast<struct prose_chip_resp*>(info->buffer + PRCH_RESPONSE_AT);
+ 	if (response != NULL)
+ 		memcpy(response, answer, sizeof(*response));
+ 	if (answer->hdr.seq != info->seq)
+@@ -172,7 +174,7 @@ prch_teardown(prch_info* info)
+ static status_t
+ prch_init_driver(device_node* node, void** _cookie)
+ {
+-	prch_info* info = (prch_info*)calloc(1, sizeof(prch_info));
++	prch_info* info = static_cast<prch_info*>(calloc(1, sizeof(prch_info)));
+ 	if (info == NULL)
+ 		return B_NO_MEMORY;
+ 	info->node = node;
+@@ -181,8 +183,8 @@ prch_init_driver(device_node* node, void** _cookie)
+ 	mutex_init(&info->lock, "prose_chip command");
+ 
+ 	device_node* parent = sDeviceManager->get_parent_node(node);
+-	sDeviceManager->get_driver(parent, (driver_module_info**)&info->virtio,
+-		(void**)&info->device);
++	sDeviceManager->get_driver(parent, reinterpret_cast<driver_module_info**>(&info->virtio),
++		reinterpret_cast<void**>(&info->device));
+ 	sDeviceManager->put_node(parent);
+ 
+ 	status_t status = info->virtio->negotiate_features(info->device, 0, &info->features, NULL);
+@@ -214,7 +216,7 @@ prch_init_driver(device_node* node, void** _cookie)
+ 		status = get_memory_map(address, PRCH_BUFFER_SIZE, &entry, 1);
+ 		if (status != B_OK)
+ 			goto error;
+-		info->buffer = (uint8*)address;
++		info->buffer = static_cast<uint8*>(address);
+ 		info->phys = entry.address;
+ 		memset(info->buffer, 0, PRCH_BUFFER_SIZE);
+ 	}
+@@ -257,14 +259,14 @@ error:
+ static void
+ prch_uninit_driver(void* cookie)
+ {
+-	prch_teardown((prch_info*)cookie);
++	prch_teardown(static_cast<prch_info*>(cookie));
+ }
+ 
+ 
+ static status_t
+ prch_register_child_devices(void* cookie)
+ {
+-	prch_info* info = (prch_info*)cookie;
++	prch_info* info = static_cast<prch_info*>(cookie);
+ 	int32 id = sDeviceManager->create_id(PRCH_DEVICE_ID_GENERATOR);
+ 	if (id < 0)
+ 		return id;
+@@ -292,11 +294,12 @@ prch_uninit_device(void* cookie)
+ 
+ 
+ /*!	Many openers, unlike the portal: a tune and a sound effect are different
+-	programs as often as not, and the tracks are what keeps them apart. */
++	programs as often as not, and the tracks are what keeps them apart.
++*/
+ static status_t
+ prch_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
+ {
+-	prch_info* info = (prch_info*)deviceCookie;
++	prch_info* info = static_cast<prch_info*>(deviceCookie);
+ 	atomic_add(&info->openCount, 1);
+ 	*_cookie = info;
+ 	return B_OK;
+@@ -313,7 +316,7 @@ prch_close(void* cookie)
+ static status_t
+ prch_free(void* cookie)
+ {
+-	prch_info* info = (prch_info*)cookie;
++	prch_info* info = static_cast<prch_info*>(cookie);
+ 	atomic_add(&info->openCount, -1);
+ 	return B_OK;
+ }
+@@ -322,15 +325,15 @@ prch_free(void* cookie)
+ static status_t
+ prch_control(void* cookie, uint32 op, void* buffer, size_t length)
+ {
+-	prch_info* info = (prch_info*)cookie;
++	prch_info* info = static_cast<prch_info*>(cookie);
+ 
+ 	switch (op) {
+ 		case PROSE_CHIP_PLAY:
+ 		{
+-			/* The header and the source go to the host as one buffer, so the
+-			   request is built in place rather than copied twice. */
+-			struct prose_chip_play_request* request =
+-				(struct prose_chip_play_request*)malloc(sizeof(*request));
++			// The header and the source go to the host as one buffer, so the
++			// request is built in place rather than copied twice.
++			struct prose_chip_play_request* request
++				= static_cast<struct prose_chip_play_request*>(malloc(sizeof(*request)));
+ 			if (request == NULL)
+ 				return B_NO_MEMORY;
+ 			if (length < sizeof(*request)
+@@ -345,12 +348,12 @@ prch_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 			}
+ 
+ 			size_t size = sizeof(struct prose_chip_play) + request->length;
+-			uint8* wire = (uint8*)malloc(size);
++			uint8* wire = static_cast<uint8*>(malloc(size));
+ 			if (wire == NULL) {
+ 				free(request);
+ 				return B_NO_MEMORY;
+ 			}
+-			struct prose_chip_play* play = (struct prose_chip_play*)wire;
++			struct prose_chip_play* play = reinterpret_cast<struct prose_chip_play*>(wire);
+ 			memset(play, 0, sizeof(*play));
+ 			play->hdr.type = PROSE_CHIP_CMD_PLAY;
+ 			play->track = request->track;
+@@ -427,7 +430,7 @@ prch_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 
+ 
+ module_dependency module_dependencies[] = {
+-	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info**)&sDeviceManager },
++	{ B_DEVICE_MANAGER_MODULE_NAME, reinterpret_cast<module_info**>(&sDeviceManager) },
+ 	{}
+ };
+ 
+@@ -474,7 +477,7 @@ struct driver_module_info sPrchDriver = {
+ 
+ 
+ module_info* modules[] = {
+-	(module_info*)&sPrchDriver,
+-	(module_info*)&sPrchDevice,
++	reinterpret_cast<module_info*>(&sPrchDriver),
++	reinterpret_cast<module_info*>(&sPrchDevice),
+ 	NULL
+ };

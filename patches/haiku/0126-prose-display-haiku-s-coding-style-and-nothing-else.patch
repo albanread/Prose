@@ -1,0 +1,353 @@
+From ed987697f26e48ad087aa46db3090a1aa431056e Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 17:28:25 +0100
+Subject: [PATCH] prose_display: Haiku's coding style, and nothing else
+
+Includes in the guidelines' groups -- POSIX, the public driver API, then the
+private headers -- in ASCII order within each; C++ casts for thirty C ones,
+static_cast where the source is void* so those are still checked, and
+reinterpret_cast only between unrelated pointer types or for the event index
+the virtqueue carries in its void* tag; three lines brought within 100 columns,
+two of whose statements then span lines and so take braces; the trailing
+comment on PRDS_TEST_PATTERN moved above it; and a doc comment in the form the
+rest of the file uses.
+
+No change in behaviour. PRDS_TEST_PATTERN stays: it is a documented switch for
+the driver's self-test, turned off in patch 0034, not code left behind. Two of
+the casts are inside it and so are not compiled while it is off; they were
+converted by reading their types, not by the compiler.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0126-prose-display-haiku-s-coding-style-and-nothing-else.patch 4c0b369dad682f933cd64c1feed9058d3d4492099ba364fa44fe999012ddffca
+---
+ .../graphics/prose_display/prose_display.cpp  | 100 ++++++++++--------
+ 1 file changed, 56 insertions(+), 44 deletions(-)
+
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index c801c01586..1b3bdf9afa 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -12,20 +12,21 @@
+  */
+ 
+ 
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
+ #include <KernelExport.h>
+ #include <device_manager.h>
+ #include <graphic_driver.h>
++
+ #include <lock.h>
++#include <prose_display.h>
+ #include <team.h>
+ #include <util/AutoLock.h>
+-#include <vm/vm.h>
+-#include <stddef.h>
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+-
+ #include <virtio.h>
+-#include <prose_display.h>
++#include <vm/vm.h>
+ 
+ 
+ #define PRDS_DRIVER_MODULE_NAME "drivers/graphics/prose_display/driver_v1"
+@@ -38,7 +39,8 @@
+ 
+ #define PRDS_EVENT_BUFFERS		8
+ #define PRDS_RESPONSE_OFFSET	2048	// in the command page
+-#define PRDS_TEST_PATTERN		0		// the host shows TV static instead (hvgpu); 1 restores the self-test
++// The host shows TV static instead (hvgpu); 1 restores the self-test.
++#define PRDS_TEST_PATTERN		0
+ 
+ #define ALIGN_UP(x, a) ((((x) + (a) - 1) / (a)) * (a))
+ 
+@@ -130,7 +132,7 @@ prds_feature_name(uint64 feature)
+ static void
+ prds_config_callback(void* cookie)
+ {
+-	prds_info* info = (prds_info*)cookie;
++	prds_info* info = static_cast<prds_info*>(cookie);
+ 	INFO("configuration changed\n");
+ 	atomic_set(&info->need_redraw, 1);
+ }
+@@ -139,7 +141,7 @@ prds_config_callback(void* cookie)
+ static void
+ prds_control_callback(void* driverCookie, void* cookie)
+ {
+-	prds_info* info = (prds_info*)cookie;
++	prds_info* info = static_cast<prds_info*>(cookie);
+ 	release_sem_etc(info->command_done, 1, B_DO_NOT_RESCHEDULE);
+ }
+ 
+@@ -149,21 +151,22 @@ prds_post_event_buffer(prds_info* info, uint32 index)
+ {
+ 	physical_entry entry = { info->events_phys + index * PRDS_EVENT_SIZE, PRDS_EVENT_SIZE };
+ 	return info->virtio->queue_request_v(info->event_queue, &entry, 0, 1,
+-		(void*)(addr_t)(index + 1));
++		reinterpret_cast<void*>(static_cast<addr_t>(index + 1)));
+ }
+ 
+ 
+ static void
+ prds_event_callback(void* driverCookie, void* cookie)
+ {
+-	prds_info* info = (prds_info*)cookie;
++	prds_info* info = static_cast<prds_info*>(cookie);
+ 	void* tag;
+ 	uint32 length;
+ 	while (info->virtio->queue_dequeue(info->event_queue, &tag, &length)) {
+-		uint32 index = (uint32)(addr_t)tag - 1;
++		uint32 index = static_cast<uint32>(reinterpret_cast<addr_t>(tag)) - 1;
+ 		if (index >= PRDS_EVENT_BUFFERS)
+ 			continue;
+-		struct prds_event* event = (struct prds_event*)(info->events + index * PRDS_EVENT_SIZE);
++		struct prds_event* event = reinterpret_cast<struct prds_event*>(
++			info->events + index * PRDS_EVENT_SIZE);
+ 		switch (event->hdr.type) {
+ 			case PRDS_EVT_VSYNC:
+ 			{
+@@ -188,7 +191,7 @@ prds_event_callback(void* driverCookie, void* cookie)
+ 			}
+ 			case PRDS_EVT_REDRAW:
+ 				info->redraw_count++;
+-				info->shared->redraw_count = (uint32)info->redraw_count;
++				info->shared->redraw_count = static_cast<uint32>(info->redraw_count);
+ 				atomic_set(&info->need_redraw, 1);
+ 				break;
+ 		}
+@@ -197,14 +200,15 @@ prds_event_callback(void* driverCookie, void* cookie)
+ }
+ 
+ 
+-/*! Sends one request and waits for its response (synchronous, serialized). */
++/*!	Sends one request and waits for its response (synchronous, serialized).
++*/
+ static status_t
+ prds_command(prds_info* info, void* request, size_t requestSize, void* response,
+ 	size_t responseSize)
+ {
+ 	MutexLocker locker(info->command_lock);
+ 
+-	struct prds_hdr* hdr = (struct prds_hdr*)request;
++	struct prds_hdr* hdr = static_cast<struct prds_hdr*>(request);
+ 	hdr->seq = ++info->seq;
+ 	memcpy(info->command, request, requestSize);
+ 	memset(info->command + PRDS_RESPONSE_OFFSET, 0, responseSize);
+@@ -228,7 +232,7 @@ prds_command(prds_info* info, void* request, size_t requestSize, void* response,
+ 		spin(10);
+ 
+ 	memcpy(response, info->command + PRDS_RESPONSE_OFFSET, responseSize);
+-	struct prds_hdr* respHdr = (struct prds_hdr*)response;
++	struct prds_hdr* respHdr = static_cast<struct prds_hdr*>(response);
+ 	if (respHdr->seq != hdr->seq)
+ 		ERROR("response sequence %" B_PRIu64 " != %" B_PRIu64 "\n", respHdr->seq, hdr->seq);
+ 	if (respHdr->type != PRDS_RESP_OK) {
+@@ -367,7 +371,7 @@ prds_pane_alloc(prds_info* info, struct prds_pane_alloc* alloc)
+ 	if (alloc->buffer_offset >= size || alloc->palette_offset >= size
+ 		|| alloc->stride < (alloc->format == PRDS_PANE_B8G8R8X8
+ 			? alloc->world_width * 4 : alloc->world_width)
+-		|| alloc->buffer_stride < (uint64)alloc->stride * alloc->world_height
++		|| alloc->buffer_stride < static_cast<uint64>(alloc->stride) * alloc->world_height
+ 		|| alloc->buffer_offset + alloc->buffer_stride * alloc->buffers > size
+ 		|| (alloc->front_offset != 0
+ 			&& alloc->front_offset + alloc->buffer_stride * alloc->buffers > size))
+@@ -542,7 +546,8 @@ prds_fill(prds_info* info, uint32 x, uint32 y, uint32 width, uint32 height, uint
+ 	if (y + height > info->mode_height)
+ 		height = info->mode_height - y;
+ 	for (uint32 row = y; row < y + height; row++) {
+-		uint32* line = (uint32*)(info->pool + info->mode_offset + row * info->mode_stride) + x;
++		uint32* line = reinterpret_cast<uint32*>(info->pool + info->mode_offset
++			+ row * info->mode_stride) + x;
+ 		for (uint32 i = 0; i < width; i++)
+ 			line[i] = color;
+ 	}
+@@ -566,7 +571,7 @@ prds_draw_pattern(prds_info* info)
+ static status_t
+ prds_test_thread(void* data)
+ {
+-	prds_info* info = (prds_info*)data;
++	prds_info* info = static_cast<prds_info*>(data);
+ 	const uint32 box = 64;
+ 	uint32 x = 0, y = info->mode_height / 2, step = 12;
+ 	int32 iteration = 0;
+@@ -604,6 +609,7 @@ prds_test_thread(void* data)
+ 	return B_OK;
+ }
+ 
++
+ #endif	// PRDS_TEST_PATTERN
+ 
+ 
+@@ -654,7 +660,7 @@ prds_alloc_page(const char* name, uint8** _virtual, phys_addr_t* _physical)
+ 		return status;
+ 	}
+ 	memset(address, 0, B_PAGE_SIZE);
+-	*_virtual = (uint8*)address;
++	*_virtual = static_cast<uint8*>(address);
+ 	*_physical = entry.address;
+ 	return area;
+ }
+@@ -694,7 +700,7 @@ prds_teardown(prds_info* info)
+ static status_t
+ prds_init_driver(device_node* node, void** _cookie)
+ {
+-	prds_info* info = (prds_info*)calloc(1, sizeof(prds_info));
++	prds_info* info = static_cast<prds_info*>(calloc(1, sizeof(prds_info)));
+ 	if (info == NULL)
+ 		return B_NO_MEMORY;
+ 	info->node = node;
+@@ -706,8 +712,8 @@ prds_init_driver(device_node* node, void** _cookie)
+ 	mutex_init(&info->pane_lock, "prose display panes");
+ 
+ 	device_node* parent = sDeviceManager->get_parent_node(node);
+-	sDeviceManager->get_driver(parent, (driver_module_info**)&info->virtio,
+-		(void**)&info->device);
++	sDeviceManager->get_driver(parent, reinterpret_cast<driver_module_info**>(&info->virtio),
++		reinterpret_cast<void**>(&info->device));
+ 	sDeviceManager->put_node(parent);
+ 
+ 	status_t status = info->virtio->negotiate_features(info->device,
+@@ -746,7 +752,7 @@ prds_init_driver(device_node* node, void** _cookie)
+ 	info->pool_area = map_physical_memory("prose display pool", info->pool_phys,
+ 		info->pool_size, B_ANY_KERNEL_ADDRESS | B_WRITE_BACK_MEMORY,
+ 		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA | B_READ_AREA | B_WRITE_AREA,
+-		(void**)&info->pool);
++		reinterpret_cast<void**>(&info->pool));
+ 	if (info->pool_area < 0) {
+ 		ERROR("mapping the pool at %#" B_PRIxPHYSADDR " (%" B_PRIu64 " bytes) failed: %s\n",
+ 			info->pool_phys, info->pool_size, strerror(info->pool_area));
+@@ -788,8 +794,8 @@ prds_init_driver(device_node* node, void** _cookie)
+ 		size_t size = (sizeof(struct prds_shared_info) + B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1);
+ 		// Kernel-only here; the accelerant clones it read-only. (arm64 cannot express
+ 		// kernel-RW/user-RO in one mapping, so no user bits on the original.)
+-		info->shared_area = create_area("prose display shared info", (void**)&info->shared,
+-			B_ANY_KERNEL_ADDRESS, size, B_FULL_LOCK,
++		info->shared_area = create_area("prose display shared info",
++			reinterpret_cast<void**>(&info->shared), B_ANY_KERNEL_ADDRESS, size, B_FULL_LOCK,
+ 			B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA | B_CLONEABLE_AREA);
+ 		if (info->shared_area < 0) {
+ 			status = info->shared_area;
+@@ -810,7 +816,8 @@ prds_init_driver(device_node* node, void** _cookie)
+ 
+ 		// app_server's back buffer lives in the pool too (so the host's GPU can
+ 		// reach both buffers), after the space for the largest front buffer
+-		uint64 frontMax = (uint64)ALIGN_UP(info->config.max_width * 4, info->config.stride_align)
++		uint64 frontMax = static_cast<uint64>(ALIGN_UP(info->config.max_width * 4,
++				info->config.stride_align))
+ 			* info->config.max_height;
+ 		frontMax = ALIGN_UP(frontMax, PRDS_SHM_ALIGNMENT);
+ 		if (frontMax * 2 <= info->pool_size) {
+@@ -823,14 +830,18 @@ prds_init_driver(device_node* node, void** _cookie)
+ 			info->arena_size = info->pool_size - info->arena_offset;
+ 			INFO("game-pane arena at pool offset %#" B_PRIx64 ", %" B_PRIu64 " KiB\n",
+ 				info->arena_offset, info->arena_size >> 10);
+-		} else
+-			INFO("pool too small for a back buffer region (%" B_PRIu64 " KiB)\n", info->pool_size >> 10);
++		} else {
++			INFO("pool too small for a back buffer region (%" B_PRIu64 " KiB)\n",
++				info->pool_size >> 10);
++		}
+ 	}
+ 
+ 	// This sets DRIVER_OK: from here on the device is live.
+ 	status = info->virtio->setup_interrupt(info->device, prds_config_callback, info);
+-	if (status == B_OK)
+-		status = info->virtio->queue_setup_interrupt(info->control_queue, prds_control_callback, info);
++	if (status == B_OK) {
++		status = info->virtio->queue_setup_interrupt(info->control_queue,
++			prds_control_callback, info);
++	}
+ 	if (status == B_OK)
+ 		status = info->virtio->queue_setup_interrupt(info->event_queue, prds_event_callback, info);
+ 	if (status != B_OK) {
+@@ -873,14 +884,14 @@ error:
+ static void
+ prds_uninit_driver(void* cookie)
+ {
+-	prds_teardown((prds_info*)cookie);
++	prds_teardown(static_cast<prds_info*>(cookie));
+ }
+ 
+ 
+ static status_t
+ prds_register_child_devices(void* cookie)
+ {
+-	prds_info* info = (prds_info*)cookie;
++	prds_info* info = static_cast<prds_info*>(cookie);
+ 	int32 id = sDeviceManager->create_id(PRDS_DEVICE_ID_GENERATOR);
+ 	if (id < 0)
+ 		return id;
+@@ -910,7 +921,7 @@ prds_uninit_device(void* cookie)
+ static status_t
+ prds_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
+ {
+-	prds_info* info = (prds_info*)deviceCookie;
++	prds_info* info = static_cast<prds_info*>(deviceCookie);
+ 
+ 	// User space may not acquire kernel-owned semaphores: the retrace semaphore
+ 	// belongs to whoever opens the device (app_server), like the vblank
+@@ -977,10 +988,11 @@ prds_write(void* cookie, off_t position, const void* buffer, size_t* _length)
+ static status_t
+ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ {
+-	prds_info* info = (prds_info*)cookie;
++	prds_info* info = static_cast<prds_info*>(cookie);
+ 	switch (op) {
+ 		case B_GET_ACCELERANT_SIGNATURE:
+-			if (user_strlcpy((char*)buffer, PRDS_ACCELERANT_NAME, B_FILE_NAME_LENGTH) < B_OK)
++			if (user_strlcpy(static_cast<char*>(buffer), PRDS_ACCELERANT_NAME,
++					B_FILE_NAME_LENGTH) < B_OK)
+ 				return B_BAD_ADDRESS;
+ 			return B_OK;
+ 
+@@ -988,7 +1000,7 @@ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 			return user_memcpy(buffer, &info->shared_area, sizeof(area_id));
+ 
+ 		case PRDS_GET_DEVICE_NAME:
+-			if (user_strlcpy((char*)buffer, info->name, B_PATH_NAME_LENGTH) < B_OK)
++			if (user_strlcpy(static_cast<char*>(buffer), info->name, B_PATH_NAME_LENGTH) < B_OK)
+ 				return B_BAD_ADDRESS;
+ 			return B_OK;
+ 
+@@ -1000,7 +1012,7 @@ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 				B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA, 0, info->pool_area, true);
+ 			if (area < 0)
+ 				return area;
+-			return _user_get_area_info(area, (area_info*)buffer);
++			return _user_get_area_info(area, static_cast<area_info*>(buffer));
+ 		}
+ 
+ 		case PRDS_SET_MODE:
+@@ -1024,7 +1036,7 @@ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 			if (request.rect_count > PRDS_MAX_COMMIT_RECTS)
+ 				return B_BAD_VALUE;
+ 			if (request.rect_count > 0 && user_memcpy(request.rects,
+-					(uint8*)buffer + offsetof(struct prds_commit_request, rects),
++					static_cast<uint8*>(buffer) + offsetof(struct prds_commit_request, rects),
+ 					request.rect_count * sizeof(struct prds_rect)) != B_OK)
+ 				return B_BAD_ADDRESS;
+ 			return prds_commit(info, request.rects, request.rect_count);
+@@ -1128,7 +1140,7 @@ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 
+ 
+ module_dependency module_dependencies[] = {
+-	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info**)&sDeviceManager },
++	{ B_DEVICE_MANAGER_MODULE_NAME, reinterpret_cast<module_info**>(&sDeviceManager) },
+ 	{}
+ };
+ 
+@@ -1175,7 +1187,7 @@ struct driver_module_info sPrdsDriver = {
+ 
+ 
+ module_info* modules[] = {
+-	(module_info*)&sPrdsDriver,
+-	(module_info*)&sPrdsDevice,
++	reinterpret_cast<module_info*>(&sPrdsDriver),
++	reinterpret_cast<module_info*>(&sPrdsDevice),
+ 	NULL
+ };

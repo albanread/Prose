@@ -46,6 +46,13 @@ final class ProseChipDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate
     VZCustomVirtioDeviceDelegate {
     static let queue = DispatchQueue(label: "hvgpu.chip")
 
+    /// Test only: `--chip-late-reply <seconds>` holds back the answer to the first
+    /// command that long -- longer than the guest waits -- and then gives it.
+    /// That is how the guest driver's handling of a command that timed out is
+    /// proved (Haiku patch 0127): the answer does come, late, after the guest has
+    /// given up on it. Unset, every answer goes at once.
+    private var lateReply = option("--chip-late-reply").flatMap(Double.init)
+
     private let audio = ChipAudio()
     private var midiTunes: [MIDITune] = (0..<PRCH.tracks).map { _ in MIDITune() }
     private var device: VZCustomVirtioDevice?
@@ -176,12 +183,22 @@ final class ProseChipDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate
         }
 
         let response = le32(status) + le32(0) + le64(seqNo) + le32(value) + le32(0) + payload
-        if element.writeBuffersByteCount < response.count {
-            _ = try? element.write(Data(le32(PRCH.errInvalid) + le32(0) + le64(seqNo)
-                + le32(0) + le32(0)))
-        } else {
-            _ = try? element.write(Data(response))
+        let answer = element.writeBuffersByteCount < response.count
+            ? Data(le32(PRCH.errInvalid) + le32(0) + le64(seqNo) + le32(0) + le32(0))
+            : Data(response)
+        if let delay = lateReply {
+            lateReply = nil
+            log("chip: answering command \(seqNo) \(delay) s late (--chip-late-reply)")
+            // Written late as well as returned late: a slow host has not got an
+            // answer to write yet, and the guest must not find one early.
+            ProseChipDevice.queue.asyncAfter(deadline: .now() + delay) {
+                _ = try? element.write(answer)
+                element.returnToQueue()
+                log("chip: answered command \(seqNo)")
+            }
+            return
         }
+        _ = try? element.write(answer)
         element.returnToQueue()
     }
 

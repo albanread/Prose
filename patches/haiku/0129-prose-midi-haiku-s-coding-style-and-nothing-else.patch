@@ -1,0 +1,220 @@
+From 0e284a6ba91da5a844bb9ce899d36accf7efd419 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 17:31:59 +0100
+Subject: [PATCH] prose_midi: Haiku's coding style, and nothing else
+
+Includes in the guidelines' groups -- POSIX, the public driver API, then the
+private headers -- in ASCII order within each; C++ casts for every C one,
+static_cast where the source is void* so those are still checked, and
+reinterpret_cast only between unrelated pointer types or for the buffer index
+the virtqueue carries in its void* tag; lines kept within 100 columns; and doc
+comments that close on their own line.
+
+No change in behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0129-prose-midi-haiku-s-coding-style-and-nothing-else.patch 18fd5cb2310f14b3fe644beb215df49c5931447d82edad7f0bd42fcbc63b542a
+---
+ .../drivers/midi/prose_midi/prose_midi.cpp    | 61 +++++++++++--------
+ 1 file changed, 34 insertions(+), 27 deletions(-)
+
+diff --git a/src/add-ons/kernel/drivers/midi/prose_midi/prose_midi.cpp b/src/add-ons/kernel/drivers/midi/prose_midi/prose_midi.cpp
+index 48d9e5ba90..874ae2be09 100644
+--- a/src/add-ons/kernel/drivers/midi/prose_midi/prose_midi.cpp
++++ b/src/add-ons/kernel/drivers/midi/prose_midi/prose_midi.cpp
+@@ -10,15 +10,16 @@
+  */
+ 
+ 
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
+ #include <KernelExport.h>
+ #include <device_manager.h>
++
+ #include <kernel.h>
+ #include <lock.h>
+ #include <util/AutoLock.h>
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+-
+ #include <virtio.h>
+ 
+ 
+@@ -30,7 +31,8 @@
+ #define PRMD_DRIVER_MODULE_NAME		"drivers/audio/hmulti/prose_midi/driver_v1"
+ #define PRMD_DEVICE_MODULE_NAME		"drivers/audio/hmulti/prose_midi/device_v1"
+ #define PRMD_DEVICE_ID_GENERATOR	"prose_midi/device_id"
+-#define PRMD_VIRTIO_DEVICE_ID		62	// 63 is the Prose Display; >= 64 would leave virtio-pci's modern ID range
++// 63 is the Prose Display; >= 64 would leave virtio-pci's modern ID range
++#define PRMD_VIRTIO_DEVICE_ID		62
+ 
+ #define INFO(x...)	dprintf("prose_midi: " x)
+ #define ERROR(x...)	dprintf("prose_midi: " x)
+@@ -99,17 +101,18 @@ static status_t
+ prmd_post_rx(prmd_info* info, uint32 index)
+ {
+ 	physical_entry entry = { info->phys + (BUFFER_COUNT + index) * BUFFER_SIZE, BUFFER_SIZE };
+-	return info->virtio->queue_request_v(info->rxQueue, &entry, 0, 1, (void*)(addr_t)(index + 1));
++	return info->virtio->queue_request_v(info->rxQueue, &entry, 0, 1,
++		reinterpret_cast<void*>(static_cast<addr_t>(index + 1)));
+ }
+ 
+ 
+ static void
+ prmd_tx_callback(void* driverCookie, void* cookie)
+ {
+-	prmd_info* info = (prmd_info*)cookie;
++	prmd_info* info = static_cast<prmd_info*>(cookie);
+ 	void* tag;
+ 	while (info->virtio->queue_dequeue(info->txQueue, &tag, NULL)) {
+-		uint32 index = (uint32)(addr_t)tag - 1;
++		uint32 index = static_cast<uint32>(reinterpret_cast<addr_t>(tag)) - 1;
+ 		if (index >= BUFFER_COUNT)
+ 			continue;
+ 		InterruptsSpinLocker locker(info->lock);
+@@ -124,11 +127,11 @@ prmd_tx_callback(void* driverCookie, void* cookie)
+ static void
+ prmd_rx_callback(void* driverCookie, void* cookie)
+ {
+-	prmd_info* info = (prmd_info*)cookie;
++	prmd_info* info = static_cast<prmd_info*>(cookie);
+ 	void* tag;
+ 	uint32 length;
+ 	while (info->virtio->queue_dequeue(info->rxQueue, &tag, &length)) {
+-		uint32 index = (uint32)(addr_t)tag - 1;
++		uint32 index = static_cast<uint32>(reinterpret_cast<addr_t>(tag)) - 1;
+ 		if (index >= BUFFER_COUNT)
+ 			continue;
+ 		if (length > BUFFER_SIZE)
+@@ -203,7 +206,7 @@ prmd_teardown(prmd_info* info)
+ static status_t
+ prmd_init_driver(device_node* node, void** _cookie)
+ {
+-	prmd_info* info = (prmd_info*)calloc(1, sizeof(prmd_info));
++	prmd_info* info = static_cast<prmd_info*>(calloc(1, sizeof(prmd_info)));
+ 	if (info == NULL)
+ 		return B_NO_MEMORY;
+ 	info->node = node;
+@@ -214,7 +217,8 @@ prmd_init_driver(device_node* node, void** _cookie)
+ 	mutex_init(&info->txLock, "prose_midi tx");
+ 
+ 	device_node* parent = sDeviceManager->get_parent_node(node);
+-	sDeviceManager->get_driver(parent, (driver_module_info**)&info->virtio, (void**)&info->device);
++	sDeviceManager->get_driver(parent, reinterpret_cast<driver_module_info**>(&info->virtio),
++		reinterpret_cast<void**>(&info->device));
+ 	sDeviceManager->put_node(parent);
+ 
+ 	status_t status = info->virtio->negotiate_features(info->device, 0, &info->features, NULL);
+@@ -236,7 +240,7 @@ prmd_init_driver(device_node* node, void** _cookie)
+ 		status = get_memory_map(address, size, &entry, 1);
+ 		if (status != B_OK)
+ 			goto error;
+-		info->buffers = (uint8*)address;
++		info->buffers = static_cast<uint8*>(address);
+ 		info->phys = entry.address;
+ 		memset(info->buffers, 0, size);
+ 	}
+@@ -286,14 +290,14 @@ error:
+ static void
+ prmd_uninit_driver(void* cookie)
+ {
+-	prmd_teardown((prmd_info*)cookie);
++	prmd_teardown(static_cast<prmd_info*>(cookie));
+ }
+ 
+ 
+ static status_t
+ prmd_register_child_devices(void* cookie)
+ {
+-	prmd_info* info = (prmd_info*)cookie;
++	prmd_info* info = static_cast<prmd_info*>(cookie);
+ 	int32 id = sDeviceManager->create_id(PRMD_DEVICE_ID_GENERATOR);
+ 	if (id < 0)
+ 		return id;
+@@ -323,7 +327,7 @@ prmd_uninit_device(void* cookie)
+ static status_t
+ prmd_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
+ {
+-	prmd_info* info = (prmd_info*)deviceCookie;
++	prmd_info* info = static_cast<prmd_info*>(deviceCookie);
+ 	atomic_add(&info->openCount, 1);
+ 	*_cookie = info;
+ 	return B_OK;
+@@ -340,17 +344,18 @@ prmd_close(void* cookie)
+ static status_t
+ prmd_free(void* cookie)
+ {
+-	prmd_info* info = (prmd_info*)cookie;
++	prmd_info* info = static_cast<prmd_info*>(cookie);
+ 	atomic_add(&info->openCount, -1);
+ 	return B_OK;
+ }
+ 
+ 
+-/*!	MIDI bytes from the host; blocks until there are some. */
++/*!	MIDI bytes from the host; blocks until there are some.
++*/
+ static status_t
+ prmd_read(void* cookie, off_t position, void* buffer, size_t* _length)
+ {
+-	prmd_info* info = (prmd_info*)cookie;
++	prmd_info* info = static_cast<prmd_info*>(cookie);
+ 	size_t wanted = *_length;
+ 	while (true) {
+ 		uint8 chunk[64];
+@@ -377,11 +382,12 @@ prmd_read(void* cookie, off_t position, void* buffer, size_t* _length)
+ }
+ 
+ 
+-/*!	MIDI bytes to the host, in transfers of up to BUFFER_SIZE. */
++/*!	MIDI bytes to the host, in transfers of up to BUFFER_SIZE.
++*/
+ static status_t
+ prmd_write(void* cookie, off_t position, const void* buffer, size_t* _length)
+ {
+-	prmd_info* info = (prmd_info*)cookie;
++	prmd_info* info = static_cast<prmd_info*>(cookie);
+ 	MutexLocker locker(info->txLock);
+ 	size_t done = 0;
+ 	while (done < *_length) {
+@@ -396,14 +402,15 @@ prmd_write(void* cookie, off_t position, const void* buffer, size_t* _length)
+ 			index = info->txFreeList[info->txFreeTail % BUFFER_COUNT];
+ 			info->txFreeTail++;
+ 		}
+-		size_t count = min_c(*_length - done, (size_t)BUFFER_SIZE);
+-		if (user_memcpy(prmd_tx_buffer(info, index), (const uint8*)buffer + done, count) != B_OK) {
++		size_t count = min_c(*_length - done, static_cast<size_t>(BUFFER_SIZE));
++		if (user_memcpy(prmd_tx_buffer(info, index), static_cast<const uint8*>(buffer) + done,
++				count) != B_OK) {
+ 			*_length = done;
+ 			return B_BAD_ADDRESS;
+ 		}
+ 		physical_entry entry = { info->phys + index * BUFFER_SIZE, count };
+ 		status = info->virtio->queue_request_v(info->txQueue, &entry, 1, 0,
+-			(void*)(addr_t)(index + 1));
++			reinterpret_cast<void*>(static_cast<addr_t>(index + 1)));
+ 		if (status != B_OK) {
+ 			ERROR("queueing %" B_PRIuSIZE " bytes failed: %s\n", count, strerror(status));
+ 			*_length = done;
+@@ -424,7 +431,7 @@ prmd_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 
+ 
+ module_dependency module_dependencies[] = {
+-	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info**)&sDeviceManager },
++	{ B_DEVICE_MANAGER_MODULE_NAME, reinterpret_cast<module_info**>(&sDeviceManager) },
+ 	{}
+ };
+ 
+@@ -471,7 +478,7 @@ struct driver_module_info sPrmdDriver = {
+ 
+ 
+ module_info* modules[] = {
+-	(module_info*)&sPrmdDriver,
+-	(module_info*)&sPrmdDevice,
++	reinterpret_cast<module_info*>(&sPrmdDriver),
++	reinterpret_cast<module_info*>(&sPrmdDevice),
+ 	NULL
+ };

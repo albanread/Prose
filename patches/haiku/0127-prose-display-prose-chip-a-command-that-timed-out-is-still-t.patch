@@ -1,0 +1,263 @@
+From c1694fc873b03481f699618c7d5d2f884ff9bd3b Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 17:30:09 +0100
+Subject: [PATCH] prose_display, prose_chip: a command that timed out is still
+ the device's
+
+Each driver has one command page: the request the host reads and the answer it
+writes. A command was queued, then waited for for five seconds, and on a timeout
+simply returned -- leaving the command queued, the page the device's, and
+nothing to say so. The next command wrote its request over the page the device
+might still be reading, and when the late completion came it woke the next
+caller, who dequeued it and read an answer the host had not yet written. Every
+command after that read its predecessor's, for as long as the machine ran. The
+sequence check saw it, logged it, and used the answer anyway.
+
+Now at most one command is ever in flight. One that timed out is marked
+outstanding, and the next command first collects it -- waits for it and takes
+it off the queue -- before writing the page; if it still has not come, that
+command fails with B_BUSY rather than write over what the device may yet read.
+With only one in flight, whatever completes is the one outstanding, so an
+answer bearing another command's sequence number can only be a host bug, and is
+now an error instead of a log line: the display driver checks it on the command
+page before anything is copied out to the caller.
+
+The wait after a signalled completion is also bounded. The device puts the
+command on the used ring before it signals, so it is there to take at once; a
+device breaking that promise used to cost a CPU spinning for ever, and now costs
+an error after 10 ms.
+
+Both hosts echo the request's sequence number in every reply (prds.swift,
+chipdevice.swift), so nothing well-behaved is newly refused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0127-prose-display-prose-chip-a-command-that-timed-out-is-still-t.patch 213a975dd92853bd5ab95bfab992fc433d2e6d77989ee943d6f26a02f48b502d
+---
+ .../graphics/prose_display/prose_display.cpp  | 67 ++++++++++++++++---
+ .../drivers/misc/prose_chip/prose_chip.cpp    | 60 +++++++++++++++--
+ 2 files changed, 112 insertions(+), 15 deletions(-)
+
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index 1b3bdf9afa..893b153c8f 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -37,6 +37,9 @@
+ #define INFO(x...) dprintf("prose_display: " x)
+ #define ERROR(x...) dprintf("prose_display: " x)
+ 
++static const bigtime_t kCommandTimeout = 5000000;
++static const int32 kDequeueAttempts = 1000;
++
+ #define PRDS_EVENT_BUFFERS		8
+ #define PRDS_RESPONSE_OFFSET	2048	// in the command page
+ // The host shows TV static instead (hvgpu); 1 restores the self-test.
+@@ -77,6 +80,7 @@ struct prds_info {
+ 	mutex						command_lock;
+ 	sem_id						command_done;
+ 	uint64						seq;
++	bool						command_outstanding;	// the device has the page
+ 
+ 	area_id						event_area;
+ 	uint8*						events;
+@@ -200,7 +204,40 @@ prds_event_callback(void* driverCookie, void* cookie)
+ }
+ 
+ 
++/*!	Waits up to \a timeout for the command in flight to complete, and takes it
++	off the queue. There is never more than one, so whatever completes is it.
++*/
++static status_t
++prds_collect(prds_info* info, bigtime_t timeout)
++{
++	status_t status = acquire_sem_etc(info->command_done, 1, B_RELATIVE_TIMEOUT, timeout);
++	if (status != B_OK)
++		return status;
++
++	// The completion is signalled once the device has put the command on the
++	// used ring, so it is there to take. A bound all the same, so that a device
++	// breaking that promise costs an error rather than a CPU.
++	for (int32 attempt = 0; attempt < kDequeueAttempts; attempt++) {
++		if (info->virtio->queue_dequeue(info->control_queue, NULL, NULL)) {
++			info->command_outstanding = false;
++			return B_OK;
++		}
++		spin(10);
++	}
++
++	ERROR("a command completed but was not on the used ring\n");
++	return B_ERROR;
++}
++
++
+ /*!	Sends one request and waits for its response (synchronous, serialized).
++
++	Request and response share the one command page, so it is the device's from
++	the moment a command is queued until it is collected -- including after the
++	caller has given up waiting. A command that timed out is collected before
++	the next is written; were it not, its late completion would be taken for the
++	answer to the next one, and every command after that would read its
++	predecessor's.
+ */
+ static status_t
+ prds_command(prds_info* info, void* request, size_t requestSize, void* response,
+@@ -208,6 +245,14 @@ prds_command(prds_info* info, void* request, size_t requestSize, void* response,
+ {
+ 	MutexLocker locker(info->command_lock);
+ 
++	if (info->command_outstanding) {
++		status_t status = prds_collect(info, kCommandTimeout);
++		if (status != B_OK) {
++			ERROR("an earlier command has still not completed\n");
++			return B_BUSY;
++		}
++	}
++
+ 	struct prds_hdr* hdr = static_cast<struct prds_hdr*>(request);
+ 	hdr->seq = ++info->seq;
+ 	memcpy(info->command, request, requestSize);
+@@ -222,21 +267,25 @@ prds_command(prds_info* info, void* request, size_t requestSize, void* response,
+ 		ERROR("queueing command %#" B_PRIx32 " failed: %s\n", hdr->type, strerror(status));
+ 		return status;
+ 	}
++	info->command_outstanding = true;
+ 
+-	status = acquire_sem_etc(info->command_done, 1, B_RELATIVE_TIMEOUT, 5000000);
++	status = prds_collect(info, kCommandTimeout);
+ 	if (status != B_OK) {
+ 		ERROR("command %#" B_PRIx32 " timed out\n", hdr->type);
+ 		return status;
+ 	}
+-	while (!info->virtio->queue_dequeue(info->control_queue, NULL, NULL))
+-		spin(10);
+ 
+-	memcpy(response, info->command + PRDS_RESPONSE_OFFSET, responseSize);
+-	struct prds_hdr* respHdr = static_cast<struct prds_hdr*>(response);
+-	if (respHdr->seq != hdr->seq)
+-		ERROR("response sequence %" B_PRIu64 " != %" B_PRIu64 "\n", respHdr->seq, hdr->seq);
+-	if (respHdr->type != PRDS_RESP_OK) {
+-		ERROR("command %#" B_PRIx32 " failed: %#" B_PRIx32 "\n", hdr->type, respHdr->type);
++	// Checked on the command page, before anything reaches the caller: an
++	// answer to some other command is not to be handed out as this one's.
++	const struct prds_hdr* answer
++		= reinterpret_cast<const struct prds_hdr*>(info->command + PRDS_RESPONSE_OFFSET);
++	if (answer->seq != hdr->seq) {
++		ERROR("answer %" B_PRIu64 " to command %" B_PRIu64 "\n", answer->seq, hdr->seq);
++		return B_ERROR;
++	}
++	memcpy(response, answer, responseSize);
++	if (answer->type != PRDS_RESP_OK) {
++		ERROR("command %#" B_PRIx32 " failed: %#" B_PRIx32 "\n", hdr->type, answer->type);
+ 		return B_ERROR;
+ 	}
+ 	return B_OK;
+diff --git a/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp b/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp
+index 61a7954bce..935dcafa9d 100644
+--- a/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp
++++ b/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp
+@@ -39,6 +39,9 @@
+ #define INFO(x...)	dprintf("prose_chip: " x)
+ #define ERROR(x...)	dprintf("prose_chip: " x)
+ 
++static const bigtime_t kCommandTimeout = 5000000;
++static const int32 kDequeueAttempts = 1000;
++
+ // The command page: a request of at most a header plus one tune, then the
+ // answer. Both live in one contiguous allocation, so a request is two physical
+ // entries into the same page and never a scatter list.
+@@ -64,6 +67,7 @@ struct prch_info {
+ 	mutex						lock;		// one command at a time
+ 	sem_id						done;
+ 	uint64						seq;
++	bool						outstanding;	// the device has the command page
+ 
+ 	struct prose_chip_config	config;
+ 	int32						openCount;
+@@ -82,10 +86,42 @@ prch_callback(void* driverCookie, void* cookie)
+ }
+ 
+ 
++/*!	Waits up to \a timeout for the command in flight to complete, and takes it
++	off the queue. There is never more than one, so whatever completes is it.
++*/
++static status_t
++prch_collect(prch_info* info, bigtime_t timeout)
++{
++	status_t status = acquire_sem_etc(info->done, 1, B_RELATIVE_TIMEOUT, timeout);
++	if (status != B_OK)
++		return status;
++
++	// The completion is signalled once the device has put the command on the
++	// used ring, so it is there to take. A bound all the same, so that a device
++	// breaking that promise costs an error rather than a CPU.
++	for (int32 attempt = 0; attempt < kDequeueAttempts; attempt++) {
++		if (info->virtio->queue_dequeue(info->queue, NULL, NULL)) {
++			info->outstanding = false;
++			return B_OK;
++		}
++		spin(10);
++	}
++
++	ERROR("a command completed but was not on the used ring\n");
++	return B_ERROR;
++}
++
++
+ /*!	One command, there and back. The queue carries a request buffer the host
+ 	reads and a response buffer it writes; the caller waits for the answer,
+ 	because every one of these is a thing the player asked for and wants the
+ 	result of.
++
++	Both buffers are the one command page, so it is the device's from the moment
++	a command is queued until it is collected -- including after the caller has
++	given up waiting. A command that timed out is collected before the next is
++	written; were it not, its late completion would be taken for the answer to
++	the next one, and every command after that would read its predecessor's.
+ */
+ static status_t
+ prch_command(prch_info* info, const void* request, size_t requestSize,
+@@ -95,6 +131,15 @@ prch_command(prch_info* info, const void* request, size_t requestSize,
+ 		return B_BAD_VALUE;
+ 
+ 	MutexLocker locker(info->lock);
++
++	if (info->outstanding) {
++		status_t status = prch_collect(info, kCommandTimeout);
++		if (status != B_OK) {
++			ERROR("an earlier command has still not completed\n");
++			return B_BUSY;
++		}
++	}
++
+ 	memcpy(info->buffer, request, requestSize);
+ 	reinterpret_cast<struct prose_chip_hdr*>(info->buffer)->seq = ++info->seq;
+ 	memset(info->buffer + PRCH_RESPONSE_AT, 0, PRCH_RESPONSE_MAX);
+@@ -108,20 +153,23 @@ prch_command(prch_info* info, const void* request, size_t requestSize,
+ 		ERROR("queueing a command failed: %s\n", strerror(status));
+ 		return status;
+ 	}
+-	status = acquire_sem_etc(info->done, 1, B_RELATIVE_TIMEOUT, 5000000);
++	info->outstanding = true;
++
++	status = prch_collect(info, kCommandTimeout);
+ 	if (status != B_OK) {
+-		ERROR("command timed out\n");
++		ERROR("command %" B_PRIu64 " timed out\n", info->seq);
+ 		return status;
+ 	}
+-	while (!info->virtio->queue_dequeue(info->queue, NULL, NULL))
+-		spin(10);
+ 
+ 	struct prose_chip_resp* answer
+ 		= reinterpret_cast<struct prose_chip_resp*>(info->buffer + PRCH_RESPONSE_AT);
++	if (answer->hdr.seq != info->seq) {
++		ERROR("answer %" B_PRIu64 " to command %" B_PRIu64 "\n", answer->hdr.seq,
++			info->seq);
++		return B_ERROR;
++	}
+ 	if (response != NULL)
+ 		memcpy(response, answer, sizeof(*response));
+-	if (answer->hdr.seq != info->seq)
+-		ERROR("answer out of sequence\n");
+ 	if (answer->hdr.type != PROSE_CHIP_RESP_OK)
+ 		return B_ERROR;
+ 	return B_OK;
