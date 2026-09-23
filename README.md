@@ -411,6 +411,7 @@ table there also records why each one exists.
 | 0129 | `prose_midi` in Haiku's coding style |
 | 0130 | `memcpy`, `memmove` and `memset` are Arm's own for arm64: sixteen bytes an instruction, at any alignment, where the portable C moved eight at best and one at a time whenever the two pointers were differently aligned |
 | 0131 | app_server fills rectangles sixteen bytes a store instead of eight |
+| 0132 | Programs built by Prose's own clang can use thread-local storage (`thread_local`, `std::call_once`): the loader now handles the TLS descriptors clang emits on arm64 |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

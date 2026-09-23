@@ -1,0 +1,183 @@
+From 2e886ecabab83fd05340592ddfe1de10a51ebf9a Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 21:50:08 +0100
+Subject: [PATCH] runtime_loader: TLS descriptors on arm64 (R_AARCH64_TLSDESC)
+
+clang generates every dynamic thread-local access on arm64 as a call
+through a TLS descriptor, and the arm64 runtime_loader knew only the
+traditional relocations GCC uses (TLS_DTPMOD64, TLS_DTPREL64). So any
+program clang built that touches a thread_local -- including through
+libstdc++'s std::call_once, which passes its callable in two thread_local
+globals -- failed to load: "Troubles relocating: Bad data". Prose's own
+clang has shipped that way since it arrived.
+
+An R_AARCH64_TLSDESC relocation now fills its two words with a resolver,
+__arch_tlsdesc_dynamic, and the module and the offset in the module's TLS
+block, packed into one word so nothing is allocated. The resolver asks
+get_tls_address() for the calling thread's variable and returns its
+distance from TPIDR_EL0, which the generated code adds back. It saves
+every register a C++ call may clobber, since the descriptor ABI lets it
+change only x0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0132-runtime-loader-tls-descriptors-on-arm64-r-aarch64-tlsdesc.patch eee44cf6dcc63db6ca7ab8a3ad5b54eb051b31d05cf7b132e09c95507ea93167
+---
+ src/system/runtime_loader/arch/arm64/Jamfile  |  1 +
+ .../arch/arm64/arch_relocate.cpp              | 31 ++++++++
+ .../runtime_loader/arch/arm64/arch_tlsdesc.S  | 79 +++++++++++++++++++
+ 3 files changed, 111 insertions(+)
+ create mode 100644 src/system/runtime_loader/arch/arm64/arch_tlsdesc.S
+
+diff --git a/src/system/runtime_loader/arch/arm64/Jamfile b/src/system/runtime_loader/arch/arm64/Jamfile
+index 686c19f095..0746f147df 100644
+--- a/src/system/runtime_loader/arch/arm64/Jamfile
++++ b/src/system/runtime_loader/arch/arm64/Jamfile
+@@ -14,6 +14,7 @@ for architectureObject in [ MultiArchSubDirSetup arm64 ] {
+ 
+ 		StaticLibrary <$(architecture)>libruntime_loader_$(TARGET_ARCH).a :
+ 			arch_relocate.cpp
++			arch_tlsdesc.S
+ 			:
+ 			<src!system!libroot!os!arch!$(TARGET_ARCH)!$(architecture)>thread.o
+ 			<$(architecture)>posix_string_arch_$(TARGET_ARCH).o
+diff --git a/src/system/runtime_loader/arch/arm64/arch_relocate.cpp b/src/system/runtime_loader/arch/arm64/arch_relocate.cpp
+index 24fd7bbd84..f55b1f942c 100644
+--- a/src/system/runtime_loader/arch/arm64/arch_relocate.cpp
++++ b/src/system/runtime_loader/arch/arm64/arch_relocate.cpp
+@@ -8,6 +8,7 @@
+ #include <stdlib.h>
+ 
+ #include "arch_elf.h"
++#include "elf_tls.h"
+ #include "runtime_loader_private.h"
+ 
+ #include <runtime_loader.h>
+@@ -21,6 +22,19 @@
+ #endif
+ 
+ 
++extern "C" void __arch_tlsdesc_dynamic();
++
++
++/*!	Called by __arch_tlsdesc_dynamic() (arch_tlsdesc.S), on the thread whose
++	variable it is.
++*/
++extern "C" void*
++__arch_tlsdesc_address(unsigned dso, addr_t offset)
++{
++	return get_tls_address(dso, offset);
++}
++
++
+ static status_t
+ relocate_rela(image_t* rootImage, image_t* image, Elf64_Rela* rel,
+ 	size_t relLength, SymbolLookupCache* cache)
+@@ -69,6 +83,23 @@ relocate_rela(image_t* rootImage, image_t* image, Elf64_Rela* rel,
+ 			case R_AARCH64_TLS_DTPREL64:
+ 				relocValue = symAddr;
+ 				break;
++			case R_AARCH64_TLSDESC:
++			{
++				// A descriptor is two words: the resolver, and what it needs.
++				// The module goes in the upper half of the second word and
++				// the offset in its TLS block in the lower.
++				Elf64_Addr dso = symbolImage == NULL
++					? image->dso_tls_id : symbolImage->dso_tls_id;
++				Elf64_Addr offset = symAddr + rel[i].r_addend;
++				if (dso > UINT32_MAX || offset > UINT32_MAX) {
++					TRACE(("TLS descriptor out of range: dso %" B_PRIu64
++						", offset %" B_PRIu64 "\n", dso, offset));
++					return B_BAD_DATA;
++				}
++				((Elf64_Addr*)relocAddr)[1] = (dso << 32) | offset;
++				relocValue = (Elf64_Addr)&__arch_tlsdesc_dynamic;
++				break;
++			}
+ 			default:
+ 				TRACE(("unhandled relocation type %d\n", type));
+ 				return B_BAD_DATA;
+diff --git a/src/system/runtime_loader/arch/arm64/arch_tlsdesc.S b/src/system/runtime_loader/arch/arm64/arch_tlsdesc.S
+new file mode 100644
+index 0000000000..ffde126bd4
+--- /dev/null
++++ b/src/system/runtime_loader/arch/arm64/arch_tlsdesc.S
+@@ -0,0 +1,79 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include <asm_defs.h>
++
++
++/*!	The resolver of an R_AARCH64_TLSDESC descriptor.
++
++	clang generates every dynamic thread-local access on arm64 as a call
++	through a TLS descriptor: x0 points at the descriptor, the call goes to the
++	descriptor's first word, and the result added to TPIDR_EL0 is the
++	variable's address. The descriptor's second word is the module in its upper
++	half and the offset in the module's TLS block in its lower half; see
++	arch_relocate.cpp.
++
++	The TLS descriptor ABI lets the resolver change x0 and nothing else, so
++	every register a C++ function may clobber is saved around the call.
++*/
++FUNCTION(__arch_tlsdesc_dynamic):
++	stp		x29, x30, [sp, #-16]!
++	mov		x29, sp
++
++	stp		x1, x2, [sp, #-16]!
++	stp		x3, x4, [sp, #-16]!
++	stp		x5, x6, [sp, #-16]!
++	stp		x7, x8, [sp, #-16]!
++	stp		x9, x10, [sp, #-16]!
++	stp		x11, x12, [sp, #-16]!
++	stp		x13, x14, [sp, #-16]!
++	stp		x15, x16, [sp, #-16]!
++	stp		x17, x18, [sp, #-16]!
++	stp		q0, q1, [sp, #-32]!
++	stp		q2, q3, [sp, #-32]!
++	stp		q4, q5, [sp, #-32]!
++	stp		q6, q7, [sp, #-32]!
++	stp		q16, q17, [sp, #-32]!
++	stp		q18, q19, [sp, #-32]!
++	stp		q20, q21, [sp, #-32]!
++	stp		q22, q23, [sp, #-32]!
++	stp		q24, q25, [sp, #-32]!
++	stp		q26, q27, [sp, #-32]!
++	stp		q28, q29, [sp, #-32]!
++	stp		q30, q31, [sp, #-32]!
++
++	ldr		x1, [x0, #8]
++	lsr		x0, x1, #32
++	and		x1, x1, #0xffffffff
++	bl		__arch_tlsdesc_address
++	mrs		x1, tpidr_el0
++	sub		x0, x0, x1
++
++	ldp		q30, q31, [sp], #32
++	ldp		q28, q29, [sp], #32
++	ldp		q26, q27, [sp], #32
++	ldp		q24, q25, [sp], #32
++	ldp		q22, q23, [sp], #32
++	ldp		q20, q21, [sp], #32
++	ldp		q18, q19, [sp], #32
++	ldp		q16, q17, [sp], #32
++	ldp		q6, q7, [sp], #32
++	ldp		q4, q5, [sp], #32
++	ldp		q2, q3, [sp], #32
++	ldp		q0, q1, [sp], #32
++	ldp		x17, x18, [sp], #16
++	ldp		x15, x16, [sp], #16
++	ldp		x13, x14, [sp], #16
++	ldp		x11, x12, [sp], #16
++	ldp		x9, x10, [sp], #16
++	ldp		x7, x8, [sp], #16
++	ldp		x5, x6, [sp], #16
++	ldp		x3, x4, [sp], #16
++	ldp		x1, x2, [sp], #16
++
++	ldp		x29, x30, [sp], #16
++	ret
++FUNCTION_END(__arch_tlsdesc_dynamic)
