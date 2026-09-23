@@ -1,0 +1,55 @@
+From 74c763f2ec7b6669c0706c08e3bd2f85cb3872ed Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 23:19:22 +0100
+Subject: [PATCH] libroot: posix_spawn runs the path it is given, not argv[0]
+
+When there are no file actions or attributes, posix_spawn() and
+posix_spawnp() used load_image(), whose kernel side runs argv[0]: the
+path argument was used only to test the executable. POSIX runs the path
+and passes argv[0] through untouched, and programs commonly give just the
+file's name there. So posix_spawn("/tmp/test", {"test"}) failed with
+ENOENT, and {"x"} ran whatever the runtime loader found for "x" on the
+PATH; posix_spawn("/bin/sh", {"sh"}) worked only because sh is on it.
+Found through Mojo's Process.run(), which passes the file's name.
+
+load_image() is kept for the calls where argv[0] is the path; everything
+else takes the fork and exec path, which executes the path. A path
+without a slash is still looked up on PATH, as Haiku's exec does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0133-libroot-posix-spawn-runs-the-path-it-is-given-not-argv-0.patch 0ebd313266424017a07858287e486b968b0c4dc36a25ca97b7b4ad30f50cfe0b
+---
+ src/system/libroot/posix/spawn.cpp | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/system/libroot/posix/spawn.cpp b/src/system/libroot/posix/spawn.cpp
+index 2e036667bd..504088dc24 100644
+--- a/src/system/libroot/posix/spawn.cpp
++++ b/src/system/libroot/posix/spawn.cpp
+@@ -588,6 +588,16 @@ spawn_using_load_image(pid_t *_pid, const char *_path,
+ }
+ 
+ 
++/*!	Whether load_image() would run the file posix_spawn() is asked to run:
++	the kernel runs argv[0], not the path.
++*/
++static bool
++load_image_runs_path(const char* path, char* const argv[])
++{
++	return argv[0] != NULL && strcmp(argv[0], path) == 0;
++}
++
++
+ static int
+ do_posix_spawn(pid_t *_pid, const char *path,
+ 	const posix_spawn_file_actions_t *actions,
+@@ -595,7 +605,8 @@ do_posix_spawn(pid_t *_pid, const char *path,
+ 	bool envpath)
+ {
+ 	if ((actions == NULL || (*actions)->count == 0)
+-			&& (attrp == NULL || (*attrp)->flags == 0)) {
++			&& (attrp == NULL || (*attrp)->flags == 0)
++			&& load_image_runs_path(path, argv)) {
+ 		return spawn_using_load_image(_pid, path, argv, envp, envpath);
+ 	} else {
+ 		return spawn_using_fork(_pid, path, actions, attrp, argv, envp,

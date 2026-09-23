@@ -412,6 +412,8 @@ table there also records why each one exists.
 | 0130 | `memcpy`, `memmove` and `memset` are Arm's own for arm64: sixteen bytes an instruction, at any alignment, where the portable C moved eight at best and one at a time whenever the two pointers were differently aligned |
 | 0131 | app_server fills rectangles sixteen bytes a store instead of eight |
 | 0132 | Programs built by Prose's own clang can use thread-local storage (`thread_local`, `std::call_once`): the loader now handles the TLS descriptors clang emits on arm64 |
+| 0133 | `posix_spawn()` runs the program it is given, whatever `argv[0]` says; it used to run `argv[0]`, so spawning `/some/path/tool` as `tool` failed |
+| 0134 | A program that fails to spawn another no longer prints its own pending output twice |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

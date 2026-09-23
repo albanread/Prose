@@ -1,0 +1,38 @@
+From d605508f8403c89cea9128d7e4b2634014bf3cd5 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 23:25:03 +0100
+Subject: [PATCH] libroot: a spawn that cannot exec does not repeat the
+ parent's output
+
+posix_spawn() falls back to vfork() and exec, and a child whose exec
+fails reports the error through a pipe and ends with _exit(127). Haiku's
+_exit() flushes stdio, and its vfork() is a copying fork, so the child
+wrote out its copy of whatever the parent had buffered and not yet
+written: with output going to a pipe or a file, every failed spawn
+printed the parent's pending output a second time. Seen as repeated test
+results from a program checking that spawning a missing file fails.
+
+The child now ends with _kern_exit_team(), which writes nothing; _exit()
+itself is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0134-libroot-a-spawn-that-cannot-exec-does-not-repeat-the-parent-.patch b18761fc6d07a618305d09a915dd0f686ed891d7807dd978af34bafd1169faa2
+---
+ src/system/libroot/posix/spawn.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/system/libroot/posix/spawn.cpp b/src/system/libroot/posix/spawn.cpp
+index 504088dc24..494e4c7f43 100644
+--- a/src/system/libroot/posix/spawn.cpp
++++ b/src/system/libroot/posix/spawn.cpp
+@@ -547,7 +547,9 @@ spawn_using_fork(pid_t *_pid, const char *path,
+ fail_child:
+ 	write(fds[1], &err, sizeof(err));
+ 	close(fds[1]);
+-	_exit(127);
++	// Not _exit(), which flushes stdio: vfork() is a copying fork here, and
++	// the parent's unwritten output would be written a second time.
++	_kern_exit_team(127);
+ 
+ fail:
+ 	err = errno;
