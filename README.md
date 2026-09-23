@@ -409,6 +409,8 @@ table there also records why each one exists.
 | 0127 | The display and chip drivers survive a command that times out, instead of reading every later command's predecessor's answer |
 | 0128 | `prose_portal` in Haiku's coding style |
 | 0129 | `prose_midi` in Haiku's coding style |
+| 0130 | `memcpy`, `memmove` and `memset` are Arm's own for arm64: sixteen bytes an instruction, at any alignment, where the portable C moved eight at best and one at a time whenever the two pointers were differently aligned |
+| 0131 | app_server fills rectangles sixteen bytes a store instead of eight |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series
