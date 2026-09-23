@@ -174,7 +174,10 @@ final class ProseMIDIDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate
     private var rxElements: [VZVirtioQueueElement] = []      // guest's buffers for host -> guest bytes
     private var pendingToGuest: [UInt8] = []
     private var parser = MIDIParser()
-    private var synth: HostSynth?
+    /// The Mac's General MIDI synth. The chip device shares it rather than
+    /// starting a second one, so a machine runs one synthesiser however many
+    /// ways a tune can reach it.
+    private(set) var synth: HostSynth?
     private var client = MIDIClientRef()
     private var source = MIDIEndpointRef()
     private var destination = MIDIEndpointRef()

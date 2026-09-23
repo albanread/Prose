@@ -1496,6 +1496,9 @@ final class Presenter: NSObject {
         p.spriteWords = UInt32(pane.spriteOffset / 4)
         p.frame = UInt32(truncatingIfNeeded: ticks)
         p.time = Float(CACurrentMediaTime() - paneEpoch)
+        p.frontOffset = UInt32(pane.liveFront)
+        p.paramWords = UInt32((pane.paletteOffset / 4) + 256 + pane.worldHeight * 16
+            + Pane.spritePalettes * 16)
         if let fit, let surface {
             p.dest = SIMD4<Float>(Float(pane.destX), Float(pane.destY),
                                   Float(pane.destWidth), Float(pane.destHeight))
@@ -1656,6 +1659,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     lazy var automation = Automation(controller: self)      // automation.swift
     lazy var settingsWindow = SettingsWindow(controller: self)   // settings.swift
     let midi = ProseMIDIDevice()
+    let chip = ProseChipDevice()               // chipdevice.swift: ABC in, sound out
     let portal = ProsePortalDevice()           // portal.swift: the guest answers the host
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
@@ -1835,6 +1839,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
         if !args.contains("--no-portal") {
             config.customVirtioDevices += [portal.configuration]
         }
+        if !args.contains("--no-chip") {
+            // the Prose Chip (chipdevice.swift): the guest sends notation, the
+            // Mac makes the sound -- on the trio, or on the synth when the
+            // notation says it was written for one.
+            chip.borrowSynth = { [midi] in midi.synth }
+            config.customVirtioDevices += [chip.configuration]
+        }
         if !args.contains("--no-midi") {
             // the Prose MIDI port (midi.swift): the guest's MIDI played by the Mac
             config.customVirtioDevices += [midi.configuration]
@@ -1891,6 +1902,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     func stopVM(reason: String) {
         if let router = inputRouter { log(router.stats) }
         if !args.contains("--no-midi") { log(midi.stats) }
+        if !args.contains("--no-chip") { log(chip.stats) }
         soundCapture?.finish()
         if portal.attached { log(portal.stats) }
         guard !stopping else { return }

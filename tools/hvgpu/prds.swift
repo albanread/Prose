@@ -373,7 +373,7 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
     /// share, so these four commands only ever move descriptions around: a
     /// present is forty bytes and never a pixel.
     private func paneCreate(_ req: Data) -> UInt32 {
-        guard req.count >= 64 else { return PRDS.errInvalid }
+        guard req.count >= 72 else { return PRDS.errInvalid }
         let id = Int(leU32(req, 16))
         guard id < Pane.maxPanes else { return PRDS.errInvalid }
         var pane = PaneState()
@@ -385,13 +385,17 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         pane.offset = Int(leU64(req, 40))
         pane.bufferStride = Int(leU64(req, 48))
         pane.paletteOffset = Int(leU64(req, 56))
+        pane.frontOffset = Int(leU64(req, 64))
         guard pane.worldWidth > 0, pane.worldHeight > 0,
               pane.format == Pane.formatIndexed8 || pane.format == Pane.formatB8G8R8X8,
               pane.paletteOffset % 4 == 0,
               pane.offset >= 0, pane.bufferStride >= pane.stride * pane.worldHeight,
               pane.offset + pane.bufferStride * pane.buffers <= poolSize,
               pane.paletteOffset + (256 + pane.worldHeight * 16
-                  + Pane.spritePalettes * 16) * 4 <= poolSize
+                  + Pane.spritePalettes * 16 + Pane.shaderParams) * 4 <= poolSize,
+              pane.frontOffset >= 0,
+              pane.frontOffset == 0
+                  || pane.frontOffset + pane.bufferStride * pane.buffers <= poolSize
         else { return PRDS.errBounds }
         pane.live = true
         presentLock.withLock { paneTable[id] = pane }

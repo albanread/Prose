@@ -19,8 +19,9 @@ import simd
 enum Pane {
     static let maxPanes = 8
     static let maxClipRects = 32
-    static let maxSprites = 64
+    static let maxSprites = 128
     static let spritePalettes = 64
+    static let shaderParams = 16
     static let maxBuffers = 3
     static let maxShaderBytes = 16384
     static let slotBackground: UInt32 = 0
@@ -43,7 +44,7 @@ struct PaneState {
     var format: UInt32 = Pane.formatIndexed8
     var worldWidth = 0, worldHeight = 0, stride = 0
     var buffers = 1
-    var offset = 0, bufferStride = 0, paletteOffset = 0
+    var offset = 0, bufferStride = 0, paletteOffset = 0, frontOffset = 0
 
     var flags: UInt32 = 0
     var destX = 0, destY = 0, destWidth = 0, destHeight = 0
@@ -66,6 +67,11 @@ struct PaneState {
 
     /// Byte offset in the pool of the buffer the guest last presented.
     var liveOffset: Int { offset + min(bufferIndex, max(buffers - 1, 0)) * bufferStride }
+
+    /// The same for the front plane, or 0 when the pane has none.
+    var liveFront: Int {
+        frontOffset == 0 ? 0 : frontOffset + min(bufferIndex, max(buffers - 1, 0)) * bufferStride
+    }
 }
 
 /// The fragment shader's view of a pane. Guest pixels in, drawable pixels out.
@@ -90,7 +96,9 @@ struct PaneParams {
     var spriteWords: UInt32 = 0             // words into the pool
     var frame: UInt32 = 0
     var time: Float = 0
-    var pad = SIMD3<Float>(0, 0, 0)
+    var frontOffset: UInt32 = 0         // bytes into the pool; 0 = no front plane
+    var paramWords: UInt32 = 0          // words into the pool: the guest's shader parameters
+    var pad: Float = 0
 }
 
 /// Everything both pane shaders need: the uniforms, the full-screen triangle,
@@ -107,7 +115,7 @@ struct PaneParams {
     int2 scroll; uint2 view;
     float4 dest; float2 scale, bias, guest;
     uint clipCount, spriteCount, spriteWords, frame;
-    float time; float3 pad;
+    float time; uint frontOffset, paramWords; float pad;
 };
 
 constant uint kFlagScanline = 2;
@@ -157,6 +165,12 @@ struct pane {
         if (any(w < 0.0) || w.x >= float(par->worldWidth) || w.y >= float(par->worldHeight))
             return 0u;
         return bytes[par->bufferOffset + uint(w.y) * par->strideBytes + uint(w.x)];
+    }
+
+    // What the program set with SetShaderParam: sixteen floats it can change
+    // every frame, which is how a shader is told anything at all.
+    float param(uint i) const {
+        return as_type<float>(pool[par->paramWords + min(i, 15u)]);
     }
 
     // A global palette entry.
@@ -295,6 +309,14 @@ fragment float4 pane_fmain(VOut in [[stage_in]],
         float4 sc = spriteColour(pool, p, s, palette);
         colour = float4(mix(colour.rgb, sc.rgb, spriteAlpha * sc.a),
                         max(colour.a, sc.a * spriteAlpha));
+    }
+    // The front plane: the same indices, over the sprites, out of the global
+    // palette. A score should not go behind an alien that flies across it.
+    if (p.frontOffset != 0u && all(world >= 0.0)
+        && world.x < float(p.worldWidth) && world.y < float(p.worldHeight)) {
+        uint front = bytes[p.frontOffset + row * p.strideBytes + uint(world.x)];
+        if (front != 0u)
+            colour = float4(entry(pool, p.paletteWords + front).rgb, 1.0);
     }
     if (colour.a <= 0.0) discard_fragment();     // index 0: whatever is under shows through
 

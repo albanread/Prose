@@ -229,6 +229,14 @@ struct Tune {
     var notes: [Note] = []
     var chips: [ChipSet] = []
     var bpm = 120, tempoNum = 1, tempoDen = 4
+    /// `%%MIDI program n` per voice. A tune that names one was written for a
+    /// synthesiser, not for the chip -- which is the whole of how the player
+    /// decides where to send it.
+    var midiPrograms: [Int: Int] = [:]
+    var midiChannels: [Int: Int] = [:]
+    /// True once anything said `[I:chip`. Chip settings win: a tune carrying
+    /// both was written for the chip and has a fallback program.
+    var isChipTune = false
     /// Bar lines the accumulated durations did not land on. ABC does not
     /// require a bar to be full -- several of these tunes write half bars on
     /// purpose -- so this is a report and not a refusal. A tune that suddenly
@@ -312,7 +320,20 @@ func parseABC(_ source: String) -> Tune {
 
     for rawLine in source.split(separator: "\n", omittingEmptySubsequences: false) {
         let line = String(rawLine).trimmingCharacters(in: .whitespaces)
-        if line.isEmpty || line.hasPrefix("%") { continue }
+        if line.isEmpty { continue }
+        if line.hasPrefix("%") {
+            // %%MIDI program 80 -- the one directive that changes where a
+            // tune goes. Everything else beginning with % is a comment.
+            let words = line.dropFirst(2).split(separator: " ").map(String.init)
+            if words.count >= 3 && words[0] == "MIDI" {
+                if words[1] == "program", let n = Int(words[2]) {
+                    tune.midiPrograms[current] = n
+                } else if words[1] == "channel", let n = Int(words[2]) {
+                    tune.midiChannels[current] = n
+                }
+            }
+            continue
+        }
 
         // A header line: one letter, a colon, the value.
         let chars = Array(line)
@@ -321,6 +342,7 @@ func parseABC(_ source: String) -> Tune {
             let value = String(chars[2...]).trimmingCharacters(in: .whitespaces)
             if letter == "X" || letter == "T" || letter == "w" || letter == "%" { continue }
             if letter == "I" {
+                if value.hasPrefix("chip") { tune.isChipTune = true }
                 for (v, p, n) in chipSettings(value, currentVoice: current) {
                     tune.chips.append(Tune.ChipSet(tick: voice(v).tick, voice: v,
                                                    param: p, value: n))
@@ -411,6 +433,7 @@ func parseABC(_ source: String) -> Tune {
                     let value = String(chars[(i + 3)..<min(close, chars.count)])
                         .trimmingCharacters(in: .whitespaces)
                     if letter == "I" {
+                        if value.hasPrefix("chip") { tune.isChipTune = true }
                         for (v, p, n) in chipSettings(value, currentVoice: current) {
                             tune.chips.append(Tune.ChipSet(tick: voice(v).tick,
                                 voice: v, param: p, value: n))
