@@ -29,13 +29,19 @@ will be written here. The discipline that keeps it working:
   in the plan.
 - **Kill guest apps by numeric team id** — `ps` puts the id in the column
   after the command name; `killall` does not exist on this image.
-- **One machine per image file, always** — two VZ machines attached to the same
-  `.image` corrupt it, and the second one to boot says "boot loader invalid".
-  Count before you start (`pgrep -f 'MacOS/hvgpu' | wc -l`; `pgrep -c` is not a
-  macOS flag) and refuse if it is not zero. A cancelled background task leaves
-  its `nohup`ed machine running, which is how two get attached without anyone
-  deciding to; killing the task is not killing the machine. Work on a clone of
-  a test image and never attach the pristine one.
+- **One machine at a time, and always by path** — two VZ machines on the same
+  `.image` corrupt it; the second to boot says "boot loader invalid". Count
+  before starting, matching the **image path** (`pgrep -f 'scratchpad/foo.image'`),
+  never `pgrep -f 'MacOS/hvgpu'`: that pattern matches your own shell and the
+  user's installed `/Applications/Prose.app` as well, so it both miscounts and
+  kills their machine. `pgrep -c` is not a macOS flag.
+  **`osascript -e 'tell application "Prose"'` starts the installed app**, because
+  the name resolves through LaunchServices — a poll loop waiting for your build
+  to come up launches `/Applications/Prose.app` instead and boots the user's
+  real machine. Always target the bundle by path:
+  `tell application "/Volumes/xb/HaikuArmQemu/build/Prose.app"`. A cancelled
+  background task also leaves its `nohup`ed machine running; killing the task is
+  not killing the machine. Boot a clone, never the pristine test image.
 - **Before believing a guest failure, prove the guest binary is the host
   build** — compare sizes (`stat -f%z` host vs `ls -l` guest). A ProseDraw
   session lost an hour to "the fix didn't work" against an hour-stale
