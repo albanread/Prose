@@ -73,9 +73,9 @@ neon_fill(uint8_t* to, uint32_t color, size_t length)
 }
 
 
-// app_server's fill as drawing_support.h has it and as GCC builds it there:
-// one 8-byte store per iteration. SCALAR_LOOP keeps clang from vectorizing
-// it, which GCC at -O2 does not do either.
+// app_server's fill as drawing_support.h had it before patch 0131, and as GCC
+// built it: one 8-byte store per iteration. SCALAR_LOOP keeps clang from
+// vectorizing it, which GCC at -O2 did not do either.
 static void
 gfxset32(uint8_t* dst, uint32_t color, int32_t numBytes)
 {
@@ -88,6 +88,30 @@ gfxset32(uint8_t* dst, uint32_t color, int32_t numBytes)
 	}
 	if (numBytes == 4)
 		*(uint32_t*)dst = color;
+}
+
+
+// app_server's fill since patch 0131: sixteen bytes a store, 64 a turn.
+static void
+gfxset32_vector(uint8_t* dst, uint32_t color, int32_t numBytes)
+{
+	typedef uint32_t pixels4 __attribute__((vector_size(16), aligned(4), may_alias));
+	pixels4 colors = { color, color, color, color };
+	while (numBytes >= 64) {
+		pixels4* pixels = (pixels4*)dst;
+		pixels[0] = colors;
+		pixels[1] = colors;
+		pixels[2] = colors;
+		pixels[3] = colors;
+		numBytes -= 64;
+		dst += 64;
+	}
+	while (numBytes >= 16) {
+		*(pixels4*)dst = colors;
+		numBytes -= 16;
+		dst += 16;
+	}
+	gfxset32(dst, color, numBytes);
 }
 
 
@@ -112,6 +136,8 @@ static void (*volatile pNeonCopy)(uint8_t*, const uint8_t*, size_t) = neon_copy;
 static void (*volatile pNeonMoveUp)(uint8_t*, const uint8_t*, size_t) = neon_move_up;
 static void (*volatile pNeonFill)(uint8_t*, uint32_t, size_t) = neon_fill;
 static void (*volatile pGfxset32)(uint8_t*, uint32_t, int32_t) = gfxset32;
+static void (*volatile pGfxset32Vector)(uint8_t*, uint32_t, int32_t)
+	= gfxset32_vector;
 static void (*volatile pZvaZero)(uint8_t*, size_t, size_t) = zva_zero;
 
 enum {
@@ -123,6 +149,7 @@ enum {
 	kNeonMoveScroll,
 	kMemset,
 	kGfxset32,
+	kGfxset32Vector,
 	kNeonFill,
 	kMemsetZero,
 	kZvaZero,
@@ -137,7 +164,8 @@ static const char* const kTestNames[kTestCount] = {
 	"neon copy, off by one pixel",
 	"neon move, scroll one pixel",
 	"memset",
-	"gfxset32 (app_server fill)",
+	"gfxset32, before 0131",
+	"gfxset32, since 0131",
 	"neon fill",
 	"memset, zero",
 	"dc zva, zero",
@@ -176,6 +204,9 @@ run(int test)
 			break;
 		case kGfxset32:
 			pGfxset32(sB, 0x55555555, (int32_t)sLength);
+			break;
+		case kGfxset32Vector:
+			pGfxset32Vector(sB, 0x55555555, (int32_t)sLength);
 			break;
 		case kNeonFill:
 			pNeonFill(sB, 0x55555555, sLength);
@@ -238,6 +269,9 @@ check(size_t zvaBlock)
 	memset(got, 0, kSize);
 	gfxset32(got, 0x11223344, kSize);
 	ok &= memcmp(want, got, kSize) == 0;
+	memset(got, 0, kSize);
+	gfxset32_vector(got + 4, 0x11223344, kSize - 4);
+	ok &= memcmp(want, got + 4, kSize - 4) == 0;
 
 	if (zvaBlock != 0) {
 		memset(want, 0, kSize);
