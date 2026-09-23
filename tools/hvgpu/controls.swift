@@ -157,7 +157,28 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
 
     func stateChanged() {
         inputRouter?.enabled = vm?.state == .running
+        updateGuestProxy()
         chrome?.update()
+    }
+
+    /// The proxy lives and dies with the bridge, which vmnet makes when the
+    /// first machine starts and takes away when the last one goes. Called from
+    /// every state change, and again from the settings window, so turning the
+    /// setting on reaches a machine that is already running.
+    func updateGuestProxy(retriesLeft: Int = 10) {
+        let live = vm?.state == .running || vm?.state == .paused
+        guard live, Settings.guestProxy else { return guestProxy.stop() }
+        guard let bridge = hostBridge() else {
+            // vmnet builds the bridge around the time the machine starts, so
+            // the first look can be too early. Give it a few seconds, then let
+            // the next state change try again.
+            guard retriesLeft > 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.updateGuestProxy(retriesLeft: retriesLeft - 1)
+            }
+            return
+        }
+        guestProxy.start(on: bridge.gateway, port: UInt16(Settings.guestProxyPort))
     }
 
     /// Status bar text and light colour.

@@ -8,7 +8,8 @@ VPN tunnel the guest cannot use itself.
 """
 import selectors, socket, sys, threading
 
-HOST, PORT = sys.argv[1] if len(sys.argv) > 1 else "192.168.64.1", 8888
+HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.64.1"
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8888
 
 def pump(a, b):
     sel = selectors.DefaultSelector()

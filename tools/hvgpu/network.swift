@@ -59,10 +59,13 @@ extension Controller {
                 else { return nil }
                 return String(cString: host)
             }
-            guard let gateway = text(sa), let mask = text(pointer.pointee.ifa_netmask),
-                  mask == "255.255.255.0" else { continue }
-            // Only the /24 vmnet bridges; a 10.x bridge0 is the Mac's own.
-            guard gateway.hasPrefix("192.168.") else { continue }
+            guard let gateway = text(sa), let mask = text(pointer.pointee.ifa_netmask)
+            else { continue }
+            // vmnet numbers its bridges from 100; bridge0 is the Mac's own, and
+            // matching on the address instead would miss a shared network moved
+            // off 192.168.64 by Shared_Net_Address.
+            guard let number = Int(name.dropFirst("bridge".count)), number >= 100
+            else { continue }
             let prefix = gateway.split(separator: ".").dropLast().joined(separator: ".") + "."
             found = HostBridge(interface: name, gateway: gateway, mask: mask, prefix: prefix)
             break

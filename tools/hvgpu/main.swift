@@ -1663,6 +1663,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     let midi = ProseMIDIDevice()
     let chip = ProseChipDevice()               // chipdevice.swift: ABC in, sound out
     let portal = ProsePortalDevice()           // portal.swift: the guest answers the host
+    let guestProxy = GuestProxy()              // guestproxy.swift: the guest's way out past a VPN
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
     let presenter = Presenter()

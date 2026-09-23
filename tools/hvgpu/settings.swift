@@ -21,6 +21,8 @@ enum Settings {
     static let shareEnabledKey = "prose.shareEnabled"
     static let shareFolderKey = "prose.shareFolder"
     static let shareReadOnlyKey = "prose.shareReadOnly"
+    static let proxyKey = "prose.guestProxy"
+    static let proxyPortKey = "prose.guestProxyPort"
 
     /// VZ's own floor and ceiling. A configuration outside these is refused, so
     /// every value is clamped to them however it arrived.
@@ -52,6 +54,21 @@ enum Settings {
     }
     private static func stored(_ key: String, _ fallback: Bool) -> Bool {
         UserDefaults.standard.object(forKey: key) as? Bool ?? fallback
+    }
+
+    /// The guest's way out past a VPN. On by default: it costs nothing when the
+    /// guest does not use it, listens only on the bridge the machine is already
+    /// on, and the alternative is a browser that mysteriously cannot load a page.
+    /// Unlike everything else here it takes effect at once -- it is a service on
+    /// this side, not part of the machine's configuration.
+    static var guestProxy: Bool {
+        if args.contains("--no-proxy") { return false }
+        if args.contains("--proxy") { return true }
+        return stored(proxyKey, true)
+    }
+    static var guestProxyPort: Int {
+        let wanted = Int(option("--proxy-port") ?? "") ?? stored(proxyPortKey, 8888)
+        return min(65535, max(1024, wanted))
     }
 
     /// A flag beats a setting: scripts say what they mean and should not be
@@ -116,6 +133,10 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     private let readOnlyBox = NSButton(checkboxWithTitle: "Read only", target: nil, action: nil)
     private let folderPath = NSTextField(labelWithString: "")
     private let choose = NSButton(title: "Choose…", target: nil, action: nil)
+    private let proxyBox = NSButton(checkboxWithTitle: "Let the guest reach the internet through this Mac",
+                                    target: nil, action: nil)
+    private let proxyPort = NSTextField(string: "")
+    private let proxyNote = NSTextField(wrappingLabelWithString: "")
     private let note = NSTextField(wrappingLabelWithString: "")
     private let restart = NSButton(title: "Restart Now", target: nil, action: nil)
 
@@ -176,6 +197,27 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         return stack
     }
 
+    /// The proxy is a service on this side, so unlike everything else in this
+    /// window it needs no restart; the label says what it is actually for.
+    private func proxyRow() -> NSView {
+        let name = NSTextField(labelWithString: "Port")
+        name.alignment = .right
+        name.translatesAutoresizingMaskIntoConstraints = false
+        name.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        proxyPort.translatesAutoresizingMaskIntoConstraints = false
+        proxyPort.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        proxyPort.target = self
+        proxyPort.action = #selector(changed(_:))
+        proxyNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        proxyNote.textColor = .secondaryLabelColor
+        proxyNote.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        let stack = NSStackView(views: [name, proxyPort, proxyNote])
+        stack.orientation = .horizontal
+        stack.spacing = 8
+        stack.alignment = .centerY
+        return stack
+    }
+
     private func build() {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 468, height: 300),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -191,7 +233,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         note.textColor = .secondaryLabelColor
         note.preferredMaxLayoutWidth = 420
 
-        for box in [network, sound, shareBox, readOnlyBox] {
+        for box in [network, sound, shareBox, readOnlyBox, proxyBox] {
             box.target = self
             box.action = #selector(changed(_:))
         }
@@ -218,10 +260,13 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         buttons.spacing = 8
 
         let folder = folderRow()
+        let proxyRule = NSBox()
+        proxyRule.boxType = .separator
+        let proxy = proxyRow()
         let column = NSStackView(views: [
             row("Processors", cpuField, cpuStepper, Settings.cpuChoices, ""),
             row("Memory", memoryField, memoryStepper, Settings.memoryChoicesGiB, " GB"),
-            toggles, rule, shareToggles, folder, note, buttons,
+            toggles, rule, shareToggles, folder, proxyRule, proxyBox, proxy, note, buttons,
         ])
         column.orientation = .vertical
         column.alignment = .leading
@@ -236,7 +281,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
             column.widthAnchor.constraint(equalToConstant: 420),
         ])
-        for filling: NSView in [buttons, shareToggles, folder, rule, note] {
+        for filling: NSView in [buttons, shareToggles, folder, rule, proxyRule, proxy, note] {
             filling.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         }
         w.contentView = content
@@ -253,6 +298,20 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         readOnlyBox.state = Settings.shareReadOnly ? .on : .off
         folderPath.stringValue = Settings.shareFolder.path
             .replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        proxyBox.state = Settings.guestProxy ? .on : .off
+        if proxyPort.currentEditor() == nil { proxyPort.stringValue = "\(Settings.guestProxyPort)" }
+        proxyPort.isEnabled = Settings.guestProxy
+        // What it says depends on whether it is actually listening, because
+        // "on" and "reachable" are not the same thing: there is no bridge to
+        // listen on until a machine is running.
+        let proxy = controller.guestProxy
+        if !Settings.guestProxy {
+            proxyNote.stringValue = "Off. The guest goes out through vmnet alone."
+        } else if proxy.isRunning {
+            proxyNote.stringValue = "Listening on \(proxy.summary)"
+        } else {
+            proxyNote.stringValue = "Starts when the machine does."
+        }
 
         // A flag in force makes the setting a lie; say so rather than show a
         // control that changes nothing.
@@ -301,6 +360,14 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         if sender === sound { Settings.set(Settings.soundKey, sound.state == .on) }
         if sender === shareBox { Settings.set(Settings.shareEnabledKey, shareBox.state == .on) }
         if sender === readOnlyBox { Settings.set(Settings.shareReadOnlyKey, readOnlyBox.state == .on) }
+        if sender === proxyBox || sender === proxyPort {
+            if sender === proxyBox { Settings.set(Settings.proxyKey, proxyBox.state == .on) }
+            if sender === proxyPort, let wanted = Int(proxyPort.stringValue) {
+                Settings.set(Settings.proxyPortKey, min(65535, max(1024, wanted)))
+            }
+            // A service, not a configuration: it changes now, not next start.
+            controller.updateGuestProxy()
+        }
         refresh()
     }
 

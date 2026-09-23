@@ -1,5 +1,15 @@
 # guestproxy — let the guest out while a VPN owns the Mac's default route
 
+**This is now built into Prose.app and on by default** (`guestproxy.swift`,
+Settings ▸ "Let the guest reach the internet through this Mac"). It starts with
+the machine, listens on the bridge address, and stops when the machine does.
+The Python script here is the same thing standalone, kept because it is easy to
+read and easy to run against a machine Prose.app is not managing.
+
+Note that a connected VPN also stops DHCP working, so the guest may need
+Machine ▸ Network ▸ Assign a Static Address before it can reach the proxy at
+all. See `docs/networking.md`.
+
 A VPN on the Mac takes the guest off the internet: vmnet still NATs, so the
 guest reaches the gateway and the LAN, but nothing routed through the tunnel
 comes back. See `docs/networking.md` for the measurements.

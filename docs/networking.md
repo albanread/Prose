@@ -68,8 +68,10 @@ osascript -e 'tell application "Prose" to execute "curl -s -m 10 -o /dev/null -w
 | gateway pings, `1.1.1.1` does not | **NAT or the host's own path out.** Not a Prose fault |
 | `1.1.1.1` pings, `curl` hangs | DNS — `/boot/system/settings/network/resolv.conf` should say `nameserver 192.168.64.1` |
 
-Note that the guest's resolver is at `/boot/system/settings/network/resolv.conf`.
-There is no `/etc/resolv.conf`; looking for one and finding nothing means
+The guest keeps resolver settings in two places: DHCP writes
+`/boot/system/settings/network/resolv.conf`, and `/etc` is a symlink to
+`/boot/system/settings/etc`, so `/etc/resolv.conf` is a second, separate file.
+A fresh boot may have one and not the other, so finding one missing means
 nothing.
 
 ## A VPN on the host takes the guest off the internet
@@ -89,6 +91,19 @@ fails**, and off-LAN is what the tunnel takes. Disconnecting the VPN turned the
 last two rows into 0.0% loss and HTTP 200 with nothing else changed. If the
 guest has an address, reaches the gateway, reaches the LAN, and nothing else,
 look at the host's VPN before looking anywhere near Prose.
+
+**It takes DHCP with it.** A machine started while the VPN is connected gets no
+address at all — `inet addr: --`, `link configuring` — and a machine that
+already holds one keeps it. Three observations agree: VPN up and a fresh
+hardware address got nothing; VPN down and the same address got `.196` at once;
+VPN up again on the next boot and it got nothing. This is what made the pool
+look exhausted, and it is why the guest could not even reach the proxy until it
+was given an address by hand.
+
+So the whole cure while a VPN is connected is **a static address and the
+proxy**: Machine ▸ Network ▸ Assign a Static Address, which is verified to work
+(`ifconfig <iface> <addr> <mask>`, `route add <iface> default gw <gw>`, and a
+`nameserver` line in `/etc/resolv.conf`), then the proxy below for the way out.
 
 ### One test that looks useful and is not
 
