@@ -395,6 +395,12 @@ table there also records why each one exists.
 | 0112 | `prose_examples` 1.0-3: `07-game` loads its ship from a PNG and draws its score |
 | 0113 | Game panes: a front plane over the sprites, sixteen shader parameters, and 128 sprites a frame |
 | 0114 | Galaxigans: the fixed shooter, ported from the Mojo original onto the game pane |
+| 0115 | The Prose Chip: a virtio device through which a program hands the host ABC notation, played by three SID-flavoured chips of three voices each |
+| 0116 | Galaxigans: its music and effects as ABC, with the effects on a chip of their own so the tune is never cut off |
+| 0117 | Galaxigans: `v=` names a voice from one, not from zero, so every voice gets the instrument it was given |
+| 0118 | NetSurf ships knowing about the proxy the machine's host runs, and Prose keeps the setting in step with it |
+| 0120 | DHCP: a request answered by nothing at all restarts the negotiation, as RFC 2131 4.4.2 says it should, instead of asking the same unanswered question for ever |
+| 0121 | Retro moves to Demos, which is what it is; Galaxigans stays in Games, which is what it is |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series
