@@ -101,6 +101,25 @@ This fails whether or not a VPN is running, and proves nothing. vmnet NATs
 address is not NAT'd, so the reply has nowhere to come back to. It was read as
 evidence during this investigation and it was not evidence.
 
+## Getting out while the VPN is up
+
+`tools/guestproxy/guestproxy.py` binds an HTTP/CONNECT proxy to the bridge
+address. Its outbound sockets are ordinary host sockets, so they take the Mac's
+route — tunnel included — and the guest only ever talks to `192.168.64.1`.
+
+NetSurf supports a proxy in full (`http_proxy`, `http_proxy_host`,
+`http_proxy_port`, `http_proxy_auth`, `…_user`, `…_pass`, `http_proxy_noproxy`
+in `/boot/home/config/settings/NetSurf/Choices`) because it is libcurl
+underneath. Measured with NordVPN connected: direct `curl` gave `000` and
+NetSurf rendered `https://example.com/` through the proxy in 0.0 s.
+
+Haiku's own stack does not. `BUrlContext`/`BHttpRequest` have no proxy support,
+Network preferences has no proxy UI, and `BProxySecureSocket` — which looks like
+the exception — cannot connect as written, because its `sscanf` check demands 2
+assignments from a format with one. So **`pkgman` and HaikuDepot cannot use a
+proxy**; package work needs the VPN down. `tools/guestproxy/README.md` has the
+detail.
+
 ## Changing the subnet
 
 `com.apple.vmnet.plist` takes `Shared_Net_Address` and `Shared_Net_Mask`.
