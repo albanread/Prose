@@ -3,7 +3,12 @@
 // program's. Two loads, each for 3 s across N threads:
 //   create: create_sem + delete_sem  (the global semaphore table)
 //   shared: acquire_sem + release_sem on one semaphore (one hot lock)
+//
+// Throughput alone can flatter an unfair lock: one thread winning it again and
+// again from its own cache does a great deal of work while the rest starve. So
+// each load also reports the spread between the busiest and idlest thread.
 #include <OS.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -34,7 +39,14 @@ shared_loop(void* data)
 	return 0;
 }
 
-static double
+struct result {
+	double	perSecond;
+	uint64	least;
+	uint64	most;
+};
+
+
+static struct result
 run(thread_func loop, int threads)
 {
 	uint64 counts[64] = { 0 };
@@ -46,13 +58,28 @@ run(thread_func loop, int threads)
 	}
 	snooze(3000000);
 	sStop = 1;
+
+	struct result out = { 0, UINT64_MAX, 0 };
 	uint64 total = 0;
 	for (int i = 0; i < threads; i++) {
 		status_t result;
 		wait_for_thread(ids[i], &result);
 		total += counts[i];
+		if (counts[i] < out.least)
+			out.least = counts[i];
+		if (counts[i] > out.most)
+			out.most = counts[i];
 	}
-	return total / 3.0;
+	out.perSecond = total / 3.0;
+	return out;
+}
+
+
+static void
+report(const char* name, struct result r)
+{
+	printf(" %s %.0f ops/s (thread spread %.1fx)", name, r.perSecond,
+		r.least > 0 ? (double)r.most / r.least : 0.0);
 }
 
 int
@@ -61,10 +88,10 @@ main(int argc, char** argv)
 	int threads = argc > 1 ? atoi(argv[1]) : 14;
 	sShared = create_sem(1, "shared");
 	for (int round = 1; round <= 3; round++) {
-		double create = run(create_loop, threads);
-		double shared = run(shared_loop, threads);
-		printf("round %d, %d threads: create %.0f ops/s, shared %.0f ops/s\n", round, threads,
-			create, shared);
+		printf("round %d, %d threads:", round, threads);
+		report("create", run(create_loop, threads));
+		report(" shared", run(shared_loop, threads));
+		printf("\n");
 	}
 	return 0;
 }
