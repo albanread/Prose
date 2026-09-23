@@ -69,3 +69,85 @@ a failed swap should let LSE beat LL/SC under contention; and a kernel without
 DEBUG_SPINLOCKS, whose release is a plain store, should narrow the gap. If both
 hold, the fault is the spinlock's stampede, not the choice of instruction --
 and a spinlock that does not stampede would help either.
+
+# Blitting benchmark
+
+`blitbench.c` measures the instructions that move pixels. The Prose accelerant
+has no 2D hooks, so app_server does every copy and fill itself, on the CPU:
+
+- the back buffer goes to the front one row at a time through `memcpy`
+  (`HWInterface::_CopyToFront`)
+- scrolling is `memcpy`/`memmove` per row (`DrawingEngine::_CopyRect`), and so
+  is drawing a 32-bit bitmap with `B_OP_COPY` (`DrawBitmapNoScale.h`)
+- rectangles are filled by `gfxset32` (`drawing_support.h`)
+
+On arm64 those `memcpy`, `memmove` and `memset` are libroot's portable C
+(`generic_memcpy.c`, `generic_memset.c`, musl's `memmove.c`); x86_64 has tuned
+ones, arm64 none. As GCC builds them, they move one 8-byte register per
+iteration -- and when source and destination differ in alignment modulo 8,
+one *byte* per iteration, for the whole copy. `gfxset32` stores one 8-byte
+register per iteration. Nothing in the pixel path uses the vector registers
+or `dc zva`.
+
+It builds on macOS too, where the same loops give a reference for the same
+core. In the guest (boot one machine with `scripts/run-machine.sh`):
+
+	clang -O2 -o blitbench blitbench.c && ./blitbench && ./blitbench 256
+
+The source does not fit in one portal request; send it in pieces.
+
+## What it found (2026-09-23)
+
+M4 Max, best of five trials after warm-up. Guest: Prose under
+Virtualization.framework, 4 CPUs. Host: the same loops on macOS, where
+`memcpy`, `memmove` and `memset` are Apple's. The frame is 1920x1080x32
+(7.9 MB), which fits in L2; 256 MB is past every cache. GB/s:
+
+| | guest, frame | guest, 256 MB | host, frame |
+|---|---|---|---|
+| memcpy, aligned | 35.3 | 32.2 | 88.6 |
+| memcpy, off by one pixel | **4.5** | **4.1** | 86.3 |
+| memmove, scroll one pixel | **4.5** | **4.4** | 69.1 |
+| neon copy, aligned | 66.2 | 61.2 | 67.2 |
+| neon copy, off by one pixel | 65.8 | 59.4 | 67.1 |
+| neon move, scroll one pixel | 56.3 | 55.3 | 60.8 |
+| memset | 35.7 | 35.4 | 140.8 |
+| gfxset32, app_server's fill | 35.8 | 35.4 | 35.8 |
+| neon fill | 133.0 | 133.6 | 139.9 |
+| memset, zero | 35.9 | 35.6 | 282.1 |
+| dc zva, zero | 282.7 | 213.6 | 281.5 |
+
+- **The byte loop is the worst of it.** A sideways scroll by an odd number
+  of pixels, a 32-bit bitmap copied to an odd x, and every other row of a
+  bitmap with an odd width (rows are padded only to 4 bytes) all run at
+  4.5 GB/s -- fifteen times slower than a vector loop doing the same
+  misaligned copy. The fallback is for processors that fault on unaligned
+  access. arm64 does not, on Normal memory, and on these cores misalignment
+  costs next to nothing (65.8 against 66.2).
+- Aligned copies -- every back-to-front copy, vertical scrolls -- reach
+  35 GB/s, 40% of what macOS's `memcpy` does on the same core.
+- Fills reach a quarter of a vector fill. Zeroing reaches an eighth of
+  `dc zva`, which Prose's kernel allows at EL0 (DCZID_EL0.DZP clear, 64-byte
+  blocks).
+- The virtual machine is not the limit: the guest's vector loops run as fast
+  as the host's.
+- The memory type is right. prose_display maps the pool
+  `B_WRITE_BACK_MEMORY` and clones keep the type, so the frame and back
+  buffers are Normal memory, where unaligned, vector and `dc zva` accesses
+  are all legal. On Device memory they would fault.
+- FEAT_MOPS, the architecture's own copy and set instructions, is no way
+  out: the M4 Max does not report it, and M1s never had it.
+
+At 1080p, a full-screen back-to-front copy costs 0.24 ms today and a
+full-screen sideways scroll by one pixel 1.9 ms, about a ninth of a 60 Hz
+frame. Both scale with the pixel count.
+
+What would fix it, not yet done: arm64 `memcpy`, `memmove` and `memset` in
+libroot from Arm's optimized-routines (`string/aarch64/memcpy-advsimd.S` and
+`memset.S`, MIT OR Apache-2.0 WITH LLVM-exception) -- q-register pairs,
+unaligned heads and tails, `dc zva` for large zero fills, and one entry point
+for `memcpy` and `memmove` that handles overlap. That last matters here:
+`DrawingEngine::_CopyRect` calls `memcpy` on overlapping rows when it moves
+content left, and that works today only because the portable C copies
+forwards. And `gfxset32` as a vector loop: a 32-bit colour is not a byte, so
+`memset` cannot do its job.
