@@ -95,6 +95,15 @@ final class Trio {
     private let lock = NSLock()
     var masterVolume = 1.0
 
+    /// Allocate voices exactly as the reference player does -- first free,
+    /// whatever the tune's `V:` says. Off by default, because it is the rule
+    /// that makes `[I:chip v=n]` unreliable: where two voices alternate with
+    /// rests, the second lands on the voice the first just released and
+    /// inherits its registers, so a bass plays with a lead's envelope. The
+    /// tests turn it on to hold this engine to the reference sample for
+    /// sample; a game wants the voice its notation names.
+    var referenceAllocation = false
+
     init() {
         scratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrames)
         scratch.initialize(repeating: 0, count: scratchFrames)
@@ -119,6 +128,7 @@ final class Trio {
     func play(_ source: String, track: Int, loop: Bool) -> (notes: Int, warnings: [String]) {
         let tune = parseABC(source)
         let steps = schedule(tune)
+        var warnings = tune.barWarnings + strandedSettings(tune)
         lock.lock()
         defer { lock.unlock() }
         guard track >= 0 && track < kTrioTracks else { return (0, ["no such track"]) }
@@ -128,7 +138,35 @@ final class Trio {
         tracks[track].position = 0
         tracks[track].loop = loop
         tracks[track].playing = !steps.isEmpty
-        return (tune.notes.count, tune.barWarnings)
+        return (tune.notes.count, warnings)
+    }
+
+    /// Chip settings addressed to a chip no note of this tune plays on.
+    ///
+    /// `v=` is one-based and picks a voice of chip (v-1)/3, while the notes go
+    /// wherever their `V:` puts them. Get the two out of step and the
+    /// registers are set on one chip while the notes sound on another, so the
+    /// tune plays on default registers -- a pulse wave where noise was asked
+    /// for. It still makes a noise, just the wrong one, which is exactly the
+    /// kind of thing nobody notices until an explosion sounds like a beep.
+    private func strandedSettings(_ tune: Tune) -> [String] {
+        guard !tune.notes.isEmpty, !tune.chips.isEmpty else { return [] }
+        var playedOn = Set<Int>()
+        for n in tune.notes { playedOn.insert(max(0, (n.voice - 1) / 3)) }
+        var stranded = Set<Int>()
+        for c in tune.chips where c.param < CP.pan {         // per-voice registers only
+            let chip = (c.voice - 1) / 3
+            if c.voice < 1 || c.voice > kVoicesPerTrio {
+                stranded.insert(-1)
+            } else if !playedOn.contains(chip) {
+                stranded.insert(c.voice)
+            }
+        }
+        return stranded.sorted().map { v in
+            v < 0 ? "a chip setting names a voice outside 1..9, so it was dropped"
+                  : "[I:chip v=\(v)] is chip \((v - 1) / 3), which no note of this "
+                    + "tune plays on: those registers were set where nothing sounds"
+        }
     }
 
     func stop(track: Int) {
@@ -165,15 +203,17 @@ final class Trio {
     // MARK: the schedule, applied
 
     private func applyNoteOn(_ abcVoice: Int, _ midi: Int, track: Int) {
-        // V:n lands on chip (n-1)/3, and inside it the FIRST FREE voice --
-        // the reference player's rule, kept exactly. Preferring the voice the
-        // tune names reads better on paper and sounds different: where two
-        // voices alternate with rests, first-free puts the second voice on
-        // the one the first just released, so it inherits those registers.
-        // That is the sound these tunes were written against.
+        // V:n lands on chip (n-1)/3, and inside it the voice its own `[I:chip
+        // v=n]` addresses -- so the notes and the registers meet, which is the
+        // whole point of the grammar naming a voice. Any other free voice
+        // after that, and the reference's plain first-free when asked for.
         let chip = max(0, min(kChipsPerTrio - 1, (abcVoice - 1) / 3))
+        let preferred = max(0, (abcVoice - 1) % 3)
         var chosen = -1
         let base = chip * 3
+        if !referenceAllocation && macros[base + preferred].note < 0 {
+            chosen = preferred
+        }
         if chosen < 0 {
             for v in 0..<3 where macros[base + v].note < 0 { chosen = v; break }
         }

@@ -81,6 +81,9 @@ for name in tunes.keys.sorted() where name.hasPrefix("M_") {
     let reference = referenceRender(tunes[name]!, frames: frames)
 
     let trio = Trio()
+    // Hold the engine to the reference's own allocation rule, so this
+    // measures the engine and not the improvement Prose makes on top of it.
+    trio.referenceAllocation = true
     _ = trio.play(tunes[name]!, track: 0, loop: false)
     let buf = UnsafeMutablePointer<Float>.allocate(capacity: frames * 2)
     defer { buf.deallocate() }
