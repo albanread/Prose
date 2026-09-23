@@ -403,6 +403,7 @@ table there also records why each one exists.
 | 0121 | Retro moves to Demos, which is what it is; Galaxigans stays in Games, which is what it is |
 | 0122 | `sisong` 2.16-8: Compile and Run builds a folder that has a makefile with `make`, so an example that needs a library links |
 | 0123 | The interrupt controller reaches CPUs past the sixteenth, so a machine can have more than sixteen processors |
+| 0124 | A CPU that never starts is named in the boot log, instead of the machine silently spinning at boot |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

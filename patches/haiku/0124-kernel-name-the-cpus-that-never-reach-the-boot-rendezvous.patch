@@ -1,0 +1,154 @@
+From c9376b75358ccaf6320d653c67aa12439da7fddf Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 17:17:59 +0100
+Subject: [PATCH] kernel: name the CPUs that never reach the boot rendezvous
+
+Every CPU enters the kernel and waits in the first rendezvous until all of them
+have. One that never started -- a PSCI CPU_ON that failed, a firmware table
+describing a CPU that is not there, a secondary that could not find its own
+entry -- left every other CPU spinning there for ever, before there is a
+debugger or syslog to say why. From the outside it is a machine at 100% that
+never boots, and nothing in any log.
+
+So the boot rendezvous records which CPUs have arrived, and once the first of
+them has waited two seconds it names the ones still missing, once, through the
+early boot console, which on Prose is the RAM console the host reads:
+
+	smp: 19 of 20 CPUs entered the kernel within 2 s; still waiting for CPU 19
+
+and then goes on waiting rather than panicking. panic() cannot work before
+debug_init(), and a CPU that is only slow still gets to arrive; the boot then
+carries on as if nothing had happened.
+
+Only the first rendezvous changes. It is the one where CPUs that may never have
+started are waited for; every later one is between CPUs that got past it.
+system_time() reads CNTVCT_EL0 and CNTFRQ_EL0 directly, so it works this early,
+and the report is written by one CPU only, the first to arrive.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0124-kernel-name-the-cpus-that-never-reach-the-boot-rendezvous.patch 9368e726ee1415538a286d2c0423e9c25c36bb5240f158ec5a4b8f398d023248
+---
+ headers/private/kernel/smp.h |  1 +
+ src/system/kernel/main.cpp   |  2 +-
+ src/system/kernel/smp.cpp    | 62 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/headers/private/kernel/smp.h b/headers/private/kernel/smp.h
+index 4e2560f80b..98a608a3d2 100644
+--- a/headers/private/kernel/smp.h
++++ b/headers/private/kernel/smp.h
+@@ -84,6 +84,7 @@ status_t smp_init_post_generic_syscalls(void);
+ bool smp_trap_non_boot_cpus(int32 cpu, uint32* rendezVous);
+ void smp_wake_up_non_boot_cpus(void);
+ void smp_cpu_rendezvous(uint32* var);
++void smp_cpu_boot_rendezvous(uint32* var, int32 cpu);
+ 
+ void smp_send_ici(int32 targetCPU, int32 message, addr_t data, addr_t data2, addr_t data3,
+ 		void *data_ptr, uint32 flags);
+diff --git a/src/system/kernel/main.cpp b/src/system/kernel/main.cpp
+index d578bba3db..4e0a7c0368 100644
+--- a/src/system/kernel/main.cpp
++++ b/src/system/kernel/main.cpp
+@@ -114,7 +114,7 @@ _start(kernel_args *bootKernelArgs, int currentCPU)
+ 	smp_set_num_cpus(bootKernelArgs->num_cpus);
+ 
+ 	// wait for all the cpus to get here
+-	smp_cpu_rendezvous(&sCpuRendezvous);
++	smp_cpu_boot_rendezvous(&sCpuRendezvous, currentCPU);
+ 
+ 	// the passed in kernel args are in a non-allocated range of memory
+ 	if (currentCPU == 0)
+diff --git a/src/system/kernel/smp.cpp b/src/system/kernel/smp.cpp
+index f047b0e9a5..0edfb082bb 100644
+--- a/src/system/kernel/smp.cpp
++++ b/src/system/kernel/smp.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include <smp.h>
+ 
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -25,6 +26,7 @@
+ #include <arch/smp.h>
+ #include <boot/kernel_args.h>
+ #include <cpu.h>
++#include <debug.h>
+ #include <generic_syscall.h>
+ #include <interrupts.h>
+ #include <spinlock_contention.h>
+@@ -89,6 +91,11 @@ enum mailbox_source {
+ 
+ static int32 sBootCPUSpin = 0;
+ 
++// The CPUs that have entered the kernel, and how long the first of them waits
++// for the rest before naming the ones that have not (smp_cpu_boot_rendezvous())
++static CPUSet sBootCPUsArrived;
++static const bigtime_t kBootRendezvousPatience = 2000000;
++
+ static int32 sEarlyCPUCallCount;
+ static CPUSet sEarlyCPUCallSet;
+ static void (*sEarlyCPUCallFunction)(void*, int);
+@@ -1318,6 +1325,61 @@ smp_cpu_rendezvous(uint32* var)
+ }
+ 
+ 
++/*!	Names the CPUs that have not reached the boot rendezvous. There is no
++	debugger or syslog yet, so it goes to the early boot console, which on Prose
++	is the RAM console the host reads.
++*/
++static void
++report_missing_boot_cpus(uint32 arrived)
++{
++	char message[256];
++	int length = snprintf(message, sizeof(message), "smp: %" B_PRIu32 " of %"
++		B_PRId32 " CPUs entered the kernel within %" B_PRIdBIGTIME " s; still "
++		"waiting for CPU", arrived, sNumCPUs, kBootRendezvousPatience / 1000000);
++
++	for (int32 cpu = 0; cpu < sNumCPUs; cpu++) {
++		if (sBootCPUsArrived.GetBitAtomic(cpu))
++			continue;
++		if (length >= static_cast<int>(sizeof(message)) - 8)
++			break;
++		length += snprintf(message + length, sizeof(message) - length,
++			" %" B_PRId32, cpu);
++	}
++
++	debug_early_boot_message(message);
++	debug_early_boot_message("\n");
++}
++
++
++/*!	The first rendezvous of the boot, where every CPU enters the kernel and
++	waits for the others. A CPU that never started -- a PSCI CPU_ON that failed,
++	a firmware table describing a CPU that is not there -- would otherwise leave
++	all the rest spinning here for ever, before there is anything to say why.
++	So once the first CPU to arrive has waited \c kBootRendezvousPatience, it
++	names the ones still missing, once, and goes on waiting: a CPU that was only
++	slow still arrives, and the boot carries on as if nothing had happened.
++
++	Otherwise this is smp_cpu_rendezvous(), and \a var must be 0 before any CPU
++	calls it.
++*/
++void
++smp_cpu_boot_rendezvous(uint32* var, int32 cpu)
++{
++	sBootCPUsArrived.SetBitAtomic(cpu);
++	const bool first = atomic_add(reinterpret_cast<int32*>(var), 1) == 0;
++	const bigtime_t reportAt = system_time() + kBootRendezvousPatience;
++	bool reported = false;
++
++	while (*var < static_cast<uint32>(sNumCPUs)) {
++		if (first && !reported && system_time() >= reportAt) {
++			report_missing_boot_cpus(*var);
++			reported = true;
++		}
++		cpu_wait(reinterpret_cast<int32*>(var), sNumCPUs);
++	}
++}
++
++
+ status_t
+ smp_init(kernel_args* args)
+ {
