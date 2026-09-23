@@ -652,7 +652,7 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
     // MARK: --script: drive the controls unattended (tests)
 
     /// "T:step,T:step..." with T in seconds from launch. Steps: pause resume shutdown start
-    /// restart force-stop force-restart screenshot statusbar toolbar fullscreen keys-cad
+    /// restart force-stop force-restart screenshot activate statusbar toolbar fullscreen keys-cad
     /// keys-print stats quit size=WxH snapshot=PATH (the window, chrome included, as PNG).
     func runScript(_ script: String) {
         for step in script.split(separator: ",") {
@@ -684,6 +684,12 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
         case "force-stop": hardStop(thenStart: false)
         case "force-restart": hardStop(thenStart: true)
         case "screenshot": takeScreenshot(nil)
+        case "activate":
+            // A scripted run stays out of the keyboard's way, and macOS pauses
+            // the display link of a window nobody can see. This is how a test
+            // you actually want to watch asks for the front.
+            presenter.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         case "statusbar": toggleStatusBar(nil)
         case "toolbar": presenter.window?.toggleToolbarShown(nil)
         case "fullscreen": toggleFullScreen(nil)

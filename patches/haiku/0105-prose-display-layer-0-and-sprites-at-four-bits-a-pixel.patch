@@ -1,0 +1,141 @@
+From 2ebd6c3aa51826956009bf48072543db9f7966f2 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 07:03:10 +0100
+Subject: [PATCH] prose_display: layer 0, and sprites at four bits a pixel
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PRDS_CMD_PANE_SHADER carries a fragment function the guest wrote: the
+source sits in the pane's own allocation and only its offset crosses, so
+nothing of it goes through the queue. The host compiles it, and when it
+will not compile writes the compiler's complaint back into the buffer the
+source came from — the only channel the guest has for hearing it.
+
+PRDS_SPRITE_F_4BIT packs two pixels to a byte, low nibble first, with the
+palette base picking which bank of sixteen they mean.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0105-prose-display-layer-0-and-sprites-at-four-bits-a-pixel.patch f75fcdab5113aba1376ad0c77a30827f74f72d2dd51d405e717b3db4afbc1723
+---
+ .../graphics/prose_display/prose_display.h    | 24 +++++++++++++
+ .../graphics/prose_display/prose_display.cpp  | 36 +++++++++++++++++++
+ 2 files changed, 60 insertions(+)
+
+diff --git a/headers/private/graphics/prose_display/prose_display.h b/headers/private/graphics/prose_display/prose_display.h
+index 7c0597fb7f..f707393877 100644
+--- a/headers/private/graphics/prose_display/prose_display.h
++++ b/headers/private/graphics/prose_display/prose_display.h
+@@ -49,6 +49,11 @@
+ #define PRDS_SPRITE_F_SCREEN		(1 << 0)	/* placed in view space, unaffected by scroll */
+ #define PRDS_SPRITE_F_FLIP_X		(1 << 1)
+ #define PRDS_SPRITE_F_FLIP_Y		(1 << 2)
++#define PRDS_SPRITE_F_4BIT			(1 << 3)	/* two pixels a byte, low nibble first */
++
++/* Layer 0: a fragment function the guest writes, compiled by the host and run
++   under the pane. The source lives in the pane's allocation. */
++#define PRDS_SHADER_MAX				16384
+ 
+ enum {
+ 	PRDS_CMD_SET_MODE			= 0x0100,
+@@ -60,6 +65,7 @@ enum {
+ 	PRDS_CMD_PANE_CONFIG		= 0x0201,
+ 	PRDS_CMD_PANE_PRESENT		= 0x0202,
+ 	PRDS_CMD_PANE_DESTROY		= 0x0203,
++	PRDS_CMD_PANE_SHADER		= 0x0204,
+ 
+ 	PRDS_RESP_OK				= 0x1000,
+ 	PRDS_RESP_ERR_INVALID		= 0x1100,
+@@ -179,6 +185,15 @@ struct prds_pane_destroy {
+ 	uint32	reserved;
+ } _PACKED;
+ 
++struct prds_pane_shader {
++	struct prds_hdr	hdr;
++	uint32	pane_id;
++	uint32	length;				/* bytes of source; 0 removes the shader */
++	uint64	offset;				/* pool offset of the source text */
++	uint32	flags;
++	uint32	reserved;
++} _PACKED;
++
+ /* A sprite lives in the pool, so a present carries no pixels. */
+ struct prds_sprite {
+ 	int32	x;					/* world pixels, or view pixels with F_SCREEN */
+@@ -281,6 +296,14 @@ struct prds_pane_config_request {
+ 	struct prds_rect	clip[PRDS_MAX_CLIP_RECTS];
+ };
+ 
++struct prds_pane_shader_request {
++	uint32	pane_id;
++	uint32	length;				/* 0 removes the shader */
++	uint64	offset;				/* within the allocation */
++	uint32	flags;
++	uint32	reserved;
++};
++
+ struct prds_pane_present_request {
+ 	uint32	pane_id;
+ 	uint32	buffer_index;
+@@ -308,6 +331,7 @@ enum {
+ 	PRDS_PANE_PRESENT,									/* prds_pane_present_request* */
+ 	PRDS_PANE_FREE,										/* uint32* pane_id */
+ 	PRDS_PANE_WAIT_RETRACE,								/* bigtime_t*: blocks until vsync or timeout */
++	PRDS_PANE_SHADER,									/* prds_pane_shader_request* */
+ };
+ 
+ 
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index 6e4129ae83..287547cc4f 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -469,6 +469,34 @@ prds_pane_configure(prds_info* info, struct prds_pane_config_request* config)
+ }
+ 
+ 
++/// Layer 0: the guest's own fragment function, compiled by the host. The
++/// source is in the pane's allocation, so nothing of it crosses on the queue.
++static status_t
++prds_pane_shader(prds_info* info, struct prds_pane_shader_request* shader)
++{
++	MutexLocker locker(info->pane_lock);
++	status_t status = prds_pane_check(info, shader->pane_id);
++	if (status != B_OK)
++		return status;
++	if (shader->length > PRDS_SHADER_MAX)
++		return B_BAD_VALUE;
++	uint64 base = info->panes[shader->pane_id].offset;
++	uint64 size = info->panes[shader->pane_id].size;
++	if (shader->length > 0
++		&& (shader->offset >= size || shader->offset + shader->length > size))
++		return B_BAD_VALUE;
++
++	struct prds_pane_shader request = {};
++	struct prds_resp response = {};
++	request.hdr.type = PRDS_CMD_PANE_SHADER;
++	request.pane_id = shader->pane_id;
++	request.length = shader->length;
++	request.offset = base + shader->offset;
++	request.flags = shader->flags;
++	return prds_command(info, &request, sizeof(request), &response, sizeof(response));
++}
++
++
+ static status_t
+ prds_pane_present(prds_info* info, struct prds_pane_present_request* present)
+ {
+@@ -1038,6 +1066,14 @@ prds_control(void* cookie, uint32 op, void* buffer, size_t length)
+ 			return prds_pane_present(info, &present);
+ 		}
+ 
++		case PRDS_PANE_SHADER:
++		{
++			struct prds_pane_shader_request shader;
++			if (length < sizeof(shader) || user_memcpy(&shader, buffer, sizeof(shader)) != B_OK)
++				return B_BAD_ADDRESS;
++			return prds_pane_shader(info, &shader);
++		}
++
+ 		case PRDS_PANE_WAIT_RETRACE:
+ 		{
+ 			// app_server owns the other retrace semaphore; a game waits on this

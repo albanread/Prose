@@ -104,7 +104,7 @@ their work produced, and everything that makes it good is theirs.
   Virtualization.framework VM with custom virtio devices of its own — a
   shared-surface display, keyboard and tablet, a MIDI port — plus networking,
   sound, and a Mac folder shared into the guest.
-- **`patches/haiku`** — 101 patches against Haiku at hrev60122, applied to a
+- **`patches/haiku`** — 104 patches against Haiku at hrev60122, applied to a
   local tree to build the guest.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
@@ -156,6 +156,13 @@ surface pool and read from there by a Metal fragment shader: palette lookup,
 per-scanline palettes, scrolling, sprites that scale and rotate, and a CRT
 filter, all on the Mac's GPU. Nothing is copied between the byte a program
 writes and the drawable.
+
+Under the indexed world sits **layer 0**: a fragment function the program itself
+wrote, sent as Metal source and compiled by the host, showing wherever the world
+leaves index 0. That is the division of labour the design is for — smooth things
+(skies, gradients, water) are what a shader is good at and what an indexed
+buffer is worst at; sharp things (tiles, text, sprites) are the other way round.
+A program gets both in one window and neither has to imitate the other.
 
 It is a `BDirectWindow`, for the half of `BDirectWindow` worth having. A direct
 client on Prose does get a real pointer into the front buffer and pixels written
@@ -367,6 +374,9 @@ table there also records why each one exists.
 | 0102 | `prose_display`: a game-pane arena in the surface pool, and the four pane commands, with a retrace semaphore of its own |
 | 0103 | `libgame`: `BGamePane`, a window whose pixels are palette indices, composited by the Mac's GPU |
 | 0104 | Retro, the demo of the game pane, in the Deskbar's Games |
+| 0105 | `prose_display`: layer 0 — a fragment function the guest wrote, compiled by the host — and sprites at four bits a pixel |
+| 0106 | `libgame`: `BGamePane.SetShader()` and sixteen-colour sprites in palette banks |
+| 0107 | Retro: a shader sky under the indexed world, and balloons in two banks |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

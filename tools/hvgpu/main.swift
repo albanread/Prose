@@ -1166,6 +1166,7 @@ final class Presenter: NSObject {
     /// decorate: the toolbar and status bar go on before the window is shown.
     func makeWindow(vm: VZVirtualMachine, source: PresentSource, decorate: (NSWindow, VMContentView) -> Void) {
         guard let surface = source.surface else { return }
+        presenterMetalDevice = device
         queue = device.makeCommandQueue()
         buffer = device.makeBuffer(bytesNoCopy: surface.base, length: surface.length,
                                     options: .storageModeShared, deallocator: nil)
@@ -1283,6 +1284,7 @@ final class Presenter: NSObject {
 
     private var ticks = 0
     private var noSignalFrame: UInt32 = 0
+    private let paneEpoch = CACurrentMediaTime()
 
     @objc func tick(_ link: CADisplayLink) {
         ticks += 1
@@ -1472,22 +1474,33 @@ final class Presenter: NSObject {
             p.clipCount = UInt32(pane.clip.count)
             p.spriteCount = UInt32(pane.spriteCount)
             p.spriteWords = UInt32(pane.spriteOffset / 4)
+            p.frame = UInt32(truncatingIfNeeded: ticks)
+            p.time = Float(CACurrentMediaTime() - paneEpoch)
 
             var clip = pane.clip.map {
                 SIMD4<UInt32>(UInt32($0.x), UInt32($0.y), UInt32($0.w), UInt32($0.h))
             }
             if !bound {
-                enc.setRenderPipelineState(panePipeline)
                 enc.setFragmentBuffer(pool, offset: 0, index: 0)
                 enc.setFragmentBuffer(pool, offset: 0, index: 2)
                 bound = true
             }
             enc.setFragmentBytes(&p, length: MemoryLayout<PaneParams>.stride, index: 1)
             enc.setFragmentBytes(&clip, length: MemoryLayout<SIMD4<UInt32>>.stride * clip.count, index: 3)
+            // layer 0 underneath, then the world and its sprites over it
+            if let shader = pane.shader {
+                enc.setRenderPipelineState(shader)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            }
+            enc.setRenderPipelineState(panePipeline)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
     }
 }
+
+/// The device the presenter draws with: a shader the display device compiles
+/// has to belong to it, not to whatever MTLCreateSystemDefaultDevice hands back.
+var presenterMetalDevice: MTLDevice?
 
 // The presenter needs the gpu without owning it.
 private weak var presenterGPURef: PresentSource?

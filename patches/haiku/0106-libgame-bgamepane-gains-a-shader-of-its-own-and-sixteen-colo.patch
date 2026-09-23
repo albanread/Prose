@@ -1,0 +1,220 @@
+From f8eb04b0021732c8dcb424af7be9e525076df0d2 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 07:03:10 +0100
+Subject: [PATCH] libgame: BGamePane gains a shader of its own and
+ sixteen-colour sprites
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SetShader() takes one Metal function —
+
+    float3 background(float2 uv, float2 size, float time, uint frame)
+
+— which the host compiles and runs under the world, showing wherever the
+world leaves index 0. It can reach nothing but its own coordinates: not
+the pool, not the palette, not the host. A source that does not compile
+fails the call and leaves the compiler's complaint in ShaderError().
+
+DefineSprite() takes a depth. Four-bit art is written the way it is drawn,
+one byte a pixel, and packed here; the palette base then picks the bank,
+so recolouring a sprite is a number and not a redraw.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0106-libgame-bgamepane-gains-a-shader-of-its-own-and-sixteen-colo.patch 83a8a3db3e0adf1d5f30fab20e43218b66bec15e280d807d616396366e4573dd
+---
+ headers/os/game/GamePane.h | 25 ++++++++++++-
+ src/kits/game/GamePane.cpp | 76 ++++++++++++++++++++++++++++++++++----
+ 2 files changed, 92 insertions(+), 9 deletions(-)
+
+diff --git a/headers/os/game/GamePane.h b/headers/os/game/GamePane.h
+index cb5cb82229..45f3f8e7eb 100644
+--- a/headers/os/game/GamePane.h
++++ b/headers/os/game/GamePane.h
+@@ -49,6 +49,7 @@ enum game_blit_op {
+ 
+ 
+ enum {
++	B_GAME_SPRITE_SCREEN	= 1 << 0,	/* placed in the view, unaffected by scroll */
+ 	B_GAME_SPRITE_FLIP_X	= 1 << 1,
+ 	B_GAME_SPRITE_FLIP_Y	= 1 << 2
+ };
+@@ -100,10 +101,29 @@ public:
+ 									uint32 height,
+ 									game_blit_op op = B_GAME_COPY_KEYED);
+ 
++	// Layer 0: a fragment function of your own, under the world. Write
++	//
++	//     float3 background(float2 uv, float2 size, float time, uint frame)
++	//
++	// in Metal Shading Language; the host compiles it. `uv` runs 0 to 1 across
++	// the view, `size` is the view in pane pixels, `time` is seconds. It draws
++	// a pixel from its own coordinates and can reach nothing else. When it does
++	// not compile the call fails and ShaderError() is the compiler's complaint.
++	// A NULL or empty source takes the layer away again.
++			status_t			SetShader(const char* metalSource);
++			const char*			ShaderError() const;
++
+ 	// Sprites are transformed by the host, so they scale and rotate. Define
+ 	// a shape once; list the ones you want each frame, then Present().
++	//
++	// `pixels` is always one byte per pixel. At a depth of 4 the values are 0
++	// to 15, packed two to a byte here, and the palette base picks which bank
++	// of sixteen colours they mean: sixteen-colour sprites at half the memory
++	// and a bank swap instead of a redraw. Index 0 is transparent either way,
++	// and a sprite's colours always come from the global palette.
+ 			int32				DefineSprite(const uint8* pixels,
+-									uint32 width, uint32 height);
++									uint32 width, uint32 height,
++									uint32 depth = 8);
+ 			void				ClearSprites();
+ 			status_t			DrawSprite(int32 shape, int32 x, int32 y,
+ 									float scale = 1.0f, float rotation = 0.0f,
+@@ -126,6 +146,7 @@ private:
+ 				uint32			width;
+ 				uint32			height;
+ 				uint32			stride;
++				uint32			depth;		// 8 or 4 bits a pixel
+ 			};
+ 
+ 			void				_Configure();
+@@ -148,6 +169,8 @@ private:
+ 			uint64				fPaletteOffset;
+ 			uint64				fSpriteTableOffset;
+ 			uint64				fSpriteArenaOffset;
++			uint64				fShaderOffset;
++			size_t				fShaderSize;
+ 			size_t				fSpriteArenaSize;
+ 			size_t				fSpriteArenaUsed;
+ 			uint32				fSpriteCount;
+diff --git a/src/kits/game/GamePane.cpp b/src/kits/game/GamePane.cpp
+index 4c36f15c9c..c6a5f1ae9e 100644
+--- a/src/kits/game/GamePane.cpp
++++ b/src/kits/game/GamePane.cpp
+@@ -134,10 +134,12 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	fSpriteArenaOffset = fSpriteTableOffset
+ 		+ PRDS_MAX_SPRITES * sizeof(struct prds_sprite);
+ 	fSpriteArenaOffset = ALIGN_UP(fSpriteArenaOffset, 64);
++	fShaderSize = PRDS_SHADER_MAX;
++	fShaderOffset = ALIGN_UP(fSpriteArenaOffset + fSpriteArenaSize, 64);
+ 
+ 	struct prds_pane_alloc alloc;
+ 	memset(&alloc, 0, sizeof(alloc));
+-	alloc.size = fSpriteArenaOffset + fSpriteArenaSize;
++	alloc.size = fShaderOffset + fShaderSize;
+ 	alloc.format = PRDS_PANE_INDEXED8;
+ 	alloc.world_width = worldWidth;
+ 	alloc.world_height = worldHeight;
+@@ -153,7 +155,7 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	fPaneID = alloc.pane_id;
+ 	fPoolOffset = alloc.pool_offset;
+ 
+-	memset(fPool + fPoolOffset, 0, (size_t)(fSpriteArenaOffset + fSpriteArenaSize));
++	memset(fPool + fPoolOffset, 0, (size_t)(fShaderOffset + fShaderSize));
+ 	fStatus = B_OK;
+ }
+ 
+@@ -405,31 +407,89 @@ BGamePane::Blit(const uint8* source, uint32 sourceStride, int32 x, int32 y,
+ 
+ 
+ int32
+-BGamePane::DefineSprite(const uint8* pixels, uint32 width, uint32 height)
++BGamePane::DefineSprite(const uint8* pixels, uint32 width, uint32 height, uint32 depth)
+ {
+ 	if (fStatus != B_OK || pixels == NULL || width == 0 || height == 0)
+ 		return B_BAD_VALUE;
++	if (depth != 8 && depth != 4)
++		return B_BAD_VALUE;
+ 
+ 	BAutolock lock(fLock);
+ 	if (fShapeCount >= kMaxSprites)
+ 		return B_NO_MEMORY;
+-	size_t need = ALIGN_UP((size_t)width * height, 16);
++	uint32 stride = depth == 4 ? (width + 1) / 2 : width;
++	size_t need = ALIGN_UP((size_t)stride * height, 16);
+ 	if (fSpriteArenaUsed + need > fSpriteArenaSize)
+ 		return B_NO_MEMORY;
+ 
+ 	// The arena holds the pixels; where each shape sits is ours to remember.
+-	uint8* arena = fPool + fPoolOffset + fSpriteArenaOffset;
+-	memcpy(arena + fSpriteArenaUsed, pixels, (size_t)width * height);
++	// Four-bit art arrives a byte a pixel and is packed on the way in, low
++	// nibble first, which is the order the shader unpacks.
++	uint8* arena = fPool + fPoolOffset + fSpriteArenaOffset + fSpriteArenaUsed;
++	if (depth == 4) {
++		for (uint32 y = 0; y < height; y++) {
++			const uint8* in = pixels + (size_t)y * width;
++			uint8* out = arena + (size_t)y * stride;
++			memset(out, 0, stride);
++			for (uint32 x = 0; x < width; x++) {
++				uint8 value = in[x] & 0x0f;
++				if ((x & 1) == 0)
++					out[x / 2] |= value;
++				else
++					out[x / 2] |= value << 4;
++			}
++		}
++	} else
++		memcpy(arena, pixels, (size_t)width * height);
++
+ 	sprite_shape& shape = fShapes[fShapeCount];
+ 	shape.offset = fSpriteArenaOffset + fSpriteArenaUsed;
+ 	shape.width = width;
+ 	shape.height = height;
+-	shape.stride = width;
++	shape.stride = stride;
++	shape.depth = depth;
+ 	fSpriteArenaUsed += need;
+ 	return (int32)fShapeCount++;
+ }
+ 
+ 
++status_t
++BGamePane::SetShader(const char* metalSource)
++{
++	if (fStatus != B_OK)
++		return B_NO_INIT;
++	BAutolock lock(fLock);
++
++	struct prds_pane_shader_request request;
++	memset(&request, 0, sizeof(request));
++	request.pane_id = fPaneID;
++	request.offset = fShaderOffset;
++
++	size_t length = metalSource != NULL ? strlen(metalSource) : 0;
++	if (length > 0) {
++		if (length + 1 > fShaderSize)
++			return B_NAME_TOO_LONG;
++		memcpy(fPool + fPoolOffset + fShaderOffset, metalSource, length + 1);
++		request.length = (uint32)length;
++	}
++	if (ioctl(fDevice, PRDS_PANE_SHADER, &request, sizeof(request)) != 0) {
++		// the host has put the compiler's complaint where the source was
++		return B_BAD_DATA;
++	}
++	return B_OK;
++}
++
++
++const char*
++BGamePane::ShaderError() const
++{
++	if (fStatus != B_OK)
++		return "";
++	const char* text = (const char*)(fPool + fPoolOffset + fShaderOffset);
++	return memchr(text, 0, fShaderSize) != NULL ? text : "";
++}
++
++
+ void
+ BGamePane::ClearSprites()
+ {
+@@ -459,7 +519,7 @@ BGamePane::DrawSprite(int32 shape, int32 x, int32 y, float scale,
+ 	sprite->height = table->height;
+ 	sprite->offset = fPoolOffset + table->offset;
+ 	sprite->stride = table->stride;
+-	sprite->flags = flags;
++	sprite->flags = flags | (table->depth == 4 ? PRDS_SPRITE_F_4BIT : 0);
+ 	sprite->scale = scale;
+ 	sprite->rotation = rotation;
+ 	sprite->alpha = alpha;

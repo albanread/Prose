@@ -65,6 +65,7 @@ enum PRDS {
     static let cmdPaneConfig: UInt32 = 0x0201
     static let cmdPanePresent: UInt32 = 0x0202
     static let cmdPaneDestroy: UInt32 = 0x0203
+    static let cmdPaneShader: UInt32 = 0x0204
     static let respOK: UInt32 = 0x1000
     static let errInvalid: UInt32 = 0x1100
     static let errUnsupported: UInt32 = 0x1101
@@ -274,6 +275,8 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
             status = panePresent(req)
         case PRDS.cmdPaneDestroy:
             status = paneDestroy(req)
+        case PRDS.cmdPaneShader:
+            status = paneShader(req)
         default:
             log("prds: unsupported command 0x\(String(type, radix: 16)) (\(length) bytes)")
             status = PRDS.errUnsupported
@@ -458,6 +461,53 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         seq.withLock { $0 += 1 }
         log("prds: pane \(id) destroyed")
         return PRDS.respOK
+    }
+
+    /// Layer 0: the guest wrote a fragment function and put it in its own
+    /// allocation. Compiling here, on the device queue, costs the guest one
+    /// blocked command and buys it a yes or no straight away — and when the
+    /// answer is no, the compiler's complaint goes back into the buffer the
+    /// source came from, which is the only channel the guest has for it.
+    private func paneShader(_ req: Data) -> UInt32 {
+        guard req.count >= 40 else { return PRDS.errInvalid }
+        let id = Int(leU32(req, 16))
+        guard id < Pane.maxPanes else { return PRDS.errInvalid }
+        let length = Int(leU32(req, 20)), offset = Int(leU64(req, 24))
+        guard length <= Pane.maxShaderBytes, offset >= 0,
+              offset + max(length, 1) <= poolSize else { return PRDS.errBounds }
+        if length == 0 {
+            presentLock.withLock { paneTable[id].shader = nil }
+            seq.withLock { $0 += 1 }
+            return PRDS.respOK
+        }
+
+        let source = String(decoding: UnsafeRawBufferPointer(start: pool + offset, count: length),
+                            as: UTF8.self)
+        guard let device = presenterMetalDevice ?? MTLCreateSystemDefaultDevice() else {
+            return PRDS.errState
+        }
+        do {
+            let library = try device.makeLibrary(source: layerShaderSource(source), options: nil)
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = library.makeFunction(name: "pane_vmain")
+            desc.fragmentFunction = library.makeFunction(name: "pane_layer0")
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            let pipeline = try device.makeRenderPipelineState(descriptor: desc)
+            presentLock.withLock { paneTable[id].shader = pipeline }
+            seq.withLock { $0 += 1 }
+            log("prds: pane \(id): layer 0 compiled, \(length) bytes")
+            return PRDS.respOK
+        } catch {
+            let message = "\(error)"
+            message.withCString { text in
+                let room = min(strlen(text), length - 1)
+                memcpy(pool + offset, text, room)
+                (pool + offset + room).storeBytes(of: UInt8(0), as: UInt8.self)
+            }
+            presentLock.withLock { paneTable[id].shader = nil }
+            log("prds: pane \(id): layer 0 did not compile: \(message)")
+            return PRDS.errInvalid
+        }
     }
 
     /// The presenter's view: call it holding `presentLock`.

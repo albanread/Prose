@@ -30,9 +30,10 @@ throws away the pointer.
 
     BGamePane : BDirectWindow
       world buffer  (8-bit indices) ───┐
-      palette       (BGRA)          ───┤  surface pool  ──► Metal: palette
-      sprite list                   ───┘  (shared memory)      lookup, scroll,
-      clip list from DirectConnected ──► PRDS pane commands ──► sprites, CRT
+      palette       (BGRA)          ───┤  surface pool  ──► Metal: layer 0,
+      sprite list                   ───┤  (shared memory)      palette lookup,
+      layer 0 source (MSL)          ───┘                       scroll, sprites,
+      clip list from DirectConnected ──► PRDS pane commands ──►     CRT
                                                                  │
     app_server's framebuffer ──► PRDS_CMD_COMMIT ──► display buffer ──► same
                                                                     drawable
@@ -99,14 +100,43 @@ The world buffer may be larger than the view. `scroll_x` / `scroll_y` pick the
 top-left of the visible window, in world pixels, and the shader offsets its
 sample. Scrolling costs nothing: no blit, no copy, one integer per frame.
 
+## Layer 0: a shader of your own
+
+Under the world sits a fragment function the program itself wrote. It sends the
+Metal source — in its own allocation, so only an offset crosses the queue — the
+host compiles it, and it runs wherever the world leaves index 0. The program
+writes one function:
+
+    float3 background(float2 uv, float2 size, float time, uint frame)
+
+`uv` runs 0 to 1 across the view, `size` is that view in pane pixels, `time` is
+seconds. Metal's standard library is there and nothing else: it draws a pixel
+from its own coordinates and cannot reach the pool, the palette, the other
+panes or the host. Compilation is synchronous, so the call answers yes or no;
+when the answer is no, the compiler's complaint is written back into the buffer
+the source came from and `ShaderError()` reads it.
+
+That is the division of labour the whole design is for. Smooth things — skies,
+gradients, plasma, water — are what a shader is good at and what an indexed
+buffer is worst at. Sharp things — tiles, text, sprites, anything that must land
+on an exact pixel in an exact colour — are what the indexed buffer is for. A
+program gets both in one window and neither has to imitate the other.
+
 ## Sprites
 
-Up to 64 per present. A sprite is 8-bit indexed like the world, with a palette
-base added to its non-zero indices, and carries position, size, scale, rotation
-and alpha. The host composites them in the fragment shader after the world,
+Up to 64 per present. A sprite carries position, size, scale, rotation and
+alpha, and the host composites them in the fragment shader after the world,
 inverse-transforming each fragment into sprite space — at retro resolutions a
-64-sprite loop is nothing, and it buys rotation and sub-pixel scale that a
-byte blitter cannot do.
+64-sprite loop is nothing, and it buys rotation and sub-pixel scale that a byte
+blitter cannot do.
+
+A sprite is 8 or 4 bits a pixel. At four, two pixels share a byte (low nibble
+first) and the palette base picks which bank of sixteen colours the values
+mean: half the memory, and recolouring a sprite is a number rather than a
+redraw. Art is written the way it is drawn — one byte a pixel — and the kit
+packs it. Index 0 is transparent at either depth, and a sprite's colours always
+come from the global palette, so one crossing a raster split does not change
+colour halfway down.
 
 ## Blitting
 
@@ -134,6 +164,7 @@ Four commands on the PRDS control queue, alongside SET_MODE and COMMIT.
   the world is shown, scroll, flags, effect, and the clip list.
 - `PRDS_CMD_PANE_PRESENT` — which buffer is live, and the sprite list.
 - `PRDS_CMD_PANE_DESTROY`.
+- `PRDS_CMD_PANE_SHADER` — where layer 0's source is, and how long it is.
 
 CONFIG is sent when the window moves; PRESENT once a frame. Both are small:
 PRESENT is 32 bytes and never carries pixels.
@@ -141,7 +172,9 @@ PRESENT is 32 bytes and never carries pixels.
 ## Driver ioctls
 
 - `PRDS_PANE_ALLOC` — bytes in, pane id and pool offset out.
-- `PRDS_PANE_CONFIGURE`, `PRDS_PANE_PRESENT`, `PRDS_PANE_FREE`.
+- `PRDS_PANE_CONFIGURE`, `PRDS_PANE_PRESENT`, `PRDS_PANE_SHADER`, `PRDS_PANE_FREE`.
+- `PRDS_PANE_WAIT_RETRACE` — its own semaphore, so a game waiting for vsync
+  does not eat app_server's.
 
 The driver owns the arena and the pane ids, and sweeps panes whose team has
 died, so a crashed game does not leave a picture on the screen.
@@ -151,5 +184,5 @@ died, so a crashed game does not leave a picture on the screen.
 `BGamePane` in `libgame.so`, `<game/GamePane.h>`. It is a `BDirectWindow`, so
 it is an ordinary window: it has a title bar, it moves, it goes behind other
 windows, it quits. `DirectConnected` forwards the geometry; the program gets
-`World()`, `Palette()`, `ScanlinePalette()`, the blitters, `Sprite()` and
-`Present()`.
+`World()`, `SetColor()`, `SetScanlineColor()`, the blitters, `SetShader()`,
+`DefineSprite()`, `DrawSprite()`, `Present()` and `WaitForRetrace()`.

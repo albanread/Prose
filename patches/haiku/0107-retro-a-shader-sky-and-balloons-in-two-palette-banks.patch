@@ -1,0 +1,221 @@
+From 54072629ef1e23ec230059b745741b72d3e34107 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 07:03:10 +0100
+Subject: [PATCH] Retro: a shader sky, and balloons in two palette banks
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+0 switches layer 0 on and off. On, the world simply does not draw its
+sky — index 0, and the shader shows through it — which is also the
+clearest demonstration that transparency means what it says. Off, the
+indexed sky and its raster bar come back.
+
+Three balloons are one sixteen-colour shape drawn three times, two banks
+between them.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0107-retro-a-shader-sky-and-balloons-in-two-palette-banks.patch 43162b23a2b0bd58e6f045e6ca4d0f559fc0cf6a15fac313ca5d4905964f18cd
+---
+ src/apps/retro/Retro.cpp | 114 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 110 insertions(+), 4 deletions(-)
+
+diff --git a/src/apps/retro/Retro.cpp b/src/apps/retro/Retro.cpp
+index 2a08ac236f..78d187f4a5 100644
+--- a/src/apps/retro/Retro.cpp
++++ b/src/apps/retro/Retro.cpp
+@@ -8,6 +8,7 @@
+  * copied on its way to the screen.
+  *
+  * 1, 2, 3   the filter: plain, scanlines, tube
++ * 0         layer 0 on and off: the shader sky, or the indexed one
+  * space     stop and start the scroll
+  */
+ 
+@@ -40,7 +41,9 @@ enum {
+ 	kHillLit	= 18,
+ 	kStar		= 19,
+ 	kLogo		= 20,
+-	kShipFirst	= 24		// the ship's eight
++	kShipFirst	= 24,		// the ship's eight
++	kBankA		= 32,		// two banks of sixteen for the four-bit sprites
++	kBankB		= 48
+ };
+ 
+ static const uint32 kStars = 120;
+@@ -59,7 +62,9 @@ public:
+ private:
+ 			void				_MakePalette();
+ 			void				_MakeShip();
++			void				_MakeBalloon();
+ 			void				_MakeLogo();
++			void				_SetShader(bool on);
+ 			void				_DrawSky(double t);
+ 			void				_DrawLand();
+ 			void				_DrawStars(int32 frame);
+@@ -67,7 +72,9 @@ private:
+ 			thread_id			fThread;
+ 			bool				fQuit;
+ 			bool				fScrolling;
++			bool				fShaderSky;
+ 			int32				fShip;
++			int32				fBalloon;
+ 			uint8				fLogo[32 * 32];
+ 			int32				fStarX[kStars];
+ 			int32				fStarY[kStars];
+@@ -112,7 +119,9 @@ RetroPane::RetroPane()
+ 	fThread(-1),
+ 	fQuit(false),
+ 	fScrolling(true),
+-	fShip(-1)
++	fShaderSky(true),
++	fShip(-1),
++	fBalloon(-1)
+ {
+ 	AddChild(new KeyView(Bounds()));
+ 	CenterOnScreen();
+@@ -124,7 +133,9 @@ RetroPane::RetroPane()
+ 	SetEffect(B_GAME_PANE_CRT);
+ 	_MakePalette();
+ 	_MakeShip();
++	_MakeBalloon();
+ 	_MakeLogo();
++	_SetShader(true);
+ 
+ 	srand(1);
+ 	for (uint32 i = 0; i < kStars; i++) {
+@@ -166,6 +177,7 @@ RetroPane::Key(int32 key)
+ 		case '1': SetEffect(B_GAME_PANE_PLAIN); break;
+ 		case '2': SetEffect(B_GAME_PANE_SCANLINES); break;
+ 		case '3': SetEffect(B_GAME_PANE_CRT); break;
++		case '0': _SetShader(!fShaderSky); break;
+ 		case ' ': fScrolling = !fScrolling; break;
+ 		case B_ESCAPE: PostMessage(B_QUIT_REQUESTED); break;
+ 	}
+@@ -198,6 +210,83 @@ RetroPane::_MakePalette()
+ 		c.alpha = 255;
+ 		SetColor(kShipFirst + i, c);
+ 	}
++
++	// Two banks of sixteen for the four-bit sprites: the same shape drawn
++	// with a different palette base is a different colour and not a redraw.
++	for (uint32 i = 1; i < 16; i++) {
++		float k = (float)i / 15.0f;
++		rgb_color a;
++		a.red = (uint8)(20 + k * 60);
++		a.green = (uint8)(90 + k * 150);
++		a.blue = (uint8)(120 + k * 120);
++		a.alpha = 255;
++		SetColor(kBankA + i, a);
++		rgb_color b;
++		b.red = (uint8)(110 + k * 140);
++		b.green = (uint8)(30 + k * 60);
++		b.blue = (uint8)(120 + k * 130);
++		b.alpha = 255;
++		SetColor(kBankB + i, b);
++	}
++}
++
++
++/// A sixteen-colour shape, one byte a pixel going in; the kit packs it.
++void
++RetroPane::_MakeBalloon()
++{
++	const uint32 width = 18, height = 22;
++	uint8 pixels[width * height];
++	memset(pixels, 0, sizeof(pixels));
++	for (uint32 y = 0; y < height; y++) {
++		for (uint32 x = 0; x < width; x++) {
++			float dx = ((float)x - 8.5f) / 8.5f;
++			float dy = ((float)y - 8.5f) / 10.0f;
++			if (y < 19 && dx * dx + dy * dy <= 1.0f) {
++				float shade = 1.0f - (dx * 0.4f + dy * 0.5f);
++				int32 index = 1 + (int32)(shade * 7.0f);
++				pixels[y * width + x] = (uint8)(index < 1 ? 1 : (index > 15 ? 15 : index));
++			} else if (y >= 19 && x >= 8 && x <= 9)
++				pixels[y * width + x] = 4;		// the basket's rope
++		}
++	}
++	fBalloon = DefineSprite(pixels, width, height, 4);
++}
++
++
++/// Layer 0: a sky the host's GPU draws, under everything the world leaves
++/// transparent. Switched off, the indexed sky and its raster bar come back.
++void
++RetroPane::_SetShader(bool on)
++{
++	if (!on) {
++		SetShader(NULL);
++		fShaderSky = false;
++		return;
++	}
++	static const char* kSky =
++		"float3 background(float2 uv, float2 size, float time, uint frame)\n"
++		"{\n"
++		"    float3 sky = mix(float3(0.02, 0.03, 0.14), float3(0.55, 0.30, 0.42),\n"
++		"                     pow(clamp(uv.y / 0.62, 0.0, 1.0), 1.5));\n"
++		"    float aspect = size.x / size.y;\n"
++		"    float2 sun = float2(0.66, 0.50);\n"
++		"    float d = distance(float2(uv.x * aspect, uv.y), float2(sun.x * aspect, sun.y));\n"
++		"    sky += float3(1.00, 0.68, 0.33) * exp(-d * 11.0) * 1.4;\n"
++		"    float band = sin(uv.x * 5.0 + time * 0.30 + sin(uv.y * 13.0) * 0.7);\n"
++		"    sky += float3(0.30, 0.16, 0.24) * smoothstep(0.72, 1.0, band);\n"
++		"    float2 cell = floor(uv * size);\n"
++		"    float star = fract(sin(dot(cell, float2(12.9898, 78.233))) * 43758.5453);\n"
++		"    if (star > 0.9970 && uv.y < 0.45)\n"
++		"        sky += float3(0.55 + 0.45 * sin(time * 3.0 + star * 90.0));\n"
++		"    return sky;\n"
++		"}\n";
++	if (SetShader(kSky) != B_OK) {
++		fprintf(stderr, "Retro: layer 0 would not compile:\n%s\n", ShaderError());
++		fShaderSky = false;
++		return;
++	}
++	fShaderSky = true;
+ }
+ 
+ 
+@@ -240,6 +329,12 @@ RetroPane::_MakeLogo()
+ void
+ RetroPane::_DrawSky(double t)
+ {
++	// With layer 0 under it the sky is simply not drawn: index 0 is
++	// transparent and the shader shows through, sprites and all.
++	if (fShaderSky) {
++		FillRect(0, 0, kWorldWidth, kHorizon, 0);
++		return;
++	}
+ 	// One index for the whole sky; the colour comes from the row. A raster bar
+ 	// is then a palette write per line, not a repaint.
+ 	FillRect(0, 0, kWorldWidth, kHorizon, kSky);
+@@ -303,7 +398,8 @@ RetroPane::Loop()
+ 		double t = (system_time() - start) / 1000000.0;
+ 
+ 		_DrawSky(t);
+-		_DrawStars(frame);
++		if (!fShaderSky)
++			_DrawStars(frame);
+ 		_DrawLand();
+ 
+ 		// the CPU blitter, keyed: the ring keeps the sky behind it
+@@ -311,8 +407,18 @@ RetroPane::Loop()
+ 			32, 32, B_GAME_COPY_KEYED);
+ 
+ 		// and a sprite, which the host scales and turns
++		ClearSprites();
++		if (fBalloon >= 0) {
++			// the same sixteen-colour shape three times, two banks between them
++			for (int32 i = 0; i < 3; i++) {
++				double phase = t * 0.13 + i * 0.37;
++				int32 x = (int32)(fmod(phase, 1.0) * (kWorldWidth + 80.0)) - 40;
++				int32 y = (int32)(14 + i * 22 + sin(t * 0.9 + i) * 6.0);
++				DrawSprite(fBalloon, x, y, 1.0f + i * 0.5f, 0.0f, 1.0f,
++					i == 1 ? kBankB : kBankA);
++			}
++		}
+ 		if (fShip >= 0) {
+-			ClearSprites();
+ 			DrawSprite(fShip, scroll + kViewWidth / 2 - 16,
+ 				(int32)(70 + sin(t * 2.3) * 22.0), 2.0f, (float)sin(t) * 0.35f);
+ 		}
