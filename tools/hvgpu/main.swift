@@ -1728,6 +1728,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
                 self?.refreshThemes()
                 self?.refreshNetwork()
                 self?.syncGuestProxySettings()   // guestproxy.swift
+                self?.ensureGuestAddress()       // network.swift, if DHCP never answers
             }
         }
         monitor = VMMonitor(diskImage: diskURL, guestMAC: args.contains("--no-net") ? nil : macAddress.string)

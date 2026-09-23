@@ -37,8 +37,15 @@ final class GuestProxy {
 
     // MARK: starting and stopping
 
+    /// Whether this is the port being held rather than something that will not
+    /// get better by waiting.
+    private func isAddressInUse(_ error: NWError) -> Bool {
+        if case .posix(let code) = error { return code == .EADDRINUSE }
+        return false
+    }
+
     @discardableResult
-    func start(on address: String, port wanted: UInt16) -> Bool {
+    func start(on address: String, port wanted: UInt16, retriesLeft: Int = 15) -> Bool {
         if isRunning, host == address, port == wanted { return true }
         stop()
         let parameters = NWParameters.tcp
@@ -52,8 +59,19 @@ final class GuestProxy {
         listener.newConnectionHandler = { [weak self] in self?.accept($0) }
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
-                log("guest proxy: \(error)")
-                self?.stop()
+                guard let self else { return }
+                // A machine restarted quickly finds the port still held by the
+                // one before it, which is over in a moment. Giving up there
+                // left the proxy dead for the whole session and the guest with
+                // a Choices file pointing at nothing, which is the worst of
+                // both. Wait for the old one to go.
+                let again = retriesLeft > 0 && isAddressInUse(error)
+                log("guest proxy: \(error)" + (again ? " — trying again" : ""))
+                stop()
+                guard again else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.start(on: address, port: wanted, retriesLeft: retriesLeft - 1)
+                }
             }
         }
         listener.start(queue: queue)

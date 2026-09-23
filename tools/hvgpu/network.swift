@@ -259,6 +259,40 @@ extension Controller {
 
     /// Set an address the Mac has not given away, with the bridge as gateway
     /// and resolver. Three commands, and the machine is on the network.
+    /// A safety net for a machine DHCP never answers, and nothing more.
+    ///
+    /// **DHCP here takes a minute or two**, and longer is not failure, so the
+    /// wait is three. An earlier version waited 25 seconds, which is not a
+    /// fallback but a race: it overwrote an address that was on its way and
+    /// made a working network look like a broken one. `--dhcp-wait 0` turns it
+    /// off entirely.
+    ///
+    /// What it is actually for: a VPN connected on the Mac blocks the guest's
+    /// DHCP broadcasts before they reach bootpd, so the machine will wait for
+    /// an answer that is never coming (docs/networking.md has the capture).
+    /// Three minutes in, an address of our own beats no address at all.
+    ///
+    /// Only ever when there is none: an address that came from DHCP is left
+    /// alone, and so is a machine whose networking is switched off.
+    func ensureGuestAddress(after delay: TimeInterval? = nil) {
+        guard Settings.networking else { return }
+        // How long DHCP gets before we decide it is not coming. Tunable because
+        // the right number is a measurement, not a guess: --dhcp-wait 0 leaves
+        // the machine to DHCP however long it takes.
+        let delay = delay ?? (Double(option("--dhcp-wait") ?? "") ?? 180)
+        guard delay > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, vm?.state == .running else { return }
+            refreshNetwork { [weak self] interfaces in
+                guard let self, let wired = interfaces.first else { return }
+                if wired.address != nil { return }          // DHCP answered after all
+                log("network: \(wired.name) has no address \(Int(delay)) s in — "
+                    + "the Mac's DHCP is not answering, so taking one")
+                setStaticAddress()
+            }
+        }
+    }
+
     /// What the guest has is learned when the Network menu is built, so a click
     /// that arrives before that -- a script, or a menu driven from outside --
     /// would find nothing and say so in the words of a different failure.
