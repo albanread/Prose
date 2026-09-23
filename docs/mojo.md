@@ -1,5 +1,23 @@
 # Mojo on Prose — design
 
+> **Superseded, 2026-09-23 (evening).** The direction changed after review:
+> the compiler is **upstream Mojo, built from source with Bazel on the Mac and
+> cross-compiled so that it runs on Prose** as a Haiku development tool — not
+> MojoCocoa's compiler, which is modified extensively for Cocoa and Darwin.
+> A compiler running on Haiku needs Modular's real runtime built for Haiku, so
+> the 49-function stand-in runtime below falls away too. No MAX, and no
+> telemetry or crash reporting (both serve Modular).
+>
+> The port lives in its own fork, `/Volumes/xb/mojo2026/MojoProse`, branch
+> `prose`: its `PORT-JOURNAL.md` is the record and plan (gates G0-G8), and
+> `Haiku/docs/bridge-design.md` is the design of the bridge to the Be API.
+>
+> What below still stands: the measurements of 2026-09-23 (LLVM's AArch64
+> backend emits correct Haiku ELF, and Haiku's toolchain links and runs it;
+> `tools/mojo-spike` reproduces that), the standard library's Haiku surface
+> (section 3), and the reasoning about C++ that led to the bridge (section 4),
+> which the bridge design takes much further.
+
 *2026-09-23. A design for review, grounded in what was measured today; nothing
 past milestone M0 is built.*
 
