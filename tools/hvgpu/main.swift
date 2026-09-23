@@ -1664,6 +1664,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     let chip = ProseChipDevice()               // chipdevice.swift: ABC in, sound out
     let portal = ProsePortalDevice()           // portal.swift: the guest answers the host
     let guestProxy = GuestProxy()              // guestproxy.swift: the guest's way out past a VPN
+    var lastGuestProxyChoices: String?         // what the guest was last told, to not say it twice
     var displaySource: PresentSource { displayMode == "s2" ? prds : gpu }
     let rngProbe = CustomVirtioRNG()   // --rng-probe: bisect custom-device support
     let presenter = Presenter()
@@ -1726,6 +1727,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
             DispatchQueue.main.async {
                 self?.refreshThemes()
                 self?.refreshNetwork()
+                self?.syncGuestProxySettings()   // guestproxy.swift
             }
         }
         monitor = VMMonitor(diskImage: diskURL, guestMAC: args.contains("--no-net") ? nil : macAddress.string)
@@ -1946,6 +1948,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         log("guest powered off")
         forgetThemes()          // View ▸ Theme says so until the next hello
+        lastGuestProxyChoices = nil        // the next machine has to be told again
         let restarting = restartPending && !stopping
         if !restarting && (stopping || exitOnStop) { exit(0) }
         vmStopped()                        // the window stays, with a Start button

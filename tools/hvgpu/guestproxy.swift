@@ -197,3 +197,55 @@ final class GuestProxy {
         }
     }
 }
+
+// MARK: - keeping the guest's own settings in step
+
+extension Controller {
+    /// NetSurf reads a proxy out of its Choices file, and the image ships one
+    /// pointing at the usual bridge address. That is a guess: the bridge can be
+    /// somewhere else (Shared_Net_Address moves it), the port is a setting, and
+    /// the proxy can be switched off entirely -- and a Choices file naming a
+    /// proxy that is not there is worse than none, because then nothing loads.
+    ///
+    /// So the side that knows says so, once the guest is answering. The file is
+    /// rewritten whole rather than edited: it is four lines, and a half-applied
+    /// edit is the failure this exists to prevent.
+    func syncGuestProxySettings() {
+        guard portal.alive.withLock({ $0 }) else { return }
+        // The guest says hello before the bridge is up, so the proxy is enabled
+        // and not yet listening for a moment. Writing "direct" into that gap
+        // and "through" a moment later is two round trips to reach the answer
+        // we already know, so wait for it.
+        if Settings.guestProxy && !guestProxy.isRunning { return }
+        let choices = "/boot/home/config/settings/NetSurf/Choices"
+        let wanted: String
+        if guestProxy.isRunning, let host = guestProxy.host {
+            wanted = "http_proxy:1\nhttp_proxy_host:\(host)\nhttp_proxy_port:\(guestProxy.port)\nhttp_proxy_auth:0"
+        } else {
+            // Off, not absent: leave the address behind so switching it back on
+            // is one line, and so the file still says what it was for.
+            wanted = "http_proxy:0\nhttp_proxy_host:\(guestProxy.host ?? "192.168.64.1")\nhttp_proxy_port:\(Settings.guestProxyPort)\nhttp_proxy_auth:0"
+        }
+        guard wanted != lastGuestProxyChoices else { return }
+        // Claimed before it is sent, not after: this is called from several
+        // places at once during a start, and a flag set in the completion
+        // handler lets every one of them through.
+        lastGuestProxyChoices = wanted
+        // Written to a temporary file and moved, so NetSurf never reads a half
+        // one, and only if it would differ -- this runs on every state change.
+        let script = "mkdir -p /boot/home/config/settings/NetSurf"
+            + " && printf '%s\\n' '\(wanted.replacingOccurrences(of: "\n", with: "' '"))'"
+            + " > /boot/home/config/settings/NetSurf/Choices.tmp"
+            + " && mv /boot/home/config/settings/NetSurf/Choices.tmp \(choices)"
+        guestRun(script, timeout: 20) { [weak self] result in
+            guard let self else { return }
+            if case .failed(let why) = result {
+                log("guest proxy: could not set NetSurf's proxy in the guest: \(why)")
+                lastGuestProxyChoices = nil        // so the next change tries again
+                return
+            }
+            log("guest proxy: NetSurf in the guest now "
+                + (guestProxy.isRunning ? "goes through \(guestProxy.summary)" : "goes out directly"))
+        }
+    }
+}

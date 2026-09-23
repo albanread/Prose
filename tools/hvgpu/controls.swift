@@ -167,7 +167,11 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
     /// setting on reaches a machine that is already running.
     func updateGuestProxy(retriesLeft: Int = 10) {
         let live = vm?.state == .running || vm?.state == .paused
-        guard live, Settings.guestProxy else { return guestProxy.stop() }
+        guard live, Settings.guestProxy else {
+            guestProxy.stop()
+            if live { syncGuestProxySettings() }   // tell the guest to go direct
+            return
+        }
         guard let bridge = hostBridge() else {
             // vmnet builds the bridge around the time the machine starts, so
             // the first look can be too early. Give it a few seconds, then let
@@ -179,6 +183,7 @@ extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
             return
         }
         guestProxy.start(on: bridge.gateway, port: UInt16(Settings.guestProxyPort))
+        syncGuestProxySettings()
     }
 
     /// Status bar text and light colour.

@@ -1,0 +1,968 @@
+From d71edc1c7cfcd84080e60365cfdc3dee97918578 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 08:37:54 +0100
+Subject: [PATCH] prose_chip: three chips, nine voices, and this machine sends
+ the notation
+
+A virtio device (ID 60) with one control queue, and a BChipPlayer over it.
+A program hands over ABC source -- a few hundred bytes -- and the host
+parses it, schedules it against the Mac's own sample clock and makes the
+sound. There is no audio in this machine at all: no samples, no mixing,
+no buffer to keep fed. A second of stereo is four hundred kilobytes where
+a tune is four hundred bytes, and the clock that drives a speaker is not
+this one's.
+
+Where a tune goes is the notation's own business. `[I:chip ...]` is for
+the three-chip synthesiser; `%%MIDI program n` says it was written for a
+synthesiser and it goes to the Mac's General MIDI one. Neither the
+program nor the kit chooses.
+
+Four tracks share the nine voices, so a tune and a sound effect are not
+the same schedule. Which voices each uses is the tune's business: the
+grammar says `v=` explicitly.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0115-prose-chip-three-chips-nine-voices-and-this-machine-sends-th.patch b4719e1bdc0975e6471f47ebaf7732b1e9c0b2915e7053fe3e80f51c3c2f74eb
+---
+ build/jam/packages/Haiku                      |   1 +
+ headers/os/game/ChipPlayer.h                  |  76 +++
+ headers/private/prose/prose_chip.h            | 121 +++++
+ src/add-ons/kernel/drivers/misc/Jamfile       |   1 +
+ .../kernel/drivers/misc/prose_chip/Jamfile    |   8 +
+ .../drivers/misc/prose_chip/prose_chip.cpp    | 480 ++++++++++++++++++
+ src/kits/game/ChipPlayer.cpp                  | 170 +++++++
+ src/kits/game/Jamfile                         |   2 +
+ 8 files changed, 859 insertions(+)
+ create mode 100644 headers/os/game/ChipPlayer.h
+ create mode 100644 headers/private/prose/prose_chip.h
+ create mode 100644 src/add-ons/kernel/drivers/misc/prose_chip/Jamfile
+ create mode 100644 src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp
+ create mode 100644 src/kits/game/ChipPlayer.cpp
+
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index dfe1061774..fde7f22785 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -155,6 +155,7 @@ AddNewDriversToPackage display :
+ #	display_adapter@x86
+ 	;
+ AddNewDriversToPackage audio hmulti :
++	prose_chip
+ 	prose_midi
+ 	virtio_sound
+ 	;
+diff --git a/headers/os/game/ChipPlayer.h b/headers/os/game/ChipPlayer.h
+new file mode 100644
+index 0000000000..1dd5779b0a
+--- /dev/null
++++ b/headers/os/game/ChipPlayer.h
+@@ -0,0 +1,76 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * BChipPlayer: music and sound, written as notation.
++ *
++ * A program hands over ABC source -- a few hundred bytes -- and the host
++ * parses it, schedules it against the Mac's own sample clock and makes the
++ * sound. Nothing here synthesises anything, buffers anything or keeps time:
++ * a second of stereo is four hundred kilobytes and a tune is four hundred
++ * bytes, and the clock that drives the speaker is not this machine's.
++ *
++ * Where a tune goes is the notation's own business:
++ *
++ *     [I:chip v=0 wave=pulse pw=500 a=0 d=4 s=6 r=3 vol=12]
++ *
++ * is for the three-chip synthesiser -- three voices each, nine in all, with
++ * their own filters, pans and the 50 Hz performance macros that are where a
++ * chip tune actually lives (arp, vib, slide, pwm, sweep, trem). Whereas
++ *
++ *     %%MIDI program 80
++ *
++ * says the tune was written for a synthesiser, and it is played on the Mac's
++ * General MIDI one instead. Neither the program nor this class chooses.
++ *
++ * Four tracks share the nine voices, so a tune and a sound effect need not be
++ * the same schedule. Which voices each uses is the tune's business: the
++ * grammar says `v=` explicitly.
++ */
++#ifndef _CHIP_PLAYER_H
++#define _CHIP_PLAYER_H
++
++
++#include <SupportDefs.h>
++
++
++class BChipPlayer {
++public:
++								BChipPlayer();
++								~BChipPlayer();
++
++			status_t			InitCheck() const;
++
++	// Play some ABC on a track, replacing whatever that track held. The
++	// source is copied, so it need not outlive the call.
++			status_t			Play(const char* abc, uint32 track = 0,
++									bool loop = false);
++			status_t			Stop(uint32 track = 0);
++			status_t			StopAll();
++
++	// Which tracks are sounding, as a bitmask: bit n is track n.
++			uint32				Playing() const;
++			bool				IsPlaying(uint32 track = 0) const;
++
++	// 0 to 1. The chip's own master volume is a register a tune may set; this
++	// is over the top of it, for the person rather than the composer.
++			status_t			SetVolume(float volume);
++
++			uint32				CountChips() const;
++			uint32				CountVoices() const;
++			uint32				CountTracks() const;
++
++private:
++			BChipPlayer(const BChipPlayer&);
++			BChipPlayer&		operator=(const BChipPlayer&);
++
++			status_t			fStatus;
++			int					fDevice;
++			uint32				fChips;
++			uint32				fVoices;
++			uint32				fTracks;
++			uint32				_reserved[8];
++};
++
++
++#endif	/* _CHIP_PLAYER_H */
+diff --git a/headers/private/prose/prose_chip.h b/headers/private/prose/prose_chip.h
+new file mode 100644
+index 0000000000..6b589ce521
+--- /dev/null
++++ b/headers/private/prose/prose_chip.h
+@@ -0,0 +1,121 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * The Prose Chip: three chips, nine voices, and the guest sends notation.
++ *
++ * The transport is a custom virtio device, ID 60, with one control queue.
++ * The guest writes ABC source and nothing else -- no samples, no note events,
++ * no timing -- and the host parses it, schedules it against its own sample
++ * clock and makes the sound. A motif is four hundred bytes where a second of
++ * stereo is four hundred kilobytes, and the clock that matters is the Mac's,
++ * not a guest timer woken late by whatever the scheduler is busy with.
++ *
++ * Where a tune goes is the notation's own business. `[I:chip ...]` is for the
++ * three-chip synthesiser; `%%MIDI program n` was written for a synthesiser
++ * and goes to the Mac's General MIDI one. Nothing here has to choose.
++ *
++ * Four tracks share the nine voices, so a motif and a sound effect are not
++ * the same schedule. Which voices a tune uses is the tune's business: the
++ * grammar says `v=` explicitly.
++ */
++#ifndef PROSE_CHIP_H
++#define PROSE_CHIP_H
++
++#include <SupportDefs.h>
++#include <Drivers.h>
++
++#define PROSE_CHIP_MAGIC			0x48435250	/* "PRCH", little-endian: the wire
++											   carries the bytes, and a character
++											   constant is the other order */
++#define PROSE_CHIP_VERSION			1
++#define PROSE_CHIP_VIRTIO_ID		60		/* 61 portal, 62 MIDI, 63 display */
++#define PROSE_CHIP_DEVICE			"/dev/misc/prose/chip/0"
++
++#define PROSE_CHIP_TEXT_MAX			16384	/* one tune's source */
++#define PROSE_CHIP_TRACKS			4
++
++/* Commands on the control queue. */
++enum {
++	PROSE_CHIP_CMD_GET_INFO		= 0x0100,
++	PROSE_CHIP_CMD_PLAY			= 0x0101,	/* the source follows the header */
++	PROSE_CHIP_CMD_STOP			= 0x0102,
++	PROSE_CHIP_CMD_STOP_ALL		= 0x0103,
++	PROSE_CHIP_CMD_VOLUME		= 0x0104,
++	PROSE_CHIP_CMD_STATE		= 0x0105,	/* answers a bitmask of playing tracks */
++
++	PROSE_CHIP_RESP_OK			= 0x1000,
++	PROSE_CHIP_ERR_INVALID		= 0x1100,
++	PROSE_CHIP_ERR_UNSUPPORTED	= 0x1101,
++	PROSE_CHIP_ERR_STATE		= 0x1102
++};
++
++#define PROSE_CHIP_FLAG_LOOP		1
++
++struct prose_chip_hdr {
++	uint32	type;
++	uint32	flags;
++	uint64	seq;
++} _PACKED;
++
++struct prose_chip_play {
++	struct prose_chip_hdr	hdr;
++	uint32	track;
++	uint32	length;				/* bytes of source, which follow this header */
++	uint32	flags;				/* PROSE_CHIP_FLAG_LOOP */
++	uint32	reserved;
++} _PACKED;
++
++struct prose_chip_track {
++	struct prose_chip_hdr	hdr;
++	uint32	track;
++	uint32	reserved;
++} _PACKED;
++
++struct prose_chip_value {
++	struct prose_chip_hdr	hdr;
++	uint32	value;
++	uint32	reserved;
++} _PACKED;
++
++struct prose_chip_resp {
++	struct prose_chip_hdr	hdr;
++	uint32	value;
++	uint32	reserved;
++} _PACKED;
++
++/* The device's configuration space. */
++struct prose_chip_config {
++	uint32	magic;
++	uint16	version;
++	uint16	flags;
++	uint32	chips;
++	uint32	voices;
++	uint32	tracks;
++	uint32	sample_rate;
++	uint32	max_text;
++	uint8	reserved[8];
++} _PACKED;
++
++/* What a caller hands the driver. The source is copied in, not referenced:
++   a tune is small and the caller should not have to keep it alive. */
++struct prose_chip_play_request {
++	uint32	track;
++	uint32	flags;
++	uint32	length;
++	uint32	reserved;
++	char	source[PROSE_CHIP_TEXT_MAX];
++};
++
++/* ioctls (device_control) */
++enum {
++	PROSE_CHIP_PLAY = B_DEVICE_OP_CODES_END + 1,	/* prose_chip_play_request* */
++	PROSE_CHIP_STOP,								/* uint32* track */
++	PROSE_CHIP_STOP_ALL,							/* NULL */
++	PROSE_CHIP_SET_VOLUME,							/* uint32*, 0..255 */
++	PROSE_CHIP_GET_STATE,							/* uint32*: a bitmask of tracks */
++	PROSE_CHIP_GET_CONFIG							/* prose_chip_config* */
++};
++
++
++#endif	/* PROSE_CHIP_H */
+diff --git a/src/add-ons/kernel/drivers/misc/Jamfile b/src/add-ons/kernel/drivers/misc/Jamfile
+index 5144662ef4..739b7d0023 100644
+--- a/src/add-ons/kernel/drivers/misc/Jamfile
++++ b/src/add-ons/kernel/drivers/misc/Jamfile
+@@ -18,4 +18,5 @@ KernelAddon <driver>kdl :
+ KernelAddon <driver>test :
+ 	test.c
+ 	;
++SubInclude HAIKU_TOP src add-ons kernel drivers misc prose_chip ;
+ SubInclude HAIKU_TOP src add-ons kernel drivers misc prose_portal ;
+diff --git a/src/add-ons/kernel/drivers/misc/prose_chip/Jamfile b/src/add-ons/kernel/drivers/misc/prose_chip/Jamfile
+new file mode 100644
+index 0000000000..604c2cf586
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/misc/prose_chip/Jamfile
+@@ -0,0 +1,8 @@
++SubDir HAIKU_TOP src add-ons kernel drivers misc prose_chip ;
++
++UsePrivateKernelHeaders ;
++UsePrivateHeaders drivers virtio prose ;
++
++KernelAddon prose_chip :
++	prose_chip.cpp
++;
+diff --git a/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp b/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp
+new file mode 100644
+index 0000000000..98bfe4d19b
+--- /dev/null
++++ b/src/add-ons/kernel/drivers/misc/prose_chip/prose_chip.cpp
+@@ -0,0 +1,480 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Prose Chip: three chips, nine voices, and this machine sends the notation
++ * (headers/private/prose/prose_chip.h). A custom virtio device, ID 60, with
++ * one control queue: a request goes out, an answer comes back, and nothing
++ * is streamed.
++ *
++ * There is no audio here at all -- no samples, no mixing, no buffers to keep
++ * fed. A tune is four hundred bytes of ABC and the host holds the sample
++ * clock, which is the one that actually drives a speaker.
++ *
++ * Published as /dev/misc/prose/chip/0. Modelled on prose_portal, including
++ * where the module lives: under drivers/audio, because the device manager
++ * searches a virtio child's driver only when its node is registered, in the
++ * context of the /dev/<class> scan that triggered it.
++ */
++
++
++#include <KernelExport.h>
++#include <device_manager.h>
++#include <kernel.h>
++#include <lock.h>
++#include <util/AutoLock.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <virtio.h>
++#include <prose_chip.h>
++
++
++#define PRCH_DRIVER_MODULE_NAME		"drivers/audio/hmulti/prose_chip/driver_v1"
++#define PRCH_DEVICE_MODULE_NAME		"drivers/audio/hmulti/prose_chip/device_v1"
++#define PRCH_DEVICE_ID_GENERATOR	"prose_chip/device_id"
++
++#define INFO(x...)	dprintf("prose_chip: " x)
++#define ERROR(x...)	dprintf("prose_chip: " x)
++
++/* The command page: a request of at most a header plus one tune, then the
++   answer. Both live in one contiguous allocation, so a request is two
++   physical entries into the same page and never a scatter list. */
++#define PRCH_REQUEST_MAX	(sizeof(struct prose_chip_play) + PROSE_CHIP_TEXT_MAX)
++#define PRCH_RESPONSE_AT	ROUNDUP(PRCH_REQUEST_MAX, 64)
++#define PRCH_RESPONSE_MAX	64
++#define PRCH_BUFFER_SIZE	ROUNDUP(PRCH_RESPONSE_AT + PRCH_RESPONSE_MAX, B_PAGE_SIZE)
++
++
++struct prch_info {
++	device_node*				node;
++	int32						id;
++	char						name[64];
++	virtio_device				device;
++	virtio_device_interface*	virtio;
++	uint64						features;
++	virtio_queue				queue;
++
++	area_id						area;
++	uint8*						buffer;
++	phys_addr_t					phys;
++
++	mutex						lock;		// one command at a time
++	sem_id						done;
++	uint64						seq;
++
++	struct prose_chip_config	config;
++	int32						openCount;
++	uint64						played;
++};
++
++
++static device_manager_info* sDeviceManager;
++
++
++static void
++prch_callback(void* driverCookie, void* cookie)
++{
++	prch_info* info = (prch_info*)cookie;
++	release_sem_etc(info->done, 1, B_DO_NOT_RESCHEDULE);
++}
++
++
++/*!	One command, there and back. The queue carries a request buffer the host
++	reads and a response buffer it writes; the caller waits for the answer,
++	because every one of these is a thing the player asked for and wants the
++	result of. */
++static status_t
++prch_command(prch_info* info, const void* request, size_t requestSize,
++	struct prose_chip_resp* response)
++{
++	if (requestSize > PRCH_REQUEST_MAX)
++		return B_BAD_VALUE;
++
++	MutexLocker locker(info->lock);
++	memcpy(info->buffer, request, requestSize);
++	((struct prose_chip_hdr*)info->buffer)->seq = ++info->seq;
++	memset(info->buffer + PRCH_RESPONSE_AT, 0, PRCH_RESPONSE_MAX);
++
++	physical_entry entries[2] = {
++		{ info->phys, requestSize },
++		{ info->phys + PRCH_RESPONSE_AT, PRCH_RESPONSE_MAX },
++	};
++	status_t status = info->virtio->queue_request_v(info->queue, entries, 1, 1, NULL);
++	if (status != B_OK) {
++		ERROR("queueing a command failed: %s\n", strerror(status));
++		return status;
++	}
++	status = acquire_sem_etc(info->done, 1, B_RELATIVE_TIMEOUT, 5000000);
++	if (status != B_OK) {
++		ERROR("command timed out\n");
++		return status;
++	}
++	while (!info->virtio->queue_dequeue(info->queue, NULL, NULL))
++		spin(10);
++
++	struct prose_chip_resp* answer =
++		(struct prose_chip_resp*)(info->buffer + PRCH_RESPONSE_AT);
++	if (response != NULL)
++		memcpy(response, answer, sizeof(*response));
++	if (answer->hdr.seq != info->seq)
++		ERROR("answer out of sequence\n");
++	if (answer->hdr.type != PROSE_CHIP_RESP_OK)
++		return B_ERROR;
++	return B_OK;
++}
++
++
++//	#pragma mark - driver
++
++
++static float
++prch_supports_device(device_node* parent)
++{
++	const char* bus;
++	uint16 deviceType;
++	if (sDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false) != B_OK
++		|| strcmp(bus, "virtio") != 0)
++		return 0.0f;
++	if (sDeviceManager->get_attr_uint16(parent, VIRTIO_DEVICE_TYPE_ITEM, &deviceType, true)
++			!= B_OK || deviceType != PROSE_CHIP_VIRTIO_ID)
++		return 0.0f;
++	return 1.0f;
++}
++
++
++static status_t
++prch_register_device(device_node* node)
++{
++	device_attr attrs[] = {
++		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, { .string = "Prose Chip" }},
++		{ NULL }
++	};
++	return sDeviceManager->register_node(node, PRCH_DRIVER_MODULE_NAME, attrs, NULL, NULL);
++}
++
++
++static void
++prch_teardown(prch_info* info)
++{
++	if (info->virtio != NULL && info->queue != NULL)
++		info->virtio->free_interrupts(info->device);
++	if (info->done >= 0)
++		delete_sem(info->done);
++	if (info->area >= 0)
++		delete_area(info->area);
++	mutex_destroy(&info->lock);
++	free(info);
++}
++
++
++static status_t
++prch_init_driver(device_node* node, void** _cookie)
++{
++	prch_info* info = (prch_info*)calloc(1, sizeof(prch_info));
++	if (info == NULL)
++		return B_NO_MEMORY;
++	info->node = node;
++	info->area = -1;
++	info->done = -1;
++	mutex_init(&info->lock, "prose_chip command");
++
++	device_node* parent = sDeviceManager->get_parent_node(node);
++	sDeviceManager->get_driver(parent, (driver_module_info**)&info->virtio,
++		(void**)&info->device);
++	sDeviceManager->put_node(parent);
++
++	status_t status = info->virtio->negotiate_features(info->device, 0, &info->features, NULL);
++	if (status != B_OK) {
++		ERROR("feature negotiation failed: %s\n", strerror(status));
++		goto error;
++	}
++	status = info->virtio->read_device_config(info->device, 0, &info->config,
++		sizeof(info->config));
++	if (status != B_OK) {
++		ERROR("reading the device configuration failed: %s\n", strerror(status));
++		goto error;
++	}
++	if (info->config.magic != PROSE_CHIP_MAGIC) {
++		ERROR("not a Prose Chip: magic %#" B_PRIx32 "\n", info->config.magic);
++		status = B_BAD_VALUE;
++		goto error;
++	}
++
++	{
++		void* address;
++		info->area = create_area("prose_chip commands", &address, B_ANY_KERNEL_ADDRESS,
++			PRCH_BUFFER_SIZE, B_CONTIGUOUS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
++		if (info->area < 0) {
++			status = info->area;
++			goto error;
++		}
++		physical_entry entry;
++		status = get_memory_map(address, PRCH_BUFFER_SIZE, &entry, 1);
++		if (status != B_OK)
++			goto error;
++		info->buffer = (uint8*)address;
++		info->phys = entry.address;
++		memset(info->buffer, 0, PRCH_BUFFER_SIZE);
++	}
++
++	info->done = create_sem(0, "prose_chip command done");
++	if (info->done < 0) {
++		status = info->done;
++		goto error;
++	}
++
++	{
++		virtio_queue queues[1];
++		status = info->virtio->alloc_queues(info->device, 1, queues, NULL);
++		if (status != B_OK) {
++			ERROR("queue allocation failed: %s\n", strerror(status));
++			goto error;
++		}
++		info->queue = queues[0];
++	}
++	status = info->virtio->setup_interrupt(info->device, NULL, info);
++	if (status == B_OK)
++		status = info->virtio->queue_setup_interrupt(info->queue, prch_callback, info);
++	if (status != B_OK) {
++		ERROR("interrupt setup failed: %s\n", strerror(status));
++		goto error;
++	}
++
++	INFO("%" B_PRIu32 " chips, %" B_PRIu32 " voices, %" B_PRIu32 " tracks, %"
++		B_PRIu32 " Hz\n", info->config.chips, info->config.voices,
++		info->config.tracks, info->config.sample_rate);
++	*_cookie = info;
++	return B_OK;
++
++error:
++	prch_teardown(info);
++	return status;
++}
++
++
++static void
++prch_uninit_driver(void* cookie)
++{
++	prch_teardown((prch_info*)cookie);
++}
++
++
++static status_t
++prch_register_child_devices(void* cookie)
++{
++	prch_info* info = (prch_info*)cookie;
++	int32 id = sDeviceManager->create_id(PRCH_DEVICE_ID_GENERATOR);
++	if (id < 0)
++		return id;
++	info->id = id;
++	snprintf(info->name, sizeof(info->name), "misc/prose/chip/%" B_PRId32, id);
++	return sDeviceManager->publish_device(info->node, info->name, PRCH_DEVICE_MODULE_NAME);
++}
++
++
++//	#pragma mark - device
++
++
++static status_t
++prch_init_device(void* driverCookie, void** _cookie)
++{
++	*_cookie = driverCookie;
++	return B_OK;
++}
++
++
++static void
++prch_uninit_device(void* cookie)
++{
++}
++
++
++/*!	Many openers, unlike the portal: a tune and a sound effect are different
++	programs as often as not, and the tracks are what keeps them apart. */
++static status_t
++prch_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
++{
++	prch_info* info = (prch_info*)deviceCookie;
++	atomic_add(&info->openCount, 1);
++	*_cookie = info;
++	return B_OK;
++}
++
++
++static status_t
++prch_close(void* cookie)
++{
++	return B_OK;
++}
++
++
++static status_t
++prch_free(void* cookie)
++{
++	prch_info* info = (prch_info*)cookie;
++	atomic_add(&info->openCount, -1);
++	return B_OK;
++}
++
++
++static status_t
++prch_control(void* cookie, uint32 op, void* buffer, size_t length)
++{
++	prch_info* info = (prch_info*)cookie;
++
++	switch (op) {
++		case PROSE_CHIP_PLAY:
++		{
++			/* The header and the source go to the host as one buffer, so the
++			   request is built in place rather than copied twice. */
++			struct prose_chip_play_request* request =
++				(struct prose_chip_play_request*)malloc(sizeof(*request));
++			if (request == NULL)
++				return B_NO_MEMORY;
++			if (length < sizeof(*request)
++				|| user_memcpy(request, buffer, sizeof(*request)) != B_OK) {
++				free(request);
++				return B_BAD_ADDRESS;
++			}
++			if (request->length == 0 || request->length > PROSE_CHIP_TEXT_MAX
++				|| request->track >= info->config.tracks) {
++				free(request);
++				return B_BAD_VALUE;
++			}
++
++			size_t size = sizeof(struct prose_chip_play) + request->length;
++			uint8* wire = (uint8*)malloc(size);
++			if (wire == NULL) {
++				free(request);
++				return B_NO_MEMORY;
++			}
++			struct prose_chip_play* play = (struct prose_chip_play*)wire;
++			memset(play, 0, sizeof(*play));
++			play->hdr.type = PROSE_CHIP_CMD_PLAY;
++			play->track = request->track;
++			play->length = request->length;
++			play->flags = request->flags;
++			memcpy(wire + sizeof(*play), request->source, request->length);
++
++			struct prose_chip_resp response;
++			status_t status = prch_command(info, wire, size, &response);
++			free(wire);
++			free(request);
++			if (status == B_OK)
++				info->played++;
++			return status;
++		}
++
++		case PROSE_CHIP_STOP:
++		{
++			uint32 track;
++			if (length < sizeof(track) || user_memcpy(&track, buffer, sizeof(track)) != B_OK)
++				return B_BAD_ADDRESS;
++			if (track >= info->config.tracks)
++				return B_BAD_VALUE;
++			struct prose_chip_track request;
++			memset(&request, 0, sizeof(request));
++			request.hdr.type = PROSE_CHIP_CMD_STOP;
++			request.track = track;
++			return prch_command(info, &request, sizeof(request), NULL);
++		}
++
++		case PROSE_CHIP_STOP_ALL:
++		{
++			struct prose_chip_hdr request;
++			memset(&request, 0, sizeof(request));
++			request.type = PROSE_CHIP_CMD_STOP_ALL;
++			return prch_command(info, &request, sizeof(request), NULL);
++		}
++
++		case PROSE_CHIP_SET_VOLUME:
++		{
++			uint32 volume;
++			if (length < sizeof(volume) || user_memcpy(&volume, buffer, sizeof(volume)) != B_OK)
++				return B_BAD_ADDRESS;
++			struct prose_chip_value request;
++			memset(&request, 0, sizeof(request));
++			request.hdr.type = PROSE_CHIP_CMD_VOLUME;
++			request.value = volume > 255 ? 255 : volume;
++			return prch_command(info, &request, sizeof(request), NULL);
++		}
++
++		case PROSE_CHIP_GET_STATE:
++		{
++			struct prose_chip_hdr request;
++			struct prose_chip_resp response;
++			memset(&request, 0, sizeof(request));
++			request.type = PROSE_CHIP_CMD_STATE;
++			status_t status = prch_command(info, &request, sizeof(request), &response);
++			if (status != B_OK)
++				return status;
++			if (length < sizeof(uint32)
++				|| user_memcpy(buffer, &response.value, sizeof(uint32)) != B_OK)
++				return B_BAD_ADDRESS;
++			return B_OK;
++		}
++
++		case PROSE_CHIP_GET_CONFIG:
++			if (length < sizeof(info->config)
++				|| user_memcpy(buffer, &info->config, sizeof(info->config)) != B_OK)
++				return B_BAD_ADDRESS;
++			return B_OK;
++	}
++	return B_DEV_INVALID_IOCTL;
++}
++
++
++module_dependency module_dependencies[] = {
++	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info**)&sDeviceManager },
++	{}
++};
++
++
++struct device_module_info sPrchDevice = {
++	{
++		PRCH_DEVICE_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	prch_init_device,
++	prch_uninit_device,
++	NULL,	// remove
++
++	prch_open,
++	prch_close,
++	prch_free,
++	NULL,	// read
++	NULL,	// write
++	NULL,	// io
++	prch_control,
++
++	NULL,	// select
++	NULL,	// deselect
++};
++
++
++struct driver_module_info sPrchDriver = {
++	{
++		PRCH_DRIVER_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	prch_supports_device,
++	prch_register_device,
++	prch_init_driver,
++	prch_uninit_driver,
++	prch_register_child_devices,
++	NULL,	// rescan
++	NULL,	// removed
++};
++
++
++module_info* modules[] = {
++	(module_info*)&sPrchDriver,
++	(module_info*)&sPrchDevice,
++	NULL
++};
+diff --git a/src/kits/game/ChipPlayer.cpp b/src/kits/game/ChipPlayer.cpp
+new file mode 100644
+index 0000000000..a0ee15ce8e
+--- /dev/null
++++ b/src/kits/game/ChipPlayer.cpp
+@@ -0,0 +1,170 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * BChipPlayer: see headers/os/game/ChipPlayer.h. Everything here is one
++ * ioctl; the interesting part is on the other side of it.
++ */
++
++
++#include <ChipPlayer.h>
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++
++#include <prose_chip.h>
++
++
++BChipPlayer::BChipPlayer()
++	:
++	fStatus(B_NO_INIT),
++	fDevice(-1),
++	fChips(0),
++	fVoices(0),
++	fTracks(0)
++{
++	fDevice = open(PROSE_CHIP_DEVICE, O_RDWR);
++	if (fDevice < 0) {
++		fStatus = B_DEVICE_NOT_FOUND;
++		return;
++	}
++	struct prose_chip_config config;
++	if (ioctl(fDevice, PROSE_CHIP_GET_CONFIG, &config, sizeof(config)) != 0) {
++		fStatus = errno != 0 ? (status_t)errno : B_ERROR;
++		return;
++	}
++	fChips = config.chips;
++	fVoices = config.voices;
++	fTracks = config.tracks;
++	fStatus = B_OK;
++}
++
++
++BChipPlayer::~BChipPlayer()
++{
++	if (fDevice >= 0)
++		close(fDevice);
++}
++
++
++status_t
++BChipPlayer::InitCheck() const
++{
++	return fStatus;
++}
++
++
++status_t
++BChipPlayer::Play(const char* abc, uint32 track, bool loop)
++{
++	if (fStatus != B_OK)
++		return fStatus;
++	if (abc == NULL)
++		return B_BAD_VALUE;
++	size_t length = strlen(abc);
++	if (length == 0 || length > PROSE_CHIP_TEXT_MAX)
++		return B_BAD_VALUE;
++	if (track >= fTracks)
++		return B_BAD_VALUE;
++
++	// The request carries the source by value: a tune is small, and a caller
++	// should not have to keep it alive until the host has read it.
++	struct prose_chip_play_request* request =
++		(struct prose_chip_play_request*)malloc(sizeof(*request));
++	if (request == NULL)
++		return B_NO_MEMORY;
++	memset(request, 0, sizeof(*request));
++	request->track = track;
++	request->flags = loop ? PROSE_CHIP_FLAG_LOOP : 0;
++	request->length = (uint32)length;
++	memcpy(request->source, abc, length);
++
++	status_t status = B_OK;
++	if (ioctl(fDevice, PROSE_CHIP_PLAY, request, sizeof(*request)) != 0)
++		status = errno != 0 ? (status_t)errno : B_ERROR;
++	free(request);
++	return status;
++}
++
++
++status_t
++BChipPlayer::Stop(uint32 track)
++{
++	if (fStatus != B_OK)
++		return fStatus;
++	uint32 value = track;
++	if (ioctl(fDevice, PROSE_CHIP_STOP, &value, sizeof(value)) != 0)
++		return errno != 0 ? (status_t)errno : B_ERROR;
++	return B_OK;
++}
++
++
++status_t
++BChipPlayer::StopAll()
++{
++	if (fStatus != B_OK)
++		return fStatus;
++	if (ioctl(fDevice, PROSE_CHIP_STOP_ALL, NULL, 0) != 0)
++		return errno != 0 ? (status_t)errno : B_ERROR;
++	return B_OK;
++}
++
++
++uint32
++BChipPlayer::Playing() const
++{
++	if (fStatus != B_OK)
++		return 0;
++	uint32 mask = 0;
++	if (ioctl(fDevice, PROSE_CHIP_GET_STATE, &mask, sizeof(mask)) != 0)
++		return 0;
++	return mask;
++}
++
++
++bool
++BChipPlayer::IsPlaying(uint32 track) const
++{
++	return track < fTracks && (Playing() & (1 << track)) != 0;
++}
++
++
++status_t
++BChipPlayer::SetVolume(float volume)
++{
++	if (fStatus != B_OK)
++		return fStatus;
++	if (volume < 0.0f)
++		volume = 0.0f;
++	if (volume > 1.0f)
++		volume = 1.0f;
++	uint32 value = (uint32)(volume * 255.0f);
++	if (ioctl(fDevice, PROSE_CHIP_SET_VOLUME, &value, sizeof(value)) != 0)
++		return errno != 0 ? (status_t)errno : B_ERROR;
++	return B_OK;
++}
++
++
++uint32
++BChipPlayer::CountChips() const
++{
++	return fChips;
++}
++
++
++uint32
++BChipPlayer::CountVoices() const
++{
++	return fVoices;
++}
++
++
++uint32
++BChipPlayer::CountTracks() const
++{
++	return fTracks;
++}
+diff --git a/src/kits/game/Jamfile b/src/kits/game/Jamfile
+index 8548719702..956fd01795 100644
+--- a/src/kits/game/Jamfile
++++ b/src/kits/game/Jamfile
+@@ -4,6 +4,7 @@ AddSubDirSupportedPlatforms libbe_test ;
+ 
+ UsePrivateHeaders app interface input shared ;
+ UsePrivateHeaders [ FDirName graphics prose_display ] ;
++UsePrivateHeaders prose ;
+ 
+ SubDirSysHdrs $(SUBDIR) ;
+ 
+@@ -14,6 +15,7 @@ if $(TARGET_PLATFORM) = haiku {
+ 		on $(architectureObject) {
+ 			SharedLibrary [ MultiArchDefaultGristFiles libgame.so ] :
+ 				# Public Game Kit
++				ChipPlayer.cpp
+ 				DirectWindow.cpp
+ 				GamePane.cpp
+ 				WindowScreen.cpp

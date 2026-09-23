@@ -1,0 +1,653 @@
+From 01a80b02ddb3752aa70fdbc8982c25f4dd0f3630 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 08:37:54 +0100
+Subject: [PATCH] Galaxigans: the music, and the rule that keeps it sparse
+
+The four cues carry `%%MIDI program`, so they are played on the Mac's
+General MIDI synth; the fourteen species motifs carry `[I:chip ...]`, so
+they go to the chip. The game sends a few hundred bytes of ABC and never
+a sample.
+
+With it comes the rule the port had left out, and it is the reason there
+are fourteen motifs rather than one: a motif plays at most once every
+thirty seconds, and when the thirty seconds are up the diver is chosen
+from the species you have heard LEAST recently. Without it random diving
+would play the grunt three times before you ever met the squid.
+
+The effects are not the original's -- it had none written as notation --
+and are short chip figures on chip 2, so firing never takes a voice the
+music is using.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0116-galaxigans-the-music-and-the-rule-that-keeps-it-sparse.patch f8413a4d599b18884d9ce211fdaee5d7a92d3d5a83e1579652021b09536bb6c1
+---
+ src/apps/galaxigans/Galaxigans.cpp | 104 ++++++++-
+ src/apps/galaxigans/Tunes.h        | 338 +++++++++++++++++++++++++++++
+ 2 files changed, 441 insertions(+), 1 deletion(-)
+ create mode 100644 src/apps/galaxigans/Tunes.h
+
+diff --git a/src/apps/galaxigans/Galaxigans.cpp b/src/apps/galaxigans/Galaxigans.cpp
+index 8b848f8ff0..d0fa5936a9 100644
+--- a/src/apps/galaxigans/Galaxigans.cpp
++++ b/src/apps/galaxigans/Galaxigans.cpp
+@@ -21,12 +21,24 @@
+  * drawn once in index 1, and index 1 means something different on every
+  * scanline.
+  *
++ * The music is notation, not sound: the four cues carry `%%MIDI program` so
++ * the host plays them on the Mac's General MIDI synth, and the fourteen
++ * species motifs carry `[I:chip ...]` so they go to its three-chip
++ * synthesiser. This program sends a few hundred bytes of ABC and never a
++ * sample. Two rules keep the motifs sparse, and both are the original's: one
++ * every thirty seconds, and when the thirty seconds are up the diver is
++ * chosen from the species you have heard LEAST recently -- which is why
++ * fourteen motifs are worth writing at all.
++ *
+  * Left and right steer, space fires (one shot a press), escape quits.
+  */
+ 
+ 
+ #include "Art.h"
+ #include "Cosmos.h"
++#include "Tunes.h"
++
++#include <ChipPlayer.h>
+ 
+ #include <Application.h>
+ #include <File.h>
+@@ -118,6 +130,16 @@ enum {
+ // Font slots.
+ enum { F_BODY = 0, F_MID = 1, F_BIG = 2, F_HUGE = 3 };
+ 
++// The player's four tracks. A motif and a shot are different schedules, so
++// firing never cuts the tune -- and they are on different chips besides.
++enum { TRACK_MOTIF = 0, TRACK_CUE = 1, TRACK_SFX = 2, TRACK_HUM = 3 };
++
++// The floor between two species motifs: thirty seconds, in frames at 30 Hz.
++// A motif is a bar long, so this is not a fade rule -- it is twenty-eight
++// seconds of no music at all between them, which is what makes the one you
++// do hear mean something.
++static const int32 kMotifGap = 900;
++
+ enum { ATTRACT = 0, PLAYING, CLEARED, OVER, HISCORE };
+ enum { A_FORM = 0, A_DIVE, A_RETURN, A_DEAD };
+ enum { BOSS_IDLE = 0, BOSS_ENTER, BOSS_STATION, BOSS_DESCEND, BOSS_CHARGE, BOSS_BEAM, BOSS_RETURN };
+@@ -646,6 +668,8 @@ private:
+ 			void				_BeginDance();
+ 			void				_EnterHiscores();
+ 
++			void				_Sfx(const char* abc);
++			void				_Cue(const char* abc);
+ 			void				_Draw();
+ 			void				_PlaceSprites();
+ 			void				_DrawHud();
+@@ -654,6 +678,9 @@ private:
+ 			thread_id			fThread;
+ 			bool				fQuit;
+ 			KeyCatcher*			fKeys;
++			BChipPlayer			fSound;
++			int32				fMotifGap;
++			int32				fMotifAge[SPECIES_COUNT];
+ 
+ 			uint64				fRng;
+ 			int32				fState, fStateTimer, fFrame;
+@@ -702,6 +729,7 @@ Galaxigans::Galaxigans()
+ 	fThread(-1),
+ 	fQuit(false),
+ 	fKeys(NULL),
++	fMotifGap(0),
+ 	fRng(0x2545F4914F6CDD1DULL),
+ 	fState(ATTRACT),
+ 	fStateTimer(0),
+@@ -743,8 +771,14 @@ Galaxigans::Galaxigans()
+ 	AddChild(fKeys);
+ 	CenterOnScreen();
+ 	memset(fInitials, 0, sizeof(fInitials));
++	for (int32 i = 0; i < SPECIES_COUNT; i++)
++		fMotifAge[i] = -1;
+ 	if (InitCheck() != B_OK)
+ 		return;
++	if (fSound.InitCheck() != B_OK) {
++		fprintf(stderr, "galaxigans: no chip here (%s); playing silently\n",
++			strerror(fSound.InitCheck()));
++	}
+ 
+ 	SetView(kFieldW, kFieldH);
+ 	SetEffect(B_GAME_PANE_PLAIN);		// the cosmos and the art carry it
+@@ -798,6 +832,7 @@ Galaxigans::QuitRequested()
+ 		wait_for_thread(fThread, NULL);
+ 		fThread = -1;
+ 	}
++	fSound.StopAll();
+ 	be_app->PostMessage(B_QUIT_REQUESTED);
+ 	return true;
+ }
+@@ -970,6 +1005,24 @@ Galaxigans::_AliveCount() const
+ }
+ 
+ 
++/// A sound effect, on its own track and its own chip, so a shot never takes a
++/// voice the tune is using.
++void
++Galaxigans::_Sfx(const char* abc)
++{
++	fSound.Play(abc, TRACK_SFX, false);
++}
++
++
++/// One of the four cues. They carry `%%MIDI program`, so the host plays them
++/// on the Mac's General MIDI synth rather than on the chip.
++void
++Galaxigans::_Cue(const char* abc)
++{
++	fSound.Play(abc, TRACK_CUE, false);
++}
++
++
+ // ── the frame ────────────────────────────────────────────────────────────
+ void
+ Galaxigans::_Step(bool left, bool right, bool fire, char letter)
+@@ -1008,7 +1061,11 @@ Galaxigans::_StepAttract(bool fire)
+ 	}
+ 	if (_FirePressed(fire)) {
+ 		fState = PLAYING;
++		// A game opens with an introduction, and the floor starts at zero, so
++		// the first alien to leave the formation brings its motif with it.
++		fMotifGap = 0;
+ 		_StartWave();
++		_Cue(kTitle);
+ 		return;
+ 	}
+ 	if (--fStateTimer <= 0) {
+@@ -1128,6 +1185,9 @@ Galaxigans::_BeginDance()
+ 	fState = OVER;
+ 	fStateTimer = kDanceLength;
+ 	fDanceT = 0;
++	fSound.Stop(TRACK_MOTIF);        // no bug still humming under the fanfare
++	fSound.Stop(TRACK_HUM);
++	_Cue(kAlienVictory);
+ }
+ 
+ 
+@@ -1153,6 +1213,7 @@ Galaxigans::_StepPlay(bool left, bool right, bool fire)
+ 	if (fState == PLAYING && _AliveCount() == 0) {
+ 		fState = CLEARED;
+ 		fStateTimer = 120;
++		_Cue(kStageClear);
+ 	}
+ }
+ 
+@@ -1182,6 +1243,7 @@ Galaxigans::_Fire()
+ 		if (!fBullets[i].live) {
+ 			fBullets[i].FireFrom(fShipX, kPlayerY - 12, -7);
+ 			fCooldown = 8;
++			_Sfx(kSfxShoot);
+ 			return;
+ 		}
+ 	}
+@@ -1203,6 +1265,8 @@ Galaxigans::_SwayFleet()
+ void
+ Galaxigans::_StepFleet()
+ {
++	if (fMotifGap > 0)
++		fMotifGap--;
+ 	if (--fDiveTimer <= 0) {
+ 		fDiveTimer = _DivePeriodNow();
+ 		_LaunchDiver();
+@@ -1240,7 +1304,30 @@ Galaxigans::_LaunchDiver()
+ 	if (count == 0)
+ 		return;
+ 	int32 pick = candidates[(int32)(_Rand() * (double)count)];
++	if (fMotifGap <= 0) {
++		// The thirty seconds are up, so this dive carries a tune -- and at one
++		// tune every half minute, WHICH tune matters more than which alien. So
++		// the diver becomes the one whose species has been silent longest, and
++		// the same motif cannot come round twice while another is waiting to
++		// be heard. Everything still equal, the random pick stands.
++		int32 best = pick;
++		int32 bestAge = fMotifAge[fFleet[pick].species];
++		for (int32 c = 0; c < count; c++) {
++			int32 age = fMotifAge[fFleet[candidates[c]].species];
++			if (age < bestAge) {
++				best = candidates[c];
++				bestAge = age;
++			}
++		}
++		pick = best;
++	}
+ 	fFleet[pick].DiveWithSeed((int32)(_Rand() * 65535.0));
++	if (fMotifGap <= 0) {
++		fMotifGap = kMotifGap;
++		int32 species = fFleet[pick].species;
++		fMotifAge[species] = fFrame;
++		fSound.Play(kMotifs[species], TRACK_MOTIF, false);
++	}
+ }
+ 
+ 
+@@ -1276,13 +1363,17 @@ Galaxigans::_StepSaucer()
+ 			fSaucerTimer = kSaucerPeriod;
+ 			fSaucerDir = _Rand() < 0.5 ? 1 : -1;
+ 			fSaucerX = fSaucerDir > 0 ? -30 : kFieldW + 30;
++			_Cue(kSaucer);                  // the pad swell, under the warble
++			fSound.Play(kSfxSaucer, TRACK_HUM, true);
+ 		}
+ 		return;
+ 	}
+ 	fSaucerX += fSaucerDir * 2;
+ 	_SaucerDrop();
+-	if (fSaucerX < -40 || fSaucerX > kFieldW + 40)
++	if (fSaucerX < -40 || fSaucerX > kFieldW + 40) {
+ 		fSaucerDir = 0;
++		fSound.Stop(TRACK_HUM);         // the warble simply stops when it leaves
++	}
+ }
+ 
+ 
+@@ -1327,6 +1418,10 @@ Galaxigans::_StepBoss()
+ 			fAbducting = 0;
+ 	}
+ 	int32 event = fBoss.Step(fLives, fBossOn);
++	if (event == EV_WARN)
++		_Sfx(kSfxHurt);
++	else if (event == EV_CHARGED)
++		fSound.Play(kSfxBossHum, TRACK_HUM, false);
+ 	if (event == EV_DONE)
+ 		_ReleasePilot();
+ 	else if (event == EV_GRAB)
+@@ -1356,6 +1451,7 @@ Galaxigans::_DragPilot()
+ 		return;
+ 	fLives--;
+ 	fAbducting = 0;
++	_Sfx(kSfxHurt);
+ 	_BurstAt(fBoss.BeamX(), fBoss.y + 26, IX_SPARK_GOLD);
+ 	if (fLives <= 0) {
+ 		_BeginDance();
+@@ -1383,6 +1479,7 @@ Galaxigans::_CheckBossHit()
+ 		if (fBullets[i].live && fBoss.Hits(fBullets[i].x, fBullets[i].y)) {
+ 			fBullets[i].live = false;
+ 			fScore += kBossScore;
++			_Sfx(kSfxExplode);
+ 			_BurstAt(fBoss.x + 16, fBoss.y + 16, IX_SPARK_RED);
+ 			_ReleasePilot();
+ 			fBoss.Retreat();
+@@ -1426,9 +1523,11 @@ Galaxigans::_CheckCollisions()
+ 		if (fSaucerDir != 0 && fBullets[b].Hits(fSaucerX, kSaucerY + 4, 12, 8)) {
+ 			fBullets[b].live = false;
+ 			fScore += 200;
++			_Sfx(kSfxCoin);
+ 			_BurstAt(fSaucerX, kSaucerY + 4, IX_SPARK_GOLD);
+ 			fSaucerDir = 0;
+ 			fSaucerX = -80;
++			fSound.Stop(TRACK_HUM);
+ 		}
+ 		if (!fBullets[b].live)
+ 			continue;
+@@ -1437,6 +1536,7 @@ Galaxigans::_CheckCollisions()
+ 				continue;
+ 			fBullets[b].live = false;
+ 			fScore += fFleet[a].Points();
++			_Sfx(kSfxExplode);
+ 			_BurstAt(fFleet[a].x, fFleet[a].y, IX_SPARK_RED);
+ 			fFleet[a].Kill();
+ 			break;
+@@ -1455,6 +1555,7 @@ Galaxigans::_CheckCollisions()
+ 			fBullets[b].live = false;
+ 			fMines[m].live = false;
+ 			fScore += kMineScore;
++			_Sfx(kSfxBang);
+ 			_BurstAt(fMines[m].x, fMines[m].y, IX_SPARK_GOLD);
+ 			break;
+ 		}
+@@ -1491,6 +1592,7 @@ Galaxigans::_LoseLife()
+ 	if (fState != PLAYING)
+ 		return;
+ 	_BurstAt(fShipX, kPlayerY, IX_SPARK_GOLD);
++	_Sfx(kSfxHurt);
+ 	fLives--;
+ 	fRespawn = 90;
+ 	fShipX = kFieldW / 2;
+diff --git a/src/apps/galaxigans/Tunes.h b/src/apps/galaxigans/Tunes.h
+new file mode 100644
+index 0000000000..719d571ed6
+--- /dev/null
++++ b/src/apps/galaxigans/Tunes.h
+@@ -0,0 +1,338 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Galaxigans: the music, as notation.
++ *
++ * The four cues carry `%%MIDI program`, so they were written for a
++ * synthesiser and the host plays them on the Mac's General MIDI one. The
++ * fourteen motifs carry `[I:chip ...]`, so they go to the three-chip
++ * synthesiser. Nothing here chooses -- the notation says which machine it is
++ * for, and BChipPlayer sends the text either way.
++ *
++ * The cues and motifs are VERBATIM from the Mojo GalaxigansDeluxe, which
++ * transcribed them from the assembler original's galaxigans_music.was.
++ * Generated from tunes.mojo and motifs.mojo; do not hand-edit.
++ *
++ * The sound effects are not from the original -- it had none written as
++ * notation -- and are short chip figures of our own, on chip 2 so that
++ * shooting never takes a voice the music is using.
++ */
++#ifndef GALAXIGANS_TUNES_H
++#define GALAXIGANS_TUNES_H
++
++
++#define SPECIES_MOTIFS 14
++
++
++static const char* const kTitle =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=84\n"
++	"%%MIDI program 52\n"
++	"K:Am\n"
++	"V:1\n"
++	"z4 A,2 E2 | A2 c2 e2 d2 | c4 B4 | A8 |\n"	;
++
++static const char* const kAlienVictory =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=210\n"
++	"%%MIDI program 80\n"
++	"K:Cm\n"
++	"V:1\n"
++	"G,4 _B,4 | c4 _e4 | _e2d2c2_B2 | G,8 | G,2G,2_A,2_B,2 | c2_e2g2_e2 | c4_B4 | G,8 | _E2F2G2_A2 | _B2c2_e2g2 | f/e/d/c/_B/A/_A/G/ | _E8 |\n"	;
++
++static const char* const kStageClear =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=234\n"
++	"%%MIDI program 9\n"
++	"K:C\n"
++	"V:1\n"
++	"ceg c\n"	;
++
++static const char* const kSaucer =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=160\n"
++	"%%MIDI program 91\n"
++	"K:C\n"
++	"V:1\n"
++	"G z G z | GABc cBAG |\n"	;
++
++static const char* const kMotifGrunt =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=132\n"
++	"K:Cm\n"
++	"V:1\n"
++	"[I:chip v=0 wave=pulse pw=500 a=0 d=4 s=6 r=3 vol=12]\n"
++	"C2 _E2 G2 _E2 | C4\n"
++	"V:2\n"
++	"[I:chip v=1 wave=pulse pw=700 a=0 d=6 s=4 r=4 filt=1 cutoff=900 res=3 mode=lp vol=11]\n"
++	"C,4 C,4 | C,,4\n"	;
++
++static const char* const kMotifMoth =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=132\n"
++	"K:Am\n"
++	"V:1\n"
++	"[I:chip v=0 wave=tri a=1 d=3 s=9 r=6 vol=13]\n"
++	"c/2d/2c/2d/2 e/2f/2e/2d/2 | c/2=B/2c/2a/2 a2\n"
++	"V:2\n"
++	"[I:chip v=1 wave=tri a=2 d=0 s=10 r=8 vol=10]\n"
++	"A,4 F,4 | E,8\n"	;
++
++static const char* const kMotifBeetle =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=112\n"
++	"K:Cm\n"
++	"V:1\n"
++	"[I:chip v=0 wave=saw a=0 d=5 s=4 r=4 filt=1 cutoff=800 res=4 mode=lp vol=13]\n"
++	"C,,2 C,,2 _E,,2 C,,2 | _B,,,4\n"
++	"V:2\n"
++	"[I:chip v=1 wave=noise a=0 d=2 s=0 r=2 vol=9]\n"
++	"z2 C2 z2 C2 | C2 C2\n"	;
++
++static const char* const kMotifScorpion =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=150\n"
++	"K:Cm\n"
++	"V:1\n"
++	"[I:chip v=0 wave=pulse pw=300 a=0 d=2 s=5 r=2 vol=13]\n"
++	"C D _E F | G2 z2 | c'2 c'2\n"
++	"V:2\n"
++	"[I:chip v=1 wave=saw a=0 d=3 s=6 r=3 filt=1 cutoff=1000 res=6 mode=lp vol=10]\n"
++	"C,8 | _A,,2 G,,2\n"	;
++
++static const char* const kMotifMantis =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=140\n"
++	"K:C\n"
++	"V:1\n"
++	"[I:chip v=0 wave=pulse pw=250 a=0 d=2 s=0 r=2 vol=13]\n"
++	"e2 z2 ^A2 z2 | ^d2 z2 a2 e'2\n"
++	"V:2\n"
++	"[I:chip v=1 wave=pulse pw=400 a=0 d=3 s=3 r=3 vol=10]\n"
++	"z2 E,2 z2 ^A,,2 | z2 ^G,,2 A,,4\n"	;
++
++static const char* const kMotifHornet =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/16\n"
++	"Q:1/4=160\n"
++	"K:C\n"
++	"V:1\n"
++	"[I:chip v=0 wave=pulse pw=180 a=0 d=1 s=0 r=1 vol=13]\n"
++	"baba baba c'bc'b c'bc'b | d'c'd'c' e'4\n"
++	"V:2\n"
++	"[I:chip v=1 wave=saw a=0 d=4 s=5 r=3 filt=1 cutoff=1200 res=7 mode=lp vol=10]\n"
++	"A,8 A,8 | ^A,8\n"	;
++
++static const char* const kMotifJellyfish =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=112\n"
++	"K:Am\n"
++	"V:1\n"
++	"[I:chip v=0 wave=tri a=5 d=0 s=13 r=7 vol=13]\n"
++	"c2 =b2 a2 e2 | a4\n"
++	"V:2\n"
++	"[I:chip v=1 wave=tri a=6 d=0 s=12 r=8 vol=9]\n"
++	"A,,8 | A,,4\n"	;
++
++static const char* const kMotifSpider =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/16\n"
++	"Q:1/4=150\n"
++	"K:C\n"
++	"V:1\n"
++	"[I:chip v=0 wave=pulse pw=220 a=0 d=1 s=0 r=1 vol=13]\n"
++	"cc^cd ^def ^fg^ga _bb4 | dd^de ^fga _b4 z4\n"
++	"V:2\n"
++	"[I:chip v=1 wave=pulse pw=600 a=0 d=2 s=2 r=2 vol=10]\n"
++	"C,4 z4 ^C,4 z4 | D,4 z4 z8\n"	;
++
++static const char* const kMotifStingray =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=112\n"
++	"K:Gm\n"
++	"V:1\n"
++	"[I:chip v=0 wave=tri a=2 d=2 s=11 r=8 vol=13]\n"
++	"G,,4 g4 | d'2 _b2 g4\n"
++	"V:2\n"
++	"[I:chip v=1 wave=pulse pw=800 a=1 d=4 s=8 r=6 filt=1 cutoff=1000 res=4 mode=lp vol=10]\n"
++	"G,,8 | D,,4 G,,4\n"	;
++
++static const char* const kMotifSquid =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=144\n"
++	"K:Cm\n"
++	"V:1\n"
++	"[I:chip v=0 wave=pulse pw=950 a=0 d=3 s=7 r=3 filt=1 cutoff=1100 res=7 mode=lp vol=13]\n"
++	"c/2_e/2c/2_e/2 g/2_e/2c/2_e/2 | f/2_a/2f/2_a/2 c'4\n"
++	"V:2\n"
++	"[I:chip v=1 wave=tri a=1 d=3 s=8 r=5 vol=10]\n"
++	"C,4 C,4 | F,,8\n"	;
++
++static const char* const kMotifWasp =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/16\n"
++	"Q:1/4=176\n"
++	"K:C\n"
++	"V:1\n"
++	"[I:chip v=0 wave=pulse pw=150 a=0 d=1 s=0 r=1 vol=13]\n"
++	"c'bc'b c'bc'b d'c'd'c' d'c'd'c' | e'd'e'd' f'4\n"
++	"V:2\n"
++	"[I:chip v=1 wave=saw a=0 d=3 s=4 r=3 filt=1 cutoff=1400 res=8 mode=lp vol=10]\n"
++	"A,4 ^A,4 =B,4 c4 | ^c8\n"	;
++
++static const char* const kMotifCrab =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=126\n"
++	"K:Dm\n"
++	"V:1\n"
++	"[I:chip v=0 wave=pulse pw=600 a=0 d=3 s=5 r=3 vol=13]\n"
++	"D,2 A,,2 D,2 A,,2 | E,2 =B,,2 E,2 A,,2\n"
++	"V:2\n"
++	"[I:chip v=1 wave=noise a=0 d=2 s=0 r=2 vol=8]\n"
++	"C2 z2 C2 z2 | C2 z2 C2 C2\n"	;
++
++static const char* const kMotifDrone =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=120\n"
++	"K:C\n"
++	"V:1\n"
++	"[I:chip v=0 wave=pulse pw=500 a=1 d=0 s=13 r=6 vol=11]\n"
++	"a8 | a8\n"
++	"V:2\n"
++	"[I:chip v=1 wave=pulse pw=520 a=1 d=0 s=13 r=6 vol=11]\n"
++	"^g8 | =g8\n"	;
++
++static const char* const kMotifSerpent =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=138\n"
++	"K:C\n"
++	"V:1\n"
++	"[I:chip v=0 wave=saw a=0 d=4 s=8 r=4 filt=1 cutoff=1300 res=8 mode=lp vol=13]\n"
++	"c =B _B A _A G _G F | E4\n"
++	"V:2\n"
++	"[I:chip v=1 wave=pulse pw=700 a=0 d=5 s=6 r=4 vol=10]\n"
++	"C,4 =B,,4 | _B,,4\n"	;
++
++static const char* const kMotifs[SPECIES_MOTIFS] = {
++	kMotifGrunt,
++	kMotifMoth,
++	kMotifBeetle,
++	kMotifScorpion,
++	kMotifMantis,
++	kMotifHornet,
++	kMotifJellyfish,
++	kMotifSpider,
++	kMotifStingray,
++	kMotifSquid,
++	kMotifWasp,
++	kMotifCrab,
++	kMotifDrone,
++	kMotifSerpent
++};
++
++static const char* const kSfxShoot =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:7\n"
++	"[I:chip v=6 wave=pulse pw=280 a=0 d=1 s=0 r=1 vol=13 slide=14]\n"
++	"g'/4c/4\n"	;
++
++static const char* const kSfxExplode =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:7\n"
++	"[I:chip v=6 wave=noise a=0 d=7 s=0 r=5 vol=15]\n"
++	"C2\n"	;
++
++static const char* const kSfxHurt =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:7\n"
++	"[I:chip v=6 wave=noise a=0 d=9 s=2 r=8 vol=15]\n"
++	"C,4\n"	;
++
++static const char* const kSfxCoin =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:8\n"
++	"[I:chip v=7 wave=pulse pw=520 a=0 d=3 s=6 r=3 vol=12]\n"
++	"e/4b/4e'/2\n"	;
++
++static const char* const kSfxBang =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:8\n"
++	"[I:chip v=7 wave=noise a=0 d=5 s=0 r=3 vol=14]\n"
++	"c/2\n"	;
++
++static const char* const kSfxSaucer =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:9\n"
++	"[I:chip v=8 wave=tri a=2 d=0 s=13 r=5 vol=11 vib=40/6]\n"
++	"g4\n"	;
++
++static const char* const kSfxBossHum =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:9\n"
++	"[I:chip v=8 wave=saw a=4 d=0 s=12 r=6 vol=11 filt=on cutoff=520 res=9 mode=lp sweep=14]\n"
++	"C,,8\n"	;
++
++
++#endif	/* GALAXIGANS_TUNES_H */

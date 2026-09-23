@@ -1,0 +1,494 @@
+From d09cedcd86c05d01a5734eb305f0919dcaa12068 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 09:07:46 +0100
+Subject: [PATCH] Galaxigans: pair every voice with the instrument it was given
+
+Two mispairings, both silent, both the same mistake.
+
+The sound effects named `v=6..8` for chip 2, which was right when `v=`
+was zero-based and wrong once it was not: v=6 is chip 1, so the registers
+were set on one chip while the notes sounded on another and every effect
+played on default registers -- a pulse wave where noise was asked for.
+The explosion stopped being an explosion and became a beep.
+
+The motifs have the same fault at the source: written `[I:chip v=0]`
+under `V:1` and `[I:chip v=1]` under `V:2`. One-based, `v=0` addresses no
+voice at all, so every motif's lead has been losing its timbre silently
+and its bass playing with the lead's. Generating them now shifts the
+voice numbers up by one, so each voice gets its own instrument. That is
+a deliberate correction of the material rather than a faithful copy of
+it, and it is the first time these motifs have sounded as written.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0117-galaxigans-pair-every-voice-with-the-instrument-it-was-given.patch fe0934fc43c4e31125fd7835a7bce7453cb6bc98d4bf83734f380faa43fdfc3e
+---
+ src/apps/galaxigans/Galaxigans.cpp |   1 +
+ src/apps/galaxigans/Sfx.h          | 118 ++++++++++++++++++
+ src/apps/galaxigans/Tunes.h        | 184 +++++++++++------------------
+ 3 files changed, 185 insertions(+), 118 deletions(-)
+ create mode 100644 src/apps/galaxigans/Sfx.h
+
+diff --git a/src/apps/galaxigans/Galaxigans.cpp b/src/apps/galaxigans/Galaxigans.cpp
+index d0fa5936a9..fc4b31bfb0 100644
+--- a/src/apps/galaxigans/Galaxigans.cpp
++++ b/src/apps/galaxigans/Galaxigans.cpp
+@@ -36,6 +36,7 @@
+ 
+ #include "Art.h"
+ #include "Cosmos.h"
++#include "Sfx.h"
+ #include "Tunes.h"
+ 
+ #include <ChipPlayer.h>
+diff --git a/src/apps/galaxigans/Sfx.h b/src/apps/galaxigans/Sfx.h
+new file mode 100644
+index 0000000000..58da485c94
+--- /dev/null
++++ b/src/apps/galaxigans/Sfx.h
+@@ -0,0 +1,118 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ *
++ * Galaxigans: the sound effects.
++ *
++ * These are NOT the original's -- it had none written as notation -- so
++ * unlike Tunes.h nothing here is generated and everything here is meant to be
++ * changed. They are ordinary ABC and the host is the synthesiser, so tuning
++ * one is editing a string and running the game again.
++ *
++ * All of them live on chip 2, so firing never takes a voice the music is
++ * using. `v=` is ONE-BASED -- v=7, 8 and 9 are chip 2's three voices -- and
++ * it has to agree with the V: the notes are on, or the registers are set on
++ * one chip while the notes play on another and you get the default pulse
++ * wave instead of whatever was asked for. That is a silent failure: the
++ * effect still makes a noise, just the wrong one.
++ *
++ * The one thing worth knowing before editing: a chip effect is a sweep
++ * stepped at frame rate, not a note. The chip's envelope runs at 50 Hz and
++ * its decay index 1 is already 24 ms, so two notes of a thirty-second at
++ * 240 bpm -- 31 ms each -- are over before the envelope has moved, and what
++ * you hear is a click. Write the sweep out instead: a tempo where one unit is
++ * about a frame (Q:1/4=750 with L:1/16 makes a unit 20 ms), no decay, a high
++ * sustain, and the release at the end doing the fade.
++ */
++#ifndef GALAXIGANS_SFX_H
++#define GALAXIGANS_SFX_H
++
++
++/* The shot: a pulse falling two octaves in six frames. No decay and a high
++   sustain, so the envelope holds the sweep up and the release ends it --
++   which is what makes it a "pew" and not a tick. */
++static const char* const kSfxShoot =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/16\n"
++	"Q:1/4=750\n"
++	"K:C\n"
++	"V:7\n"
++	"[I:chip v=7 wave=pulse pw=300 a=0 d=0 s=13 r=4 vol=12]\n"
++	"c''a'f'c'a e\n"
++	;
++
++/* An alien going up: noise, all decay, nothing held. */
++static const char* const kSfxExplode =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:7\n"
++	"[I:chip v=7 wave=noise a=0 d=7 s=0 r=5 vol=15]\n"
++	"C2\n"
++	;
++
++/* Losing something: the same, lower and longer. */
++static const char* const kSfxHurt =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:7\n"
++	"[I:chip v=7 wave=noise a=0 d=9 s=2 r=8 vol=15]\n"
++	"C,4\n"
++	;
++
++/* The saucer paying out: a rising ping, three frames a step. */
++static const char* const kSfxCoin =
++	"X:1\n"
++	"M:4/16\n"
++	"L:1/16\n"
++	"Q:1/4=250\n"
++	"K:C\n"
++	"V:8\n"
++	"[I:chip v=8 wave=pulse pw=520 a=0 d=0 s=14 r=5 vol=12]\n"
++	"e b e' b'\n"
++	;
++
++/* A mine going off: a short noise crack. */
++static const char* const kSfxBang =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:8\n"
++	"[I:chip v=8 wave=noise a=0 d=5 s=0 r=3 vol=14]\n"
++	"c/2\n"
++	;
++
++/* The saucer's warble, looped while it crosses: a triangle with deep vibrato. */
++static const char* const kSfxSaucer =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=240\n"
++	"K:C\n"
++	"V:9\n"
++	"[I:chip v=9 wave=tri a=2 d=0 s=13 r=5 vol=11 vib=40/6]\n"
++	"g4\n"
++	;
++
++/* The boss charging: a filtered saw opening up, which is what `sweep` is for. */
++static const char* const kSfxBossHum =
++	"X:1\n"
++	"M:4/4\n"
++	"L:1/8\n"
++	"Q:1/4=120\n"
++	"K:C\n"
++	"V:9\n"
++	"[I:chip v=9 wave=saw a=4 d=0 s=12 r=6 vol=11 filt=on cutoff=520 res=9 mode=lp sweep=14]\n"
++	"C,,8\n"
++	;
++
++
++#endif	/* GALAXIGANS_SFX_H */
+diff --git a/src/apps/galaxigans/Tunes.h b/src/apps/galaxigans/Tunes.h
+index 719d571ed6..a60d6131be 100644
+--- a/src/apps/galaxigans/Tunes.h
++++ b/src/apps/galaxigans/Tunes.h
+@@ -10,13 +10,17 @@
+  * synthesiser. Nothing here chooses -- the notation says which machine it is
+  * for, and BChipPlayer sends the text either way.
+  *
+- * The cues and motifs are VERBATIM from the Mojo GalaxigansDeluxe, which
+- * transcribed them from the assembler original's galaxigans_music.was.
+- * Generated from tunes.mojo and motifs.mojo; do not hand-edit.
++ * The notes are VERBATIM from the Mojo GalaxigansDeluxe, which transcribed
++ * them from the assembler original's galaxigans_music.was. ONE THING IS NOT:
++ * the motifs were written against an older zero-based `[I:chip v=]`, and
++ * under the grammar as it now stands -- one-based, v=1 being the first voice
++ * -- `v=0` addresses no voice at all. Played as written, every motif's lead
++ * loses its timbre silently and its bass plays with the lead's. The voice
++ * numbers are therefore shifted up by one here, so each voice gets the
++ * instrument it was given.
+  *
+- * The sound effects are not from the original -- it had none written as
+- * notation -- and are short chip figures of our own, on chip 2 so that
+- * shooting never takes a voice the music is using.
++ * Generated from tunes.mojo and motifs.mojo; do not hand-edit. The sound
++ * effects are ours and are in Sfx.h.
+  */
+ #ifndef GALAXIGANS_TUNES_H
+ #define GALAXIGANS_TUNES_H
+@@ -72,11 +76,12 @@ static const char* const kMotifGrunt =
+ 	"Q:1/4=132\n"
+ 	"K:Cm\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=pulse pw=500 a=0 d=4 s=6 r=3 vol=12]\n"
++	"[I:chip v=1 wave=pulse pw=500 a=0 d=4 s=6 r=3 vol=12]\n"
+ 	"C2 _E2 G2 _E2 | C4\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=pulse pw=700 a=0 d=6 s=4 r=4 filt=1 cutoff=900 res=3 mode=lp vol=11]\n"
+-	"C,4 C,4 | C,,4\n"	;
++	"[I:chip v=2 wave=pulse pw=700 a=0 d=6 s=4 r=4 filt=1 cutoff=900 res=3 mode=lp vol=11]\n"
++	"C,4 C,4 | C,,4\n"
++	"\n"	;
+ 
+ static const char* const kMotifMoth =
+ 	"X:1\n"
+@@ -85,11 +90,12 @@ static const char* const kMotifMoth =
+ 	"Q:1/4=132\n"
+ 	"K:Am\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=tri a=1 d=3 s=9 r=6 vol=13]\n"
++	"[I:chip v=1 wave=tri a=1 d=3 s=9 r=6 vol=13]\n"
+ 	"c/2d/2c/2d/2 e/2f/2e/2d/2 | c/2=B/2c/2a/2 a2\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=tri a=2 d=0 s=10 r=8 vol=10]\n"
+-	"A,4 F,4 | E,8\n"	;
++	"[I:chip v=2 wave=tri a=2 d=0 s=10 r=8 vol=10]\n"
++	"A,4 F,4 | E,8\n"
++	"\n"	;
+ 
+ static const char* const kMotifBeetle =
+ 	"X:1\n"
+@@ -98,11 +104,12 @@ static const char* const kMotifBeetle =
+ 	"Q:1/4=112\n"
+ 	"K:Cm\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=saw a=0 d=5 s=4 r=4 filt=1 cutoff=800 res=4 mode=lp vol=13]\n"
++	"[I:chip v=1 wave=saw a=0 d=5 s=4 r=4 filt=1 cutoff=800 res=4 mode=lp vol=13]\n"
+ 	"C,,2 C,,2 _E,,2 C,,2 | _B,,,4\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=noise a=0 d=2 s=0 r=2 vol=9]\n"
+-	"z2 C2 z2 C2 | C2 C2\n"	;
++	"[I:chip v=2 wave=noise a=0 d=2 s=0 r=2 vol=9]\n"
++	"z2 C2 z2 C2 | C2 C2\n"
++	"\n"	;
+ 
+ static const char* const kMotifScorpion =
+ 	"X:1\n"
+@@ -111,11 +118,12 @@ static const char* const kMotifScorpion =
+ 	"Q:1/4=150\n"
+ 	"K:Cm\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=pulse pw=300 a=0 d=2 s=5 r=2 vol=13]\n"
++	"[I:chip v=1 wave=pulse pw=300 a=0 d=2 s=5 r=2 vol=13]\n"
+ 	"C D _E F | G2 z2 | c'2 c'2\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=saw a=0 d=3 s=6 r=3 filt=1 cutoff=1000 res=6 mode=lp vol=10]\n"
+-	"C,8 | _A,,2 G,,2\n"	;
++	"[I:chip v=2 wave=saw a=0 d=3 s=6 r=3 filt=1 cutoff=1000 res=6 mode=lp vol=10]\n"
++	"C,8 | _A,,2 G,,2\n"
++	"\n"	;
+ 
+ static const char* const kMotifMantis =
+ 	"X:1\n"
+@@ -124,11 +132,12 @@ static const char* const kMotifMantis =
+ 	"Q:1/4=140\n"
+ 	"K:C\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=pulse pw=250 a=0 d=2 s=0 r=2 vol=13]\n"
++	"[I:chip v=1 wave=pulse pw=250 a=0 d=2 s=0 r=2 vol=13]\n"
+ 	"e2 z2 ^A2 z2 | ^d2 z2 a2 e'2\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=pulse pw=400 a=0 d=3 s=3 r=3 vol=10]\n"
+-	"z2 E,2 z2 ^A,,2 | z2 ^G,,2 A,,4\n"	;
++	"[I:chip v=2 wave=pulse pw=400 a=0 d=3 s=3 r=3 vol=10]\n"
++	"z2 E,2 z2 ^A,,2 | z2 ^G,,2 A,,4\n"
++	"\n"	;
+ 
+ static const char* const kMotifHornet =
+ 	"X:1\n"
+@@ -137,11 +146,12 @@ static const char* const kMotifHornet =
+ 	"Q:1/4=160\n"
+ 	"K:C\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=pulse pw=180 a=0 d=1 s=0 r=1 vol=13]\n"
++	"[I:chip v=1 wave=pulse pw=180 a=0 d=1 s=0 r=1 vol=13]\n"
+ 	"baba baba c'bc'b c'bc'b | d'c'd'c' e'4\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=saw a=0 d=4 s=5 r=3 filt=1 cutoff=1200 res=7 mode=lp vol=10]\n"
+-	"A,8 A,8 | ^A,8\n"	;
++	"[I:chip v=2 wave=saw a=0 d=4 s=5 r=3 filt=1 cutoff=1200 res=7 mode=lp vol=10]\n"
++	"A,8 A,8 | ^A,8\n"
++	"\n"	;
+ 
+ static const char* const kMotifJellyfish =
+ 	"X:1\n"
+@@ -150,11 +160,12 @@ static const char* const kMotifJellyfish =
+ 	"Q:1/4=112\n"
+ 	"K:Am\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=tri a=5 d=0 s=13 r=7 vol=13]\n"
++	"[I:chip v=1 wave=tri a=5 d=0 s=13 r=7 vol=13]\n"
+ 	"c2 =b2 a2 e2 | a4\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=tri a=6 d=0 s=12 r=8 vol=9]\n"
+-	"A,,8 | A,,4\n"	;
++	"[I:chip v=2 wave=tri a=6 d=0 s=12 r=8 vol=9]\n"
++	"A,,8 | A,,4\n"
++	"\n"	;
+ 
+ static const char* const kMotifSpider =
+ 	"X:1\n"
+@@ -163,11 +174,12 @@ static const char* const kMotifSpider =
+ 	"Q:1/4=150\n"
+ 	"K:C\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=pulse pw=220 a=0 d=1 s=0 r=1 vol=13]\n"
++	"[I:chip v=1 wave=pulse pw=220 a=0 d=1 s=0 r=1 vol=13]\n"
+ 	"cc^cd ^def ^fg^ga _bb4 | dd^de ^fga _b4 z4\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=pulse pw=600 a=0 d=2 s=2 r=2 vol=10]\n"
+-	"C,4 z4 ^C,4 z4 | D,4 z4 z8\n"	;
++	"[I:chip v=2 wave=pulse pw=600 a=0 d=2 s=2 r=2 vol=10]\n"
++	"C,4 z4 ^C,4 z4 | D,4 z4 z8\n"
++	"\n"	;
+ 
+ static const char* const kMotifStingray =
+ 	"X:1\n"
+@@ -176,11 +188,12 @@ static const char* const kMotifStingray =
+ 	"Q:1/4=112\n"
+ 	"K:Gm\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=tri a=2 d=2 s=11 r=8 vol=13]\n"
++	"[I:chip v=1 wave=tri a=2 d=2 s=11 r=8 vol=13]\n"
+ 	"G,,4 g4 | d'2 _b2 g4\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=pulse pw=800 a=1 d=4 s=8 r=6 filt=1 cutoff=1000 res=4 mode=lp vol=10]\n"
+-	"G,,8 | D,,4 G,,4\n"	;
++	"[I:chip v=2 wave=pulse pw=800 a=1 d=4 s=8 r=6 filt=1 cutoff=1000 res=4 mode=lp vol=10]\n"
++	"G,,8 | D,,4 G,,4\n"
++	"\n"	;
+ 
+ static const char* const kMotifSquid =
+ 	"X:1\n"
+@@ -189,11 +202,12 @@ static const char* const kMotifSquid =
+ 	"Q:1/4=144\n"
+ 	"K:Cm\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=pulse pw=950 a=0 d=3 s=7 r=3 filt=1 cutoff=1100 res=7 mode=lp vol=13]\n"
++	"[I:chip v=1 wave=pulse pw=950 a=0 d=3 s=7 r=3 filt=1 cutoff=1100 res=7 mode=lp vol=13]\n"
+ 	"c/2_e/2c/2_e/2 g/2_e/2c/2_e/2 | f/2_a/2f/2_a/2 c'4\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=tri a=1 d=3 s=8 r=5 vol=10]\n"
+-	"C,4 C,4 | F,,8\n"	;
++	"[I:chip v=2 wave=tri a=1 d=3 s=8 r=5 vol=10]\n"
++	"C,4 C,4 | F,,8\n"
++	"\n"	;
+ 
+ static const char* const kMotifWasp =
+ 	"X:1\n"
+@@ -202,11 +216,12 @@ static const char* const kMotifWasp =
+ 	"Q:1/4=176\n"
+ 	"K:C\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=pulse pw=150 a=0 d=1 s=0 r=1 vol=13]\n"
++	"[I:chip v=1 wave=pulse pw=150 a=0 d=1 s=0 r=1 vol=13]\n"
+ 	"c'bc'b c'bc'b d'c'd'c' d'c'd'c' | e'd'e'd' f'4\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=saw a=0 d=3 s=4 r=3 filt=1 cutoff=1400 res=8 mode=lp vol=10]\n"
+-	"A,4 ^A,4 =B,4 c4 | ^c8\n"	;
++	"[I:chip v=2 wave=saw a=0 d=3 s=4 r=3 filt=1 cutoff=1400 res=8 mode=lp vol=10]\n"
++	"A,4 ^A,4 =B,4 c4 | ^c8\n"
++	"\n"	;
+ 
+ static const char* const kMotifCrab =
+ 	"X:1\n"
+@@ -215,11 +230,12 @@ static const char* const kMotifCrab =
+ 	"Q:1/4=126\n"
+ 	"K:Dm\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=pulse pw=600 a=0 d=3 s=5 r=3 vol=13]\n"
++	"[I:chip v=1 wave=pulse pw=600 a=0 d=3 s=5 r=3 vol=13]\n"
+ 	"D,2 A,,2 D,2 A,,2 | E,2 =B,,2 E,2 A,,2\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=noise a=0 d=2 s=0 r=2 vol=8]\n"
+-	"C2 z2 C2 z2 | C2 z2 C2 C2\n"	;
++	"[I:chip v=2 wave=noise a=0 d=2 s=0 r=2 vol=8]\n"
++	"C2 z2 C2 z2 | C2 z2 C2 C2\n"
++	"\n"	;
+ 
+ static const char* const kMotifDrone =
+ 	"X:1\n"
+@@ -228,11 +244,12 @@ static const char* const kMotifDrone =
+ 	"Q:1/4=120\n"
+ 	"K:C\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=pulse pw=500 a=1 d=0 s=13 r=6 vol=11]\n"
++	"[I:chip v=1 wave=pulse pw=500 a=1 d=0 s=13 r=6 vol=11]\n"
+ 	"a8 | a8\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=pulse pw=520 a=1 d=0 s=13 r=6 vol=11]\n"
+-	"^g8 | =g8\n"	;
++	"[I:chip v=2 wave=pulse pw=520 a=1 d=0 s=13 r=6 vol=11]\n"
++	"^g8 | =g8\n"
++	"\n"	;
+ 
+ static const char* const kMotifSerpent =
+ 	"X:1\n"
+@@ -241,11 +258,12 @@ static const char* const kMotifSerpent =
+ 	"Q:1/4=138\n"
+ 	"K:C\n"
+ 	"V:1\n"
+-	"[I:chip v=0 wave=saw a=0 d=4 s=8 r=4 filt=1 cutoff=1300 res=8 mode=lp vol=13]\n"
++	"[I:chip v=1 wave=saw a=0 d=4 s=8 r=4 filt=1 cutoff=1300 res=8 mode=lp vol=13]\n"
+ 	"c =B _B A _A G _G F | E4\n"
+ 	"V:2\n"
+-	"[I:chip v=1 wave=pulse pw=700 a=0 d=5 s=6 r=4 vol=10]\n"
+-	"C,4 =B,,4 | _B,,4\n"	;
++	"[I:chip v=2 wave=pulse pw=700 a=0 d=5 s=6 r=4 vol=10]\n"
++	"C,4 =B,,4 | _B,,4\n"
++	"\n"	;
+ 
+ static const char* const kMotifs[SPECIES_MOTIFS] = {
+ 	kMotifGrunt,
+@@ -264,75 +282,5 @@ static const char* const kMotifs[SPECIES_MOTIFS] = {
+ 	kMotifSerpent
+ };
+ 
+-static const char* const kSfxShoot =
+-	"X:1\n"
+-	"M:4/4\n"
+-	"L:1/8\n"
+-	"Q:1/4=240\n"
+-	"K:C\n"
+-	"V:7\n"
+-	"[I:chip v=6 wave=pulse pw=280 a=0 d=1 s=0 r=1 vol=13 slide=14]\n"
+-	"g'/4c/4\n"	;
+-
+-static const char* const kSfxExplode =
+-	"X:1\n"
+-	"M:4/4\n"
+-	"L:1/8\n"
+-	"Q:1/4=240\n"
+-	"K:C\n"
+-	"V:7\n"
+-	"[I:chip v=6 wave=noise a=0 d=7 s=0 r=5 vol=15]\n"
+-	"C2\n"	;
+-
+-static const char* const kSfxHurt =
+-	"X:1\n"
+-	"M:4/4\n"
+-	"L:1/8\n"
+-	"Q:1/4=240\n"
+-	"K:C\n"
+-	"V:7\n"
+-	"[I:chip v=6 wave=noise a=0 d=9 s=2 r=8 vol=15]\n"
+-	"C,4\n"	;
+-
+-static const char* const kSfxCoin =
+-	"X:1\n"
+-	"M:4/4\n"
+-	"L:1/8\n"
+-	"Q:1/4=240\n"
+-	"K:C\n"
+-	"V:8\n"
+-	"[I:chip v=7 wave=pulse pw=520 a=0 d=3 s=6 r=3 vol=12]\n"
+-	"e/4b/4e'/2\n"	;
+-
+-static const char* const kSfxBang =
+-	"X:1\n"
+-	"M:4/4\n"
+-	"L:1/8\n"
+-	"Q:1/4=240\n"
+-	"K:C\n"
+-	"V:8\n"
+-	"[I:chip v=7 wave=noise a=0 d=5 s=0 r=3 vol=14]\n"
+-	"c/2\n"	;
+-
+-static const char* const kSfxSaucer =
+-	"X:1\n"
+-	"M:4/4\n"
+-	"L:1/8\n"
+-	"Q:1/4=240\n"
+-	"K:C\n"
+-	"V:9\n"
+-	"[I:chip v=8 wave=tri a=2 d=0 s=13 r=5 vol=11 vib=40/6]\n"
+-	"g4\n"	;
+-
+-static const char* const kSfxBossHum =
+-	"X:1\n"
+-	"M:4/4\n"
+-	"L:1/8\n"
+-	"Q:1/4=240\n"
+-	"K:C\n"
+-	"V:9\n"
+-	"[I:chip v=8 wave=saw a=4 d=0 s=12 r=6 vol=11 filt=on cutoff=520 res=9 mode=lp sweep=14]\n"
+-	"C,,8\n"	;
+-
+ 
+ #endif	/* GALAXIGANS_TUNES_H */

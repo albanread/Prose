@@ -1,0 +1,58 @@
+From cb28e2eba4ddd02f3484e752305c18dc023a64bc Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 13:05:54 +0100
+Subject: [PATCH] NetSurf: ship the proxy the machine's host runs
+
+A VPN on the Mac takes the guest's forwarded traffic into the tunnel and never
+brings it back, and its DHCP with it, so a machine started under one has no
+address and no way out. Prose answers that with a proxy on the bridge, which is
+a road the guest can still use; this is the guest end of it.
+
+The file names the usual bridge address, which is a guess -- the shared network
+can be moved, the port is a setting, and the proxy can be switched off. Prose
+rewrites these four lines through the portal once the guest is answering, so
+what NetSurf believes is what is actually there. A Choices file naming a proxy
+that is not running is worse than no file at all, because then nothing loads,
+which is why the correcting side is the side that knows.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0118-netsurf-ship-the-proxy-the-machine-s-host-runs.patch 47fe87e4c89fcf1dc6dad45c4c4a58a3b767a8a5fbe8535ae9c9425c726c741f
+---
+ build/jam/images/definitions/minimum |  5 +++++
+ data/settings/NetSurf/Choices        | 11 +++++++++++
+ 2 files changed, 16 insertions(+)
+ create mode 100644 data/settings/NetSurf/Choices
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index de833a860f..669a68e93b 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -443,6 +443,11 @@ SEARCH on <user-first-login>first_login
+ 	= [ FDirName $(HAIKU_TOP) data settings ] ;
+ AddFilesToHaikuImage home config settings : <user-first-login>first_login ;
+ 
++# NetSurf's proxy, which Prose runs on the host and keeps in step (prose_portal)
++SEARCH on <netsurf-settings>Choices
++	= [ FDirName $(HAIKU_TOP) data settings NetSurf ] ;
++AddFilesToHaikuImage home config settings NetSurf : <netsurf-settings>Choices ;
++
+ local etcDir = [ FDirName $(HAIKU_TOP) data etc ] ;
+ local etcFiles = inputrc profile ;
+ etcFiles = $(etcFiles:G=etc) ;
+diff --git a/data/settings/NetSurf/Choices b/data/settings/NetSurf/Choices
+new file mode 100644
+index 0000000000..774ad8e419
+--- /dev/null
++++ b/data/settings/NetSurf/Choices
+@@ -0,0 +1,11 @@
++# NetSurf on Prose goes out through the machine's host, which can reach the
++# internet when this machine cannot -- a VPN on the Mac takes the guest's
++# forwarded traffic with it, and its DHCP too. Prose runs the proxy on the
++# bridge it gave this machine and keeps these lines in step with it, so a
++# changed address or a switched-off proxy is corrected from the other side.
++#
++# NetSurf is libcurl underneath, so CONNECT carries https as well.
++http_proxy:1
++http_proxy_host:192.168.64.1
++http_proxy_port:8888
++http_proxy_auth:0
