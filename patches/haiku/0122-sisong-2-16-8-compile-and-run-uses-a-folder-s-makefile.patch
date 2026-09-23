@@ -1,0 +1,29 @@
+From 0ff82f31aa21775fa6026123520d7f1131f67276 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 14:18:58 +0100
+Subject: [PATCH] sisong 2.16-8: Compile and Run uses a folder's makefile
+
+The build command for a lone file knows only "-lbe", so the game example --
+which comes with a makefile saying "-lbe -lgame" -- failed to link against a
+library that was on the machine all along. A folder with a makefile in it is
+now built by it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0122-sisong-2-16-8-compile-and-run-uses-a-folder-s-makefile.patch 441c272c50209c21ee07385b5bf9f84409cf7d44ba4412b7fa703f8f58d8bb0e
+---
+ build/jam/repositories/HaikuPorts/arm64 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 05e2c6cc38..fce6f495b6 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -210,7 +210,7 @@ RemotePackageRepository HaikuPorts
+ 	prosepaint-0.1-2
+ 	proseothello-0.1-2
+ 	prosewriter-0.1-5
+-	sisong-2.16-7
++	sisong-2.16-8
+ 	slayer-1.0-2
+ 	speex-1.2.1-2
+ 	speex_devel-1.2.1-2
