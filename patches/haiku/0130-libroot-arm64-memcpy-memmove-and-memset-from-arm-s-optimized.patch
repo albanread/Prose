@@ -1,0 +1,888 @@
+From 9f4f5081593154c251b0d3f146a9f162d0038476 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 19:08:30 +0100
+Subject: [PATCH] libroot: arm64 memcpy, memmove and memset from Arm's
+ optimized-routines
+
+The generic C they replace moved eight bytes per instruction at best, and one
+byte at a time, for the whole call, whenever source and destination differed
+in alignment modulo 8. app_server does all its copying through them -- the
+back buffer to the front one, scrolling, unscaled bitmaps -- and hits the byte
+loop on every sideways scroll by an odd number of pixels and every 32-bit
+bitmap drawn at an odd x. Arm's routines move sixteen bytes per instruction
+in q-register pairs, handle unaligned heads and tails without caring how the
+two pointers relate, and zero large blocks with dc zva.
+
+memcpy and memmove are one routine, which copies overlapping ranges correctly
+in either direction, so musl's memmove.c is left out of libroot and of
+runtime_loader on arm64. DrawingEngine::_CopyRect needs that: it calls memcpy
+on overlapping rows when it moves content left.
+
+The routines assume Normal memory; on Device memory (B_UNCACHED_MEMORY on
+arm64) their unaligned accesses and dc zva would fault. Every frame buffer
+userland maps is write-back (prose_display) or write-combining (framebuffer).
+The kernel and the boot loader compile their own copies of the generic C and
+keep them.
+
+Imported unchanged from github.com/ARM-software/optimized-routines at
+47597821aaa5, under MIT OR Apache-2.0 WITH LLVM-exception (LICENSE alongside);
+memcpy.S and memset.S only give the entry points their libc names.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0130-libroot-arm64-memcpy-memmove-and-memset-from-arm-s-optimized.patch 12bc514f94cf4ca26916eb095316b68712e691054ecaafb22473a4cd45b8e42c
+---
+ src/system/libroot/posix/musl/string/Jamfile  |   9 +-
+ .../libroot/posix/string/arch/arm64/Jamfile   |  12 +-
+ .../arch/arm64/arm-optimized-routines/LICENSE | 249 ++++++++++++++++++
+ .../arm64/arm-optimized-routines/asmdefs.h    | 105 ++++++++
+ .../arm-optimized-routines/memcpy-advsimd.S   | 209 +++++++++++++++
+ .../arm64/arm-optimized-routines/memset.S     | 121 +++++++++
+ .../libroot/posix/string/arch/arm64/memcpy.S  |  24 ++
+ .../libroot/posix/string/arch/arm64/memset.S  |  14 +
+ src/system/runtime_loader/Jamfile             |   9 +-
+ 9 files changed, 741 insertions(+), 11 deletions(-)
+ create mode 100644 src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/LICENSE
+ create mode 100644 src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/asmdefs.h
+ create mode 100644 src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/memcpy-advsimd.S
+ create mode 100644 src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/memset.S
+ create mode 100644 src/system/libroot/posix/string/arch/arm64/memcpy.S
+ create mode 100644 src/system/libroot/posix/string/arch/arm64/memset.S
+
+diff --git a/src/system/libroot/posix/musl/string/Jamfile b/src/system/libroot/posix/musl/string/Jamfile
+index 2bae858cd8..596b4e1f17 100644
+--- a/src/system/libroot/posix/musl/string/Jamfile
++++ b/src/system/libroot/posix/musl/string/Jamfile
+@@ -10,12 +10,19 @@ for architectureObject in [ MultiArchSubDirSetup ] {
+ 	on $(architectureObject) {
+ 		local architecture = $(TARGET_PACKAGING_ARCH) ;
+ 
++		# arm64's memcpy handles overlap and is its memmove as well
++		# (posix/string/arch/arm64)
++		local memmove = memmove.c ;
++		if $(TARGET_ARCH) = arm64 {
++			memmove = ;
++		}
++
+ 		MergeObject <$(architecture)>posix_musl_string.o :
+ 			index.c
+ 			memccpy.c
+ 			memchr.c
+ 			memmem.c
+-			memmove.c
++			$(memmove)
+ 			memrchr.c
+ 			stpcpy.c
+ 			stpncpy.c
+diff --git a/src/system/libroot/posix/string/arch/arm64/Jamfile b/src/system/libroot/posix/string/arch/arm64/Jamfile
+index dc5b49afc7..1c84e61011 100644
+--- a/src/system/libroot/posix/string/arch/arm64/Jamfile
++++ b/src/system/libroot/posix/string/arch/arm64/Jamfile
+@@ -1,20 +1,14 @@
+ SubDir HAIKU_TOP src system libroot posix string arch arm64 ;
+ 
+-# Optimizations create infinite recursion otherwise.
+-SubDirCcFlags -fno-builtin ;
+-
+ local architectureObject ;
+ for architectureObject in [ MultiArchSubDirSetup arm64 ] {
+ 	on $(architectureObject) {
+ 		local architecture = $(TARGET_PACKAGING_ARCH) ;
+ 
+-		UsePrivateSystemHeaders ;
+-
+-		SEARCH_SOURCE += [ FDirName $(SUBDIR) $(DOTDOT) generic ] ;
+-
++		# memcpy.S is memmove as well
+ 		MergeObject <$(architecture)>posix_string_arch_$(TARGET_ARCH).o :
+-			generic_memcpy.c
+-			generic_memset.c
++			memcpy.S
++			memset.S
+ 			;
+ 	}
+ }
+diff --git a/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/LICENSE b/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/LICENSE
+new file mode 100644
+index 0000000000..20a4b7717c
+--- /dev/null
++++ b/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/LICENSE
+@@ -0,0 +1,249 @@
++MIT OR Apache-2.0 WITH LLVM-exception
++=====================================
++
++
++MIT License
++-----------
++
++Copyright (c) 1999-2022, Arm Limited.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++
++
++Apache-2.0 WITH LLVM-exception
++------------------------------
++
++                                Apache License
++                           Version 2.0, January 2004
++                        http://www.apache.org/licenses/
++
++    TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++    1. Definitions.
++
++      "License" shall mean the terms and conditions for use, reproduction,
++      and distribution as defined by Sections 1 through 9 of this document.
++
++      "Licensor" shall mean the copyright owner or entity authorized by
++      the copyright owner that is granting the License.
++
++      "Legal Entity" shall mean the union of the acting entity and all
++      other entities that control, are controlled by, or are under common
++      control with that entity. For the purposes of this definition,
++      "control" means (i) the power, direct or indirect, to cause the
++      direction or management of such entity, whether by contract or
++      otherwise, or (ii) ownership of fifty percent (50%) or more of the
++      outstanding shares, or (iii) beneficial ownership of such entity.
++
++      "You" (or "Your") shall mean an individual or Legal Entity
++      exercising permissions granted by this License.
++
++      "Source" form shall mean the preferred form for making modifications,
++      including but not limited to software source code, documentation
++      source, and configuration files.
++
++      "Object" form shall mean any form resulting from mechanical
++      transformation or translation of a Source form, including but
++      not limited to compiled object code, generated documentation,
++      and conversions to other media types.
++
++      "Work" shall mean the work of authorship, whether in Source or
++      Object form, made available under the License, as indicated by a
++      copyright notice that is included in or attached to the work
++      (an example is provided in the Appendix below).
++
++      "Derivative Works" shall mean any work, whether in Source or Object
++      form, that is based on (or derived from) the Work and for which the
++      editorial revisions, annotations, elaborations, or other modifications
++      represent, as a whole, an original work of authorship. For the purposes
++      of this License, Derivative Works shall not include works that remain
++      separable from, or merely link (or bind by name) to the interfaces of,
++      the Work and Derivative Works thereof.
++
++      "Contribution" shall mean any work of authorship, including
++      the original version of the Work and any modifications or additions
++      to that Work or Derivative Works thereof, that is intentionally
++      submitted to Licensor for inclusion in the Work by the copyright owner
++      or by an individual or Legal Entity authorized to submit on behalf of
++      the copyright owner. For the purposes of this definition, "submitted"
++      means any form of electronic, verbal, or written communication sent
++      to the Licensor or its representatives, including but not limited to
++      communication on electronic mailing lists, source code control systems,
++      and issue tracking systems that are managed by, or on behalf of, the
++      Licensor for the purpose of discussing and improving the Work, but
++      excluding communication that is conspicuously marked or otherwise
++      designated in writing by the copyright owner as "Not a Contribution."
++
++      "Contributor" shall mean Licensor and any individual or Legal Entity
++      on behalf of whom a Contribution has been received by Licensor and
++      subsequently incorporated within the Work.
++
++    2. Grant of Copyright License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      copyright license to reproduce, prepare Derivative Works of,
++      publicly display, publicly perform, sublicense, and distribute the
++      Work and such Derivative Works in Source or Object form.
++
++    3. Grant of Patent License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      (except as stated in this section) patent license to make, have made,
++      use, offer to sell, sell, import, and otherwise transfer the Work,
++      where such license applies only to those patent claims licensable
++      by such Contributor that are necessarily infringed by their
++      Contribution(s) alone or by combination of their Contribution(s)
++      with the Work to which such Contribution(s) was submitted. If You
++      institute patent litigation against any entity (including a
++      cross-claim or counterclaim in a lawsuit) alleging that the Work
++      or a Contribution incorporated within the Work constitutes direct
++      or contributory patent infringement, then any patent licenses
++      granted to You under this License for that Work shall terminate
++      as of the date such litigation is filed.
++
++    4. Redistribution. You may reproduce and distribute copies of the
++      Work or Derivative Works thereof in any medium, with or without
++      modifications, and in Source or Object form, provided that You
++      meet the following conditions:
++
++      (a) You must give any other recipients of the Work or
++          Derivative Works a copy of this License; and
++
++      (b) You must cause any modified files to carry prominent notices
++          stating that You changed the files; and
++
++      (c) You must retain, in the Source form of any Derivative Works
++          that You distribute, all copyright, patent, trademark, and
++          attribution notices from the Source form of the Work,
++          excluding those notices that do not pertain to any part of
++          the Derivative Works; and
++
++      (d) If the Work includes a "NOTICE" text file as part of its
++          distribution, then any Derivative Works that You distribute must
++          include a readable copy of the attribution notices contained
++          within such NOTICE file, excluding those notices that do not
++          pertain to any part of the Derivative Works, in at least one
++          of the following places: within a NOTICE text file distributed
++          as part of the Derivative Works; within the Source form or
++          documentation, if provided along with the Derivative Works; or,
++          within a display generated by the Derivative Works, if and
++          wherever such third-party notices normally appear. The contents
++          of the NOTICE file are for informational purposes only and
++          do not modify the License. You may add Your own attribution
++          notices within Derivative Works that You distribute, alongside
++          or as an addendum to the NOTICE text from the Work, provided
++          that such additional attribution notices cannot be construed
++          as modifying the License.
++
++      You may add Your own copyright statement to Your modifications and
++      may provide additional or different license terms and conditions
++      for use, reproduction, or distribution of Your modifications, or
++      for any such Derivative Works as a whole, provided Your use,
++      reproduction, and distribution of the Work otherwise complies with
++      the conditions stated in this License.
++
++    5. Submission of Contributions. Unless You explicitly state otherwise,
++      any Contribution intentionally submitted for inclusion in the Work
++      by You to the Licensor shall be under the terms and conditions of
++      this License, without any additional terms or conditions.
++      Notwithstanding the above, nothing herein shall supersede or modify
++      the terms of any separate license agreement you may have executed
++      with Licensor regarding such Contributions.
++
++    6. Trademarks. This License does not grant permission to use the trade
++      names, trademarks, service marks, or product names of the Licensor,
++      except as required for reasonable and customary use in describing the
++      origin of the Work and reproducing the content of the NOTICE file.
++
++    7. Disclaimer of Warranty. Unless required by applicable law or
++      agreed to in writing, Licensor provides the Work (and each
++      Contributor provides its Contributions) on an "AS IS" BASIS,
++      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++      implied, including, without limitation, any warranties or conditions
++      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++      PARTICULAR PURPOSE. You are solely responsible for determining the
++      appropriateness of using or redistributing the Work and assume any
++      risks associated with Your exercise of permissions under this License.
++
++    8. Limitation of Liability. In no event and under no legal theory,
++      whether in tort (including negligence), contract, or otherwise,
++      unless required by applicable law (such as deliberate and grossly
++      negligent acts) or agreed to in writing, shall any Contributor be
++      liable to You for damages, including any direct, indirect, special,
++      incidental, or consequential damages of any character arising as a
++      result of this License or out of the use or inability to use the
++      Work (including but not limited to damages for loss of goodwill,
++      work stoppage, computer failure or malfunction, or any and all
++      other commercial damages or losses), even if such Contributor
++      has been advised of the possibility of such damages.
++
++    9. Accepting Warranty or Additional Liability. While redistributing
++      the Work or Derivative Works thereof, You may choose to offer,
++      and charge a fee for, acceptance of support, warranty, indemnity,
++      or other liability obligations and/or rights consistent with this
++      License. However, in accepting such obligations, You may act only
++      on Your own behalf and on Your sole responsibility, not on behalf
++      of any other Contributor, and only if You agree to indemnify,
++      defend, and hold each Contributor harmless for any liability
++      incurred by, or claims asserted against, such Contributor by reason
++      of your accepting any such warranty or additional liability.
++
++    END OF TERMS AND CONDITIONS
++
++    APPENDIX: How to apply the Apache License to your work.
++
++      To apply the Apache License to your work, attach the following
++      boilerplate notice, with the fields enclosed by brackets "[]"
++      replaced with your own identifying information. (Don't include
++      the brackets!)  The text should be enclosed in the appropriate
++      comment syntax for the file format. We also recommend that a
++      file or class name and description of purpose be included on the
++      same "printed page" as the copyright notice for easier
++      identification within third-party archives.
++
++    Copyright [yyyy] [name of copyright owner]
++
++    Licensed under the Apache License, Version 2.0 (the "License");
++    you may not use this file except in compliance with the License.
++    You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++    Unless required by applicable law or agreed to in writing, software
++    distributed under the License is distributed on an "AS IS" BASIS,
++    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++    See the License for the specific language governing permissions and
++    limitations under the License.
++
++
++--- LLVM Exceptions to the Apache 2.0 License ----
++
++As an exception, if, as a result of your compiling your source code, portions
++of this Software are embedded into an Object form of such source code, you
++may redistribute such embedded portions in such Object form without complying
++with the conditions of Sections 4(a), 4(b) and 4(d) of the License.
++
++In addition, if you combine or link compiled forms of this Software with
++software that is licensed under the GPLv2 ("Combined Software") and if a
++court of competent jurisdiction determines that the patent provision (Section
++3), the indemnity provision (Section 9) or other Section of the License
++conflicts with the conditions of the GPLv2, you may retroactively and
++prospectively choose to deem waived or otherwise exclude such Section(s) of
++the License, but only in their entirety and only with respect to the Combined
++Software.
+diff --git a/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/asmdefs.h b/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/asmdefs.h
+new file mode 100644
+index 0000000000..12bc4df254
+--- /dev/null
++++ b/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/asmdefs.h
+@@ -0,0 +1,105 @@
++/*
++ * Macros for asm code.  AArch64 version.
++ *
++ * Copyright (c) 2019-2025, Arm Limited.
++ * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
++ */
++
++#ifndef _ASMDEFS_H
++#define _ASMDEFS_H
++
++/* Set the line separator for the assembler.  */
++#if defined (__APPLE__)
++# define SEP %%
++# define PREF _
++#else
++# define SEP ;
++# define PREF
++#endif
++
++/* Branch Target Identitication support.  */
++#define BTI_C		hint	34
++#define BTI_J		hint	36
++/* Return address signing support (pac-ret).  */
++#define PACIASP		hint	25 SEP .cfi_negate_ra_state
++#define AUTIASP		hint	29 SEP .cfi_negate_ra_state
++
++/* GNU_PROPERTY_AARCH64_* macros from elf.h.  */
++#define FEATURE_1_AND 0xc0000000
++#define FEATURE_1_BTI 1
++#define FEATURE_1_PAC 2
++
++/* Add a NT_GNU_PROPERTY_TYPE_0 note.  */
++#define GNU_PROPERTY(type, value)	\
++  .section .note.gnu.property, "a"  SEP \
++  .p2align 3			    SEP \
++  .word 4			    SEP \
++  .word 16			    SEP \
++  .word 5			    SEP \
++  .asciz "GNU"			    SEP \
++  .word type			    SEP \
++  .word 4			    SEP \
++  .word value			    SEP \
++  .word 0			    SEP \
++  .text
++
++/* If set then the GNU Property Note section will be added to
++   mark objects to support BTI and PAC-RET.  */
++#ifndef WANT_GNU_PROPERTY
++#define WANT_GNU_PROPERTY 1
++#endif
++
++#if WANT_GNU_PROPERTY
++/* Add property note with supported features to all asm files.  */
++GNU_PROPERTY (FEATURE_1_AND, FEATURE_1_BTI|FEATURE_1_PAC)
++#endif
++
++#define ENTRY_ALIGN(name, alignment)	\
++  .align alignment		    SEP \
++  ENTRY_ALIAS(name)		    SEP \
++  .cfi_startproc		    SEP \
++  BTI_C
++
++#define ENTRY(name)	ENTRY_ALIGN(name, 6)
++
++#if defined (__APPLE__)
++/* Darwin is an underscore platform, symbols need an extra _ prefix.  */
++# define ENTRY_ALIAS(name)	\
++  .global _ ## name	    SEP \
++  _ ## name:
++
++# define END(name)	.cfi_endproc
++#elif defined (_WIN32) || defined (__CYGWIN__)
++# define ENTRY_ALIAS(name)	\
++  .global name		   SEP  \
++  name:
++
++# define END(name)	.cfi_endproc
++#else
++# define ENTRY_ALIAS(name)	\
++  .global name;			\
++  .type name,%function;		\
++  name:
++
++# define END(name)	\
++  .cfi_endproc;		\
++  .size name, .-name
++#endif
++
++#define L(l) .L ## l
++
++/* Macro for SVE: Contiguous load of bytes.
++   Using LDBSVE without setting the predicate p0 to true would not
++   raise an error. However, it's the user's responsibility to ensure
++   the predicate p0 is set to true with ptrue.  */
++#ifdef __BIG_ENDIAN__ /* Assumption: PTRUE p0.b.  */
++  .macro LDBSVE sve_vect:req, src_address:vararg
++   ld1b	{\sve_vect\().b}, p0/z, \src_address
++  .endm
++#else
++/* No endian conversion.  */
++# define LDBSVE	LDR
++# define ldbsve	LDR
++#endif
++
++#endif
+diff --git a/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/memcpy-advsimd.S b/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/memcpy-advsimd.S
+new file mode 100644
+index 0000000000..cbf4c58150
+--- /dev/null
++++ b/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/memcpy-advsimd.S
+@@ -0,0 +1,209 @@
++/*
++ * memcpy - copy memory area
++ *
++ * Copyright (c) 2019-2023, Arm Limited.
++ * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
++ */
++
++/* Assumptions:
++ *
++ * ARMv8-a, AArch64, Advanced SIMD, unaligned accesses.
++ *
++ */
++
++#include "asmdefs.h"
++
++#define dstin	x0
++#define src	x1
++#define count	x2
++#define dst	x3
++#define srcend	x4
++#define dstend	x5
++#define A_l	x6
++#define A_lw	w6
++#define A_h	x7
++#define B_l	x8
++#define B_lw	w8
++#define B_h	x9
++#define C_lw	w10
++#define tmp1	x14
++
++#define A_q	q0
++#define B_q	q1
++#define C_q	q2
++#define D_q	q3
++#define E_q	q4
++#define F_q	q5
++#define G_q	q6
++#define H_q	q7
++
++/* This implementation handles overlaps and supports both memcpy and memmove
++   from a single entry point.  It uses unaligned accesses and branchless
++   sequences to keep the code small, simple and improve performance.
++
++   Copies are split into 3 main cases: small copies of up to 32 bytes, medium
++   copies of up to 128 bytes, and large copies.  The overhead of the overlap
++   check is negligible since it is only required for large copies.
++
++   Large copies use a software pipelined loop processing 64 bytes per iteration.
++   The source pointer is 16-byte aligned to minimize unaligned accesses.
++   The loop tail is handled by always copying 64 bytes from the end.
++*/
++
++ENTRY_ALIAS (__memmove_aarch64_simd)
++ENTRY (__memcpy_aarch64_simd)
++	add	srcend, src, count
++	cmp	count, 128
++	b.hi	L(copy_long)
++	add	dstend, dstin, count
++	cmp	count, 32
++	b.hi	L(copy32_128)
++	nop
++
++	/* Small copies: 0..32 bytes.  */
++	cmp	count, 16
++	b.lo	L(copy16)
++	ldr	A_q, [src]
++	ldr	B_q, [srcend, -16]
++	str	A_q, [dstin]
++	str	B_q, [dstend, -16]
++	ret
++
++	.p2align 4
++	/* Medium copies: 33..128 bytes.  */
++L(copy32_128):
++	ldp	A_q, B_q, [src]
++	ldp	C_q, D_q, [srcend, -32]
++	cmp	count, 64
++	b.hi	L(copy128)
++	stp	A_q, B_q, [dstin]
++	stp	C_q, D_q, [dstend, -32]
++	ret
++
++	.p2align 4
++	/* Copy 8-15 bytes.  */
++L(copy16):
++	tbz	count, 3, L(copy8)
++	ldr	A_l, [src]
++	ldr	A_h, [srcend, -8]
++	str	A_l, [dstin]
++	str	A_h, [dstend, -8]
++	ret
++
++	/* Copy 4-7 bytes.  */
++L(copy8):
++	tbz	count, 2, L(copy4)
++	ldr	A_lw, [src]
++	ldr	B_lw, [srcend, -4]
++	str	A_lw, [dstin]
++	str	B_lw, [dstend, -4]
++	ret
++
++	/* Copy 65..128 bytes.  */
++L(copy128):
++	ldp	E_q, F_q, [src, 32]
++	cmp	count, 96
++	b.ls	L(copy96)
++	ldp	G_q, H_q, [srcend, -64]
++	stp	G_q, H_q, [dstend, -64]
++L(copy96):
++	stp	A_q, B_q, [dstin]
++	stp	E_q, F_q, [dstin, 32]
++	stp	C_q, D_q, [dstend, -32]
++	ret
++
++	/* Copy 0..3 bytes using a branchless sequence.  */
++L(copy4):
++	cbz	count, L(copy0)
++	lsr	tmp1, count, 1
++	ldrb	A_lw, [src]
++	ldrb	C_lw, [srcend, -1]
++	ldrb	B_lw, [src, tmp1]
++	strb	A_lw, [dstin]
++	strb	B_lw, [dstin, tmp1]
++	strb	C_lw, [dstend, -1]
++L(copy0):
++	ret
++
++	.p2align 3
++	/* Copy more than 128 bytes.  */
++L(copy_long):
++	add	dstend, dstin, count
++
++	/* Use backwards copy if there is an overlap.  */
++	sub	tmp1, dstin, src
++	cmp	tmp1, count
++	b.lo	L(copy_long_backwards)
++
++	/* Copy 16 bytes and then align src to 16-byte alignment.  */
++	ldr	D_q, [src]
++	and	tmp1, src, 15
++	bic	src, src, 15
++	sub	dst, dstin, tmp1
++	add	count, count, tmp1	/* Count is now 16 too large.  */
++	ldp	A_q, B_q, [src, 16]
++	str	D_q, [dstin]
++	ldp	C_q, D_q, [src, 48]
++	subs	count, count, 128 + 16	/* Test and readjust count.  */
++	b.ls	L(copy64_from_end)
++L(loop64):
++	stp	A_q, B_q, [dst, 16]
++	ldp	A_q, B_q, [src, 80]
++	stp	C_q, D_q, [dst, 48]
++	ldp	C_q, D_q, [src, 112]
++	add	src, src, 64
++	add	dst, dst, 64
++	subs	count, count, 64
++	b.hi	L(loop64)
++
++	/* Write the last iteration and copy 64 bytes from the end.  */
++L(copy64_from_end):
++	ldp	E_q, F_q, [srcend, -64]
++	stp	A_q, B_q, [dst, 16]
++	ldp	A_q, B_q, [srcend, -32]
++	stp	C_q, D_q, [dst, 48]
++	stp	E_q, F_q, [dstend, -64]
++	stp	A_q, B_q, [dstend, -32]
++	ret
++
++	.p2align 4
++	nop
++
++	/* Large backwards copy for overlapping copies.
++	   Copy 16 bytes and then align srcend to 16-byte alignment.  */
++L(copy_long_backwards):
++	cbz	tmp1, L(copy0)
++	ldr	D_q, [srcend, -16]
++	and	tmp1, srcend, 15
++	bic	srcend, srcend, 15
++	sub	count, count, tmp1
++	ldp	A_q, B_q, [srcend, -32]
++	str	D_q, [dstend, -16]
++	ldp	C_q, D_q, [srcend, -64]
++	sub	dstend, dstend, tmp1
++	subs	count, count, 128
++	b.ls	L(copy64_from_start)
++
++L(loop64_backwards):
++	str	B_q, [dstend, -16]
++	str	A_q, [dstend, -32]
++	ldp	A_q, B_q, [srcend, -96]
++	str	D_q, [dstend, -48]
++	str	C_q, [dstend, -64]!
++	ldp	C_q, D_q, [srcend, -128]
++	sub	srcend, srcend, 64
++	subs	count, count, 64
++	b.hi	L(loop64_backwards)
++
++	/* Write the last iteration and copy 64 bytes from the start.  */
++L(copy64_from_start):
++	ldp	E_q, F_q, [src, 32]
++	stp	A_q, B_q, [dstend, -32]
++	ldp	A_q, B_q, [src]
++	stp	C_q, D_q, [dstend, -64]
++	stp	E_q, F_q, [dstin, 32]
++	stp	A_q, B_q, [dstin]
++	ret
++
++END (__memcpy_aarch64_simd)
++
+diff --git a/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/memset.S b/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/memset.S
+new file mode 100644
+index 0000000000..520ccc556d
+--- /dev/null
++++ b/src/system/libroot/posix/string/arch/arm64/arm-optimized-routines/memset.S
+@@ -0,0 +1,121 @@
++/*
++ * memset - fill memory with a constant byte
++ *
++ * Copyright (c) 2012-2024, Arm Limited.
++ * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
++ */
++
++/* Assumptions:
++ *
++ * ARMv8-a, AArch64, Advanced SIMD, unaligned accesses.
++ *
++ */
++
++#include "asmdefs.h"
++
++#define dstin	x0
++#define val	x1
++#define valw	w1
++#define count	x2
++#define dst	x3
++#define dstend	x4
++#define zva_val	x5
++#define off	x3
++#define dstend2	x5
++
++ENTRY (__memset_aarch64)
++	dup	v0.16B, valw
++	cmp	count, 16
++	b.lo	L(set_small)
++
++	add	dstend, dstin, count
++	cmp	count, 64
++	b.hi	L(set_128)
++
++	/* Set 16..64 bytes.  */
++	mov	off, 48
++	and	off, off, count, lsr 1
++	sub	dstend2, dstend, off
++	str	q0, [dstin]
++	str	q0, [dstin, off]
++	str	q0, [dstend2, -16]
++	str	q0, [dstend, -16]
++	ret
++
++	.p2align 4
++	/* Set 0..15 bytes.  */
++L(set_small):
++	add	dstend, dstin, count
++	cmp	count, 4
++	b.lo	2f
++	lsr	off, count, 3
++	sub	dstend2, dstend, off, lsl 2
++	str	s0, [dstin]
++	str	s0, [dstin, off, lsl 2]
++	str	s0, [dstend2, -4]
++	str	s0, [dstend, -4]
++	ret
++
++	/* Set 0..3 bytes.  */
++2:	cbz	count, 3f
++	lsr	off, count, 1
++	strb	valw, [dstin]
++	strb	valw, [dstin, off]
++	strb	valw, [dstend, -1]
++3:	ret
++
++	.p2align 4
++L(set_128):
++	bic	dst, dstin, 15
++	cmp	count, 128
++	b.hi	L(set_long)
++	stp	q0, q0, [dstin]
++	stp	q0, q0, [dstin, 32]
++	stp	q0, q0, [dstend, -64]
++	stp	q0, q0, [dstend, -32]
++	ret
++
++	.p2align 4
++L(set_long):
++	str	q0, [dstin]
++	str	q0, [dst, 16]
++	tst	valw, 255
++	b.ne	L(no_zva)
++#ifndef SKIP_ZVA_CHECK
++	mrs	zva_val, dczid_el0
++	and	zva_val, zva_val, 31
++	cmp	zva_val, 4		/* ZVA size is 64 bytes.  */
++	b.ne	L(no_zva)
++#endif
++	stp	q0, q0, [dst, 32]
++	bic	dst, dstin, 63
++	sub	count, dstend, dst	/* Count is now 64 too large.  */
++	sub	count, count, 64 + 64	/* Adjust count and bias for loop.  */
++
++	/* Write last bytes before ZVA loop.  */
++	stp	q0, q0, [dstend, -64]
++	stp	q0, q0, [dstend, -32]
++
++	.p2align 4
++L(zva64_loop):
++	add	dst, dst, 64
++	dc	zva, dst
++	subs	count, count, 64
++	b.hi	L(zva64_loop)
++	ret
++
++	.p2align 3
++L(no_zva):
++	sub	count, dstend, dst	/* Count is 32 too large.  */
++	sub	count, count, 64 + 32	/* Adjust count and bias for loop.  */
++L(no_zva_loop):
++	stp	q0, q0, [dst, 32]
++	stp	q0, q0, [dst, 64]
++	add	dst, dst, 64
++	subs	count, count, 64
++	b.hi	L(no_zva_loop)
++	stp	q0, q0, [dstend, -64]
++	stp	q0, q0, [dstend, -32]
++	ret
++
++END (__memset_aarch64)
+diff --git a/src/system/libroot/posix/string/arch/arm64/memcpy.S b/src/system/libroot/posix/string/arch/arm64/memcpy.S
+new file mode 100644
+index 0000000000..bcd73c5a6d
+--- /dev/null
++++ b/src/system/libroot/posix/string/arch/arm64/memcpy.S
+@@ -0,0 +1,24 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++/*
++ * memcpy and memmove for arm64: Arm's optimized-routines, unchanged
++ * (arm-optimized-routines/, from github.com/ARM-software/optimized-routines
++ * at 47597821aaa5). One routine is both, because it copies overlapping ranges
++ * correctly in either direction, so musl's memmove.c is left out of the arm64
++ * build.
++ *
++ * It replaces generic_memcpy.c, which moved eight bytes per instruction at
++ * best and one byte at a time whenever source and destination were
++ * differently aligned. Unlike that C, it assumes Normal memory: on Device
++ * memory (B_UNCACHED_MEMORY on arm64) its unaligned accesses would fault.
++ * Every frame buffer userland maps is Normal memory, write-back or
++ * write-combining. The kernel and the boot loader keep the generic C.
++ */
++
++#define __memcpy_aarch64_simd	memcpy
++#define __memmove_aarch64_simd	memmove
++
++#include "arm-optimized-routines/memcpy-advsimd.S"
+diff --git a/src/system/libroot/posix/string/arch/arm64/memset.S b/src/system/libroot/posix/string/arch/arm64/memset.S
+new file mode 100644
+index 0000000000..5ba6883d05
+--- /dev/null
++++ b/src/system/libroot/posix/string/arch/arm64/memset.S
+@@ -0,0 +1,14 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++/*
++ * memset for arm64: Arm's optimized-routines, unchanged; see memcpy.S. A fill
++ * with zero of more than 128 bytes uses dc zva, which zeroes a 64-byte block
++ * without reading it, when DCZID_EL0 allows that at EL0.
++ */
++
++#define __memset_aarch64	memset
++
++#include "arm-optimized-routines/memset.S"
+diff --git a/src/system/runtime_loader/Jamfile b/src/system/runtime_loader/Jamfile
+index 4e814a9635..974b8f71d7 100644
+--- a/src/system/runtime_loader/Jamfile
++++ b/src/system/runtime_loader/Jamfile
+@@ -32,6 +32,13 @@ for architectureObject in [ MultiArchSubDirSetup ] {
+ 		AddResources [ MultiArchDefaultGristFiles runtime_loader ]
+ 			: runtime_loader.rdef ;
+ 
++		# arm64's memmove comes with its memcpy, in the architecture's string
++		# object (arch/arm64)
++		local memmove = <src!system!libroot!posix!musl!string!$(architecture)>memmove.o ;
++		if $(TARGET_ARCH) = arm64 {
++			memmove = ;
++		}
++
+ 		# needed for "runtime_loader" only
+ 		StaticLibrary <$(architecture)>libruntime_loader.a :
+ 			kernel_vsprintf.cpp
+@@ -53,7 +60,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
+ 			<src!system!libroot!posix!locale!$(architecture)>LocaleData.o
+ 
+ 			<src!system!libroot!posix!musl!string!$(architecture)>memchr.o
+-			<src!system!libroot!posix!musl!string!$(architecture)>memmove.o
++			$(memmove)
+ 			<src!system!libroot!posix!musl!string!$(architecture)>stpcpy.o
+ 			<src!system!libroot!posix!musl!string!$(architecture)>strcat.o
+ 			<src!system!libroot!posix!musl!string!$(architecture)>strchr.o

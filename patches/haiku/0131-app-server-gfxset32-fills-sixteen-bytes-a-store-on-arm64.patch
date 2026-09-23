@@ -1,0 +1,56 @@
+From 904d738dfaa6fff1b89d1a739c0715373b4c8ab2 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 19:08:40 +0100
+Subject: [PATCH] app_server: gfxset32 fills sixteen bytes a store on arm64
+
+gfxset32 fills every solid rectangle app_server draws -- FillRect, FillRegion
+and vertical gradients, one row at a time -- and GCC builds its loop as one
+8-byte store per iteration, a quarter of what the core stores with q
+registers. On arm64 it now stores 64 bytes a turn, as two stp of q
+registers, then 16 at a time, and leaves the old loop at most three pixels.
+arm64 allows the stores at any address a pixel can start at.
+
+The stores are written with a vector type rather than <arm_neon.h>, whose
+inline functions fail app_server's -Werror (narrowing).
+
+The bytes written are the old loop's exactly, for every length, including
+lengths that are not a multiple of 4, which no caller passes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0131-app-server-gfxset32-fills-sixteen-bytes-a-store-on-arm64.patch d31d0fd89d46338b66778a3fe06e897eedd839a5022ee98e363052fcf4cfd2ab
+---
+ src/servers/app/drawing/drawing_support.h | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/servers/app/drawing/drawing_support.h b/src/servers/app/drawing/drawing_support.h
+index e387bf65d6..8669ab2595 100644
+--- a/src/servers/app/drawing/drawing_support.h
++++ b/src/servers/app/drawing/drawing_support.h
+@@ -20,6 +20,27 @@ class BRect;
+ static inline void
+ gfxset32(uint8* dst, uint32 color, int32 numBytes)
+ {
++#ifdef __aarch64__
++	// Sixteen bytes a store, which arm64 allows at any pixel's address; the
++	// loop below is left at most three pixels. A vector type, not
++	// <arm_neon.h>, whose inline functions do not build with -Werror.
++	typedef uint32 pixels4 __attribute__((vector_size(16), aligned(4), may_alias));
++	pixels4 colors = { color, color, color, color };
++	while (numBytes >= 64) {
++		pixels4* pixels = reinterpret_cast<pixels4*>(dst);
++		pixels[0] = colors;
++		pixels[1] = colors;
++		pixels[2] = colors;
++		pixels[3] = colors;
++		numBytes -= 64;
++		dst += 64;
++	}
++	while (numBytes >= 16) {
++		*reinterpret_cast<pixels4*>(dst) = colors;
++		numBytes -= 16;
++		dst += 16;
++	}
++#endif
+ 	uint64 s64 = ((uint64)color << 32) | color;
+ 	while (numBytes >= 8) {
+ 		*(uint64*)dst = s64;
