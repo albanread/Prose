@@ -14,15 +14,60 @@ let exitOnStop = args.contains("--exit-on-stop")
 /// The guest's MAC address. --mac auto (the default) derives a locally administered address
 /// from the disk image's path, so a VM keeps its address, and bootpd its IP lease, across runs;
 /// --mac random is VZ's own choice (a new one every run); or --mac aa:bb:cc:dd:ee:ff.
+/// The lock this process holds on its network slot, for as long as it runs.
+private var macSlotLock: Int32 = -1
+
+/// Which of a few fixed addresses this machine uses. Held by an exclusive
+/// lock, so two machines running at once never take the same one, and the
+/// lock goes when the process does.
+private func acquireMACSlot() -> Int {
+    let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    let folder = support.appendingPathComponent("Prose", isDirectory: true)
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    for slot in 0..<kMACSlots {
+        let path = folder.appendingPathComponent("net-slot-\(slot).lock").path
+        let fd = open(path, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else { continue }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+            macSlotLock = fd                        // held until this process exits
+            return slot
+        }
+        close(fd)
+    }
+    return 0            // every slot busy: share slot 0 rather than invent an address
+}
+
+private let kMACSlots = 8
+
+/// The machine's hardware address.
+///
+/// It used to be a hash of the disk image's PATH, which is stable for one
+/// image and different for every other -- and that turns out to be a slow
+/// leak of something finite. The Mac's NAT hands out addresses from a pool of
+/// about two hundred, keeps a lease for every hardware address it has ever
+/// seen, and will renew one it knows but will not allocate a new one once the
+/// range is walked. Every test image, every copy, every build output was a
+/// new machine as far as that pool was concerned, and each took an address
+/// and never gave it back. A hundred and fifteen of them were ours before
+/// anyone noticed, and when the pool filled, DHCP simply stopped answering:
+/// no error, no log, just a machine that never gets an address.
+///
+/// So the address no longer follows the file. It follows a SLOT -- one of
+/// eight, taken under an exclusive lock for as long as the process runs. One
+/// machine at a time always gets slot 0 and therefore always the same lease;
+/// eight at once is the most that can ever be in flight. The pool sees eight
+/// machines however many images we build, which is the difference between a
+/// leak and a constant.
 func makeMACAddress() -> VZMACAddress {
     let choice = option("--mac") ?? "auto"
     if choice == "random" { return .randomLocallyAdministered() }
     if choice != "auto", let mac = VZMACAddress(string: choice) { return mac }
-    var hash: UInt64 = 0xcbf2_9ce4_8422_2325                   // FNV-1a
-    for byte in diskURL.standardizedFileURL.path.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100_0000_01b3 }
-    var octets = (0..<6).map { UInt8(truncatingIfNeeded: hash >> (8 * UInt64($0))) }
-    octets[0] = (octets[0] & 0xfc) | 0x02                       // unicast, locally administered
-    return VZMACAddress(string: octets.map { String(format: "%02x", $0) }.joined(separator: ":"))!
+    let slot = acquireMACSlot()
+    // 02 is unicast and locally administered; 50:52:4f:53 spells PROS, so the
+    // machine is recognisable in a lease file at a glance.
+    let mac = VZMACAddress(string: String(format: "02:50:52:4f:53:%02x", slot))!
+    log("network: slot \(slot) of \(kMACSlots), hardware address \(mac.string)")
+    return mac
 }
 
 extension Controller: NSMenuItemValidation, NSToolbarItemValidation {
