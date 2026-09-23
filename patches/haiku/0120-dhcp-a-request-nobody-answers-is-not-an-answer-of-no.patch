@@ -1,0 +1,55 @@
+From 8c5fb27b67971d80225a38c1bd2664bdd402b06c Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 13:29:23 +0100
+Subject: [PATCH] DHCP: a request nobody answers is not an answer of "no"
+
+An interface that has held a lease starts every negotiation in INIT_REBOOT,
+asking for the address it remembers. If that request is answered by a NAK the
+client goes back to INIT and broadcasts a DISCOVER, which is right. If it is
+answered by nothing at all, it gave up -- and since _CurrentState() returns
+INIT_REBOOT for as long as an address is remembered and the last attempt
+failed, every later attempt asks the same unanswered question again.
+
+RFC 2131 4.4.2 says a client that gets no response to its REQUEST should
+restart the initialisation procedure. Do that: forget the address and go to
+INIT, where a client that had never been configured starts. SELECTING still
+gives up, so a network with no server at all does not spin.
+
+This is a correctness fix against the RFC, not a fix for a bug seen in the
+wild: it was written from a misread packet capture -- tcpdump's "Request" is
+the BOOTP op field, which every client message carries, not DHCPREQUEST. The
+capture that prompted it in fact showed the client broadcasting DISCOVER
+correctly and nothing on the network answering, which this does not address.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0120-dhcp-a-request-nobody-answers-is-not-an-answer-of-no.patch 1ebcbbd1aa0224703f44afff2c7f0f69f2f8ea66482a1edb30d702dac577e538
+---
+ src/servers/net/DHCPClient.cpp | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/src/servers/net/DHCPClient.cpp b/src/servers/net/DHCPClient.cpp
+index c1e0e97b28..5ff999f627 100644
+--- a/src/servers/net/DHCPClient.cpp
++++ b/src/servers/net/DHCPClient.cpp
+@@ -627,7 +627,20 @@ DHCPClient::_Negotiate()
+ 	status_t status = B_OK;
+ 	while (state != BOUND && fNegotiateThread != -1) {
+ 		status = _StateTransition(socket, state);
+-		if (status != B_OK && (state == SELECTING || state == REBOOTING))
++		if (status != B_OK && state == REBOOTING) {
++			// RFC 2131 4.4.2: a REQUEST for the address we remember that is
++			// answered by nothing at all is not an answer of "no". Giving up
++			// here left an interface that had once held a lease asking for it
++			// again every time, for ever, and never once broadcasting the
++			// DISCOVER that would have got it a different one -- a server that
++			// has forgotten the binding, or stopped answering an expired one,
++			// strands the interface permanently. Start again from the top,
++			// which is what a client that had never been configured does.
++			fAssignedAddress = 0;
++			state = INIT;
++			continue;
++		}
++		if (status != B_OK && state == SELECTING)
+ 			break;
+ 	}
+ 

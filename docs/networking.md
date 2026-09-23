@@ -92,18 +92,44 @@ last two rows into 0.0% loss and HTTP 200 with nothing else changed. If the
 guest has an address, reaches the gateway, reaches the LAN, and nothing else,
 look at the host's VPN before looking anywhere near Prose.
 
-**It takes DHCP with it.** A machine started while the VPN is connected gets no
-address at all — `inet addr: --`, `link configuring` — and a machine that
-already holds one keeps it. Three observations agree: VPN up and a fresh
-hardware address got nothing; VPN down and the same address got `.196` at once;
-VPN up again on the next boot and it got nothing. This is what made the pool
-look exhausted, and it is why the guest could not even reach the proxy until it
-was given an address by hand.
+**It blocks DHCP too, on the local side.** A machine started while the VPN is
+connected never gets an address: `inet addr: --`, `link configuring`, for as
+long as you care to wait. Captured on `bridge100` with the VPN connected, over
+four minutes: **nine DHCP Discovers from the guest, well formed, `udp sum ok`,
+and not one Offer back**. Disconnect the VPN and the same machine, same
+hardware address, is `auto-configured` with `192.168.64.196` — the binding
+bootpd had remembered for it — within seconds.
 
-So the whole cure while a VPN is connected is **a static address and the
-proxy**: Machine ▸ Network ▸ Assign a Static Address, which is verified to work
-(`ifconfig <iface> <addr> <mask>`, `route add <iface> default gw <gw>`, and a
-`nameserver` line in `/etc/resolv.conf`), then the proxy below for the way out.
+The guest's client is not at fault and neither is the pool. The Discovers reach
+the bridge (tcpdump sees them) but never reach the listening socket, which is
+why `launchctl print system/com.apple.bootpd` reads `runs = 0` and "no bytes to
+read" while this is happening: the VPN's packet filter takes inbound UDP 67 on
+the local network before bootpd is ever started. It is why the guest cannot
+even reach the proxy until it is given an address by hand.
+
+So a VPN breaks the guest's networking twice over, at both ends, and each end
+needs its own answer: **Machine ▸ Network ▸ Set a Static Address** for the
+address, and **the proxy** for the way out.
+
+### How to tell, in one capture
+
+Only the capture needs root; reading it does not:
+
+```
+sudo tcpdump -i bridge100 -n -e -s0 -c 80 -w /tmp/dhcp.pcap 'port 67 or port 68 or arp'
+tcpdump -n -vv -r /tmp/dhcp.pcap          # no privileges needed
+```
+
+**Read it with `-vv`.** tcpdump's bare output labels every client packet
+"BOOTP/DHCP, Request from …" — that is the BOOTP *op* field, which a Discover
+carries too. The DHCP message type is an option and only `-v` shows it. Reading
+the short form cost this project a wrong diagnosis and a Haiku patch written
+against a bug that was not there (see patch 0120, which is kept as an RFC
+correctness fix and says so).
+
+Set a Static Address is verified against a live guest: `ifconfig <iface> <addr>
+<mask>`, `route add <iface> default gw <gw>`, and a `nameserver` line in
+`/etc/resolv.conf`.
 
 ### One test that looks useful and is not
 
