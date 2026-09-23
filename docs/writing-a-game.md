@@ -68,6 +68,23 @@ The world may be bigger than what the window shows. `SetView(w, h)` says how
 much is shown, `SetScroll(x, y)` says from where, and scrolling then costs one
 integer a frame — no blit, no copy.
 
+## Two planes
+
+The world goes under the sprites. Ask for `B_GAME_PANE_FRONT_PLANE` and you
+get a second one that goes over them, which is where a score belongs — an
+alien flying across it should pass behind, not in front. `SetPlane()` picks
+which one everything below draws into:
+
+```cpp
+pane->SetPlane(B_GAME_FRONT);
+pane->Clear(0);
+pane->DrawText(10, 8, "SCORE 005050", kWhite);
+pane->SetPlane(B_GAME_WORLD);
+```
+
+The front plane takes its colours from the global palette only — no
+per-scanline trickery, because a HUD does not want any.
+
 ## Colours
 
 Index 0 is transparent. The desktop shows through it, or your background
@@ -130,7 +147,9 @@ pane->DrawTextInView(4, 4, "SCORE 00120", kInk);
 ```
 
 `SetTextFont()` renders a system font — any family, any size — once into glyph
-shapes of its own, so there is no font data in your program. With no `BFont` it
+shapes of its own, so there is no font data in your program. There are four
+slots, so a title size and a score size do not mean asking for the font twice
+a frame. With no `BFont` it
 takes the first fixed-width family it finds, which is what a grid of characters
 wants. ASCII 32 to 126.
 
@@ -170,6 +189,11 @@ three ways of looking at the pane:
 
 The background runs before there is a picture, so `colour()` and `smooth()`
 are black in it; `index()` and `palette()` work in both.
+
+`p.param(i)` reads one of sixteen floats you set with `SetShaderParam()`. That
+is how a running game tells a shader anything — which of twelve skies to draw,
+how hard to shake, how far through a fade it is. They take effect on the next
+frame and nothing is recompiled.
 
 The division of labour is the point. Smooth things — skies, gradients, water,
 plasma — are what a shader is good at and what an indexed buffer is worst at.
@@ -237,8 +261,14 @@ your shaders, the filter — happens on the Mac's GPU at display rate. A pane
 with an overlay costs one small offscreen texture, because the overlay has to
 have a finished picture to resample.
 
-The limits worth knowing: 8 panes on the machine at once, 64 sprites a frame,
-32 clip rectangles, 16 KB of source per shader, and 3 world buffers.
+The limits worth knowing: 8 panes on the machine at once, 128 sprites a frame
+over 128 shapes, 63 sprite palettes, 32 clip rectangles, 16 KB of source per
+shader, 16 shader parameters, 4 font slots, and 3 world buffers.
+
+**Galaxigans**, in the Deskbar's Games, is a whole game on all of this: 640×360,
+a formation of forty over fourteen species, twelve shader backdrops, and a
+tractor beam whose colour flows through the per-scanline palette without a
+pixel being redrawn.
 
 ## Building it
 

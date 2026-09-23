@@ -95,6 +95,14 @@ for the scanline palette, then 64 palettes of 16 for the sprites. With
 `PRDS_PANE_F_SCANLINE` clear, 1–15 come from the global palette too and the
 rows are ignored.
 
+## The front plane
+
+Optionally a second indexed plane, composited after the sprites and out of the
+global palette. The world goes under them, which is right for a scene and
+wrong for a score. It is the same size, stride and buffer count as the world
+and flips with it, so it costs one more plane and one more byte read per
+fragment, and nothing at all when a pane does not ask for it.
+
 ## Scroll and overscan
 
 The world buffer may be larger than the view. `scroll_x` / `scroll_y` pick the

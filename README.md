@@ -111,7 +111,7 @@ their work produced, and everything that makes it good is theirs.
   Virtualization.framework VM with custom virtio devices of its own — a
   shared-surface display, keyboard and tablet, a MIDI port — plus networking,
   sound, and a Mac folder shared into the guest.
-- **`patches/haiku`** — 109 patches against Haiku at hrev60122, applied to a
+- **`patches/haiku`** — 111 patches against Haiku at hrev60122, applied to a
   local tree to build the guest.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
@@ -253,7 +253,7 @@ cd ~/examples && make
 | MIDI | The guest's MIDI played by the Mac's synthesizer and published to CoreMIDI |
 | Storage | NVMe, virtio-block, and a Mac folder mounted in the guest |
 | Automation | A portal device the guest answers on — run a command, get its exit status — and an AppleScript dictionary |
-| Games | Retro mode: indexed-palette panes composited by the Mac's GPU — per-scanline and sprite palettes, scrolling, sprites, and two shader slots of the program's own ([docs/writing-a-game.md](docs/writing-a-game.md)) |
+| Games | Retro mode: indexed-palette panes composited by the Mac's GPU — per-scanline and sprite palettes, scrolling, sprites, a front plane and two shader slots of the program's own ([docs/writing-a-game.md](docs/writing-a-game.md)). **Galaxigans**, a fixed shooter with twelve shader backdrops, is in the Deskbar's Games |
 | Look | Two conventional window frames of its own, and themes — wallpaper, colours and frame together — chosen from the host's View menu ([docs/decorators.md](docs/decorators.md)) |
 | Development | clang and lld (LLVM 23), `make`, Haiku's headers and link libraries, and seven examples: the machine compiles and runs its own programs |
 | Software | ~120 applications, a web browser, codecs, OpenSSL; ProseWriter, a word processor, and Sisong, a programmer's editor, ported and built here |
@@ -393,6 +393,8 @@ table there also records why each one exists.
 | 0110 | `prose_examples` 1.0-2: `07-game`, a complete game pane among the examples |
 | 0111 | `libgame`: sprites loaded from a picture, and text rendered from a system font |
 | 0112 | `prose_examples` 1.0-3: `07-game` loads its ship from a PNG and draws its score |
+| 0113 | Game panes: a front plane over the sprites, sixteen shader parameters, and 128 sprites a frame |
+| 0114 | Galaxigans: the fixed shooter, ported from the Mojo original onto the game pane |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

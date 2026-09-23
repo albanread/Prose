@@ -1,0 +1,425 @@
+From 6832bf0ac0941c91a7934731795d78206326e2c8 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 08:00:21 +0100
+Subject: [PATCH] game panes: a front plane, shader parameters, and room for a
+ real game
+
+Three things a whole game needs that a demo did not.
+
+A FRONT PLANE: a second indexed plane composited after the sprites, out of
+the global palette. Text drawn into the world goes under them, which is
+right for a scene and wrong for a score -- an alien flying across it
+should pass behind. SetPlane() picks which plane the drawing calls write
+to, so nothing else in the API doubles.
+
+SHADER PARAMETERS: sixteen floats in the pane's own allocation that
+either shader reads as p.param(i). A shader with no way to be told
+anything can only ever draw one thing; with this, twelve backdrops are
+one compile and a number, not twelve compiles.
+
+And room: 128 sprites a frame and 128 shapes rather than 64 -- a
+formation of forty, six mines, a boss, four pilots, a saucer and a ship
+is 53 on screen and 43 shapes before anything unusual happens. Four font
+slots, so a title size and a score size do not mean asking for the font
+twice a frame.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0113-game-panes-a-front-plane-shader-parameters-and-room-for-a-re.patch b6d3c770d7f479d5bf1a2d0fe21ceda815ba9dada7cb7901dfd40e2e6f8ac8d7
+---
+ headers/os/game/GamePane.h                    |  50 +++++++--
+ .../graphics/prose_display/prose_display.h    |  10 +-
+ .../graphics/prose_display/prose_display.cpp  |   5 +-
+ src/kits/game/GamePane.cpp                    | 101 +++++++++++++-----
+ 4 files changed, 125 insertions(+), 41 deletions(-)
+
+diff --git a/headers/os/game/GamePane.h b/headers/os/game/GamePane.h
+index 0b93259642..ad236c48f4 100644
+--- a/headers/os/game/GamePane.h
++++ b/headers/os/game/GamePane.h
+@@ -29,7 +29,17 @@ class BBitmap;
+ 
+ enum {
+ 	B_GAME_PANE_SCANLINE_PALETTE	= 1 << 0,	/* 1-15 come from the row's palette */
+-	B_GAME_PANE_FULLSCREEN			= 1 << 1	/* covers the screen: the desktop is not drawn */
++	B_GAME_PANE_FULLSCREEN			= 1 << 1,	/* covers the screen: the desktop is not drawn */
++	B_GAME_PANE_FRONT_PLANE			= 1 << 2	/* a second plane, over the sprites */
++};
++
++
++/* Which plane the drawing calls write to. The world is under the sprites; the
++   front plane is over them, out of the global palette, and is where a score
++   belongs -- an alien flying across it should pass behind. */
++enum game_pane_plane {
++	B_GAME_WORLD = 0,
++	B_GAME_FRONT = 1
+ };
+ 
+ 
+@@ -72,6 +82,12 @@ public:
+ 	// buffer being drawn into, which Present() then makes the live one.
+ 			uint8*				World() const;
+ 			uint8*				RowAt(int32 y) const;
++
++	// Everything below draws into the plane this selects; the world by
++	// default, and only the world unless B_GAME_PANE_FRONT_PLANE was asked
++	// for. Set it, draw, set it back.
++			void				SetPlane(game_pane_plane plane);
++			game_pane_plane		Plane() const { return fPlane; }
+ 			uint32				WorldWidth() const { return fWorldWidth; }
+ 			uint32				WorldHeight() const { return fWorldHeight; }
+ 			uint32				BytesPerRow() const { return fStride; }
+@@ -141,6 +157,13 @@ public:
+ 			status_t			SetOverlayShader(const char* metalSource);
+ 			const char*			ShaderError() const;
+ 
++	// Sixteen floats either shader reads as p.param(i) -- how a running game
++	// tells one anything: which of twelve skies to draw, how hard to shake,
++	// how far through a fade it is. They take effect on the next frame and
++	// cost nothing; no shader is recompiled.
++			void				SetShaderParam(uint32 index, float value);
++			float				ShaderParam(uint32 index) const;
++
+ 	// Sprites are transformed by the host, so they scale and rotate. Define
+ 	// a shape once; list the ones you want each frame, then Present().
+ 	//
+@@ -184,14 +207,18 @@ public:
+ 	// as a space.
+ 	//
+ 	// A string is one colour. Draw it twice, offset by a pixel, for a shadow.
++	// Four slots, so a program can have a title size and a score size
++	// without asking for the font twice a frame.
+ 			status_t			SetTextFont(const BFont* font = NULL,
+-									float size = 8.0f);
+-			uint32				TextWidth(const char* text) const;
+-			uint32				TextHeight() const;
++									float size = 8.0f, uint32 slot = 0);
++			uint32				TextWidth(const char* text,
++									uint32 slot = 0) const;
++			uint32				TextHeight(uint32 slot = 0) const;
+ 			void				DrawText(int32 x, int32 y, const char* text,
+-									uint8 index);
++									uint8 index, uint32 slot = 0);
+ 			void				DrawTextInView(int32 x, int32 y,
+-									const char* text, uint8 index);
++									const char* text, uint8 index,
++									uint32 slot = 0);
+ 
+ 	// A frame. Present() makes the buffer just drawn the live one and moves
+ 	// on to the next; WaitForRetrace() blocks until the host's next vsync.
+@@ -201,7 +228,7 @@ public:
+ 	virtual	void				DirectConnected(direct_buffer_info* info);
+ 
+ private:
+-			enum { kMaxSprites = 64 };
++			enum { kMaxSprites = 128, kFontSlots = 4 };
+ 
+ 			// Guest-side bookkeeping for a shape cut from the sprite arena.
+ 			struct sprite_shape {
+@@ -235,6 +262,9 @@ private:
+ 			uint64				fBufferStride;
+ 			uint64				fBufferOffset;
+ 			uint64				fPaletteOffset;
++			uint64				fParamOffset;
++			uint64				fFrontOffset;		// 0 when there is no front plane
++			game_pane_plane		fPlane;
+ 			uint64				fSpriteTableOffset;
+ 			uint64				fSpriteArenaOffset;
+ 			uint64				fShaderOffset;		// background, then overlay
+@@ -247,9 +277,9 @@ private:
+ 			sprite_shape		fShapes[kMaxSprites];
+ 
+ 			rgb_color			fMatchPalette[256];	// scratch, while indexing a picture
+-			uint8*				fGlyphs;		// 95 cells of fGlyphWidth x fGlyphHeight
+-			uint32				fGlyphWidth;
+-			uint32				fGlyphHeight;
++			uint8*				fGlyphs[kFontSlots];	// 95 cells each
++			uint32				fGlyphWidth[kFontSlots];
++			uint32				fGlyphHeight[kFontSlots];
+ 
+ 			uint32				fFlags;
+ 			uint32				fEffect;
+diff --git a/headers/private/graphics/prose_display/prose_display.h b/headers/private/graphics/prose_display/prose_display.h
+index 1d9e839f76..63a420fdd9 100644
+--- a/headers/private/graphics/prose_display/prose_display.h
++++ b/headers/private/graphics/prose_display/prose_display.h
+@@ -32,8 +32,9 @@
+    GPU over the desktop. See HaikuArmQemu/docs/game-pane.md. */
+ #define PRDS_MAX_PANES				8
+ #define PRDS_MAX_CLIP_RECTS			32
+-#define PRDS_MAX_SPRITES			64
++#define PRDS_MAX_SPRITES			128
+ #define PRDS_SPRITE_PALETTES		64	/* 0 is the global palette; 1-63 are the sprites' own */
++#define PRDS_SHADER_PARAMS			16	/* floats the guest sets and its shaders read */
+ #define PRDS_PANE_BUFFERS_MAX		3
+ 
+ #define PRDS_PANE_INDEXED8			1	/* one byte per pixel, 0 transparent */
+@@ -155,7 +156,11 @@ struct prds_pane_create {
+ 	uint64	buffer_stride;		/* bytes between buffer n and n+1 */
+ 	uint64	palette_offset;		/* pool offset of the palette block: 256 global BGRA
+ 								   entries, then world_height rows of 16 for the
+-								   scanline palette, then PRDS_SPRITE_PALETTES of 16 */
++								   scanline palette, then PRDS_SPRITE_PALETTES of
++								   16, then PRDS_SHADER_PARAMS floats */
++	uint64	front_offset;		/* pool offset of the front plane, or 0 for none:
++								   `buffers` more planes of the same size and
++								   stride, composited after the sprites */
+ } _PACKED;
+ 
+ struct prds_pane_config {
+@@ -282,6 +287,7 @@ struct prds_pane_alloc {
+ 	uint64	buffer_offset;		/* in: buffer 0, within the allocation */
+ 	uint64	buffer_stride;		/* in */
+ 	uint64	palette_offset;		/* in: within the allocation */
++	uint64	front_offset;		/* in: within the allocation, or 0 for no front plane */
+ 	uint64	pool_offset;		/* out: where the allocation landed */
+ 	uint32	pane_id;			/* out */
+ 	uint32	reserved2;
+diff --git a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+index 287547cc4f..c801c01586 100644
+--- a/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
++++ b/src/add-ons/kernel/drivers/graphics/prose_display/prose_display.cpp
+@@ -368,7 +368,9 @@ prds_pane_alloc(prds_info* info, struct prds_pane_alloc* alloc)
+ 		|| alloc->stride < (alloc->format == PRDS_PANE_B8G8R8X8
+ 			? alloc->world_width * 4 : alloc->world_width)
+ 		|| alloc->buffer_stride < (uint64)alloc->stride * alloc->world_height
+-		|| alloc->buffer_offset + alloc->buffer_stride * alloc->buffers > size)
++		|| alloc->buffer_offset + alloc->buffer_stride * alloc->buffers > size
++		|| (alloc->front_offset != 0
++			&& alloc->front_offset + alloc->buffer_stride * alloc->buffers > size))
+ 		return B_BAD_VALUE;
+ 
+ 	struct prds_pane_create request = {};
+@@ -383,6 +385,7 @@ prds_pane_alloc(prds_info* info, struct prds_pane_alloc* alloc)
+ 	request.offset = at + alloc->buffer_offset;
+ 	request.buffer_stride = alloc->buffer_stride;
+ 	request.palette_offset = at + alloc->palette_offset;
++	request.front_offset = alloc->front_offset != 0 ? at + alloc->front_offset : 0;
+ 	status_t status = prds_command(info, &request, sizeof(request), &response, sizeof(response));
+ 	if (status != B_OK)
+ 		return status;
+diff --git a/src/kits/game/GamePane.cpp b/src/kits/game/GamePane.cpp
+index 77b0c45e87..67653ca79a 100644
+--- a/src/kits/game/GamePane.cpp
++++ b/src/kits/game/GamePane.cpp
+@@ -89,9 +89,6 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	fSpriteArenaUsed(0),
+ 	fSpriteCount(0),
+ 	fShapeCount(0),
+-	fGlyphs(NULL),
+-	fGlyphWidth(0),
+-	fGlyphHeight(0),
+ 	fFlags(flags),
+ 	fEffect(PRDS_EFFECT_NONE),
+ 	fViewWidth(worldWidth),
+@@ -105,6 +102,11 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	memset(&fBounds, 0, sizeof(fBounds));
+ 	memset(fClip, 0, sizeof(fClip));
+ 	memset(fShapes, 0, sizeof(fShapes));
++	memset(fGlyphs, 0, sizeof(fGlyphs));
++	memset(fGlyphWidth, 0, sizeof(fGlyphWidth));
++	memset(fGlyphHeight, 0, sizeof(fGlyphHeight));
++	fPlane = B_GAME_WORLD;
++	fFrontOffset = 0;
+ 
+ 	if (worldWidth == 0 || worldHeight == 0) {
+ 		fStatus = B_BAD_VALUE;
+@@ -137,6 +139,8 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	fPaletteOffset = fBufferOffset + fBufferStride * fBuffers;
+ 	uint64 paletteSize = (256 + (uint64)worldHeight * 16
+ 		+ PRDS_SPRITE_PALETTES * 16) * 4;
++	fParamOffset = fPaletteOffset + paletteSize;
++	paletteSize += PRDS_SHADER_PARAMS * 4;
+ 	fSpriteTableOffset = ALIGN_UP(fPaletteOffset + paletteSize, 64);
+ 	fSpriteArenaOffset = fSpriteTableOffset
+ 		+ PRDS_MAX_SPRITES * sizeof(struct prds_sprite);
+@@ -146,10 +150,17 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	fShaderSize = PRDS_SHADER_MAX;
+ 	fShaderOffset = ALIGN_UP(fSpriteArenaOffset + fSpriteArenaSize, 64);
+ 	fFailedShader = fShaderOffset;
++	// The front plane, when asked for: as many as there are world buffers,
++	// so it flips with them.
++	uint64 end = fShaderOffset + fShaderSize * 2;
++	if ((flags & B_GAME_PANE_FRONT_PLANE) != 0) {
++		fFrontOffset = ALIGN_UP(end, 64);
++		end = fFrontOffset + fBufferStride * fBuffers;
++	}
+ 
+ 	struct prds_pane_alloc alloc;
+ 	memset(&alloc, 0, sizeof(alloc));
+-	alloc.size = fShaderOffset + fShaderSize * 2;
++	alloc.size = end;
+ 	alloc.format = PRDS_PANE_INDEXED8;
+ 	alloc.world_width = worldWidth;
+ 	alloc.world_height = worldHeight;
+@@ -158,6 +169,7 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	alloc.buffer_offset = fBufferOffset;
+ 	alloc.buffer_stride = fBufferStride;
+ 	alloc.palette_offset = fPaletteOffset;
++	alloc.front_offset = fFrontOffset;
+ 	if (ioctl(fDevice, PRDS_PANE_ALLOC, &alloc, sizeof(alloc)) != 0) {
+ 		fStatus = errno != 0 ? (status_t)errno : B_ERROR;
+ 		return;
+@@ -165,7 +177,7 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	fPaneID = alloc.pane_id;
+ 	fPoolOffset = alloc.pool_offset;
+ 
+-	memset(fPool + fPoolOffset, 0, (size_t)(fShaderOffset + fShaderSize * 2));
++	memset(fPool + fPoolOffset, 0, (size_t)end);
+ 	fStatus = B_OK;
+ }
+ 
+@@ -179,8 +191,10 @@ BGamePane::~BGamePane()
+ void
+ BGamePane::_Free()
+ {
+-	free(fGlyphs);
+-	fGlyphs = NULL;
++	for (uint32 i = 0; i < kFontSlots; i++) {
++		free(fGlyphs[i]);
++		fGlyphs[i] = NULL;
++	}
+ 	if (fDevice >= 0) {
+ 		if (fStatus == B_OK) {
+ 			uint32 id = fPaneID;
+@@ -208,12 +222,22 @@ BGamePane::InitCheck() const
+ //	#pragma mark - the world
+ 
+ 
++void
++BGamePane::SetPlane(game_pane_plane plane)
++{
++	if (plane == B_GAME_FRONT && fFrontOffset == 0)
++		return;
++	fPlane = plane;
++}
++
++
+ uint8*
+ BGamePane::World() const
+ {
+ 	if (fStatus != B_OK)
+ 		return NULL;
+-	return fPool + fPoolOffset + fBufferOffset + fBufferStride * fBufferIndex;
++	uint64 base = fPlane == B_GAME_FRONT ? fFrontOffset : fBufferOffset;
++	return fPool + fPoolOffset + base + fBufferStride * fBufferIndex;
+ }
+ 
+ 
+@@ -632,11 +656,11 @@ BGamePane::DefineSprite(const char* imagePath, uint32 depth, uint8 palette)
+ /// Glyphs are rendered once, by the system's own font engine, into shapes of
+ /// our own: any size, any family, and no font data in the program.
+ status_t
+-BGamePane::SetTextFont(const BFont* font, float size)
++BGamePane::SetTextFont(const BFont* font, float size, uint32 slot)
+ {
+ 	if (fStatus != B_OK)
+ 		return B_NO_INIT;
+-	if (size < 4.0f || size > 64.0f)
++	if (size < 4.0f || size > 64.0f || slot >= kFontSlots)
+ 		return B_BAD_VALUE;
+ 
+ 	BFont chosen;
+@@ -710,54 +734,56 @@ BGamePane::SetTextFont(const BFont* font, float size)
+ 	}
+ 
+ 	BAutolock lock(fLock);
+-	free(fGlyphs);
+-	fGlyphs = glyphs;
+-	fGlyphWidth = cellWidth;
+-	fGlyphHeight = cellHeight;
++	free(fGlyphs[slot]);
++	fGlyphs[slot] = glyphs;
++	fGlyphWidth[slot] = cellWidth;
++	fGlyphHeight[slot] = cellHeight;
+ 	return B_OK;
+ }
+ 
+ 
+ uint32
+-BGamePane::TextWidth(const char* text) const
++BGamePane::TextWidth(const char* text, uint32 slot) const
+ {
+-	if (fGlyphs == NULL || text == NULL)
++	if (slot >= kFontSlots || fGlyphs[slot] == NULL || text == NULL)
+ 		return 0;
+-	return (uint32)strlen(text) * fGlyphWidth;
++	return (uint32)strlen(text) * fGlyphWidth[slot];
+ }
+ 
+ 
+ uint32
+-BGamePane::TextHeight() const
++BGamePane::TextHeight(uint32 slot) const
+ {
+-	return fGlyphHeight;
++	return slot < kFontSlots ? fGlyphHeight[slot] : 0;
+ }
+ 
+ 
+ void
+-BGamePane::DrawText(int32 x, int32 y, const char* text, uint8 index)
++BGamePane::DrawText(int32 x, int32 y, const char* text, uint8 index, uint32 slot)
+ {
+-	if (fGlyphs == NULL || text == NULL || index == 0)
++	if (slot >= kFontSlots || fGlyphs[slot] == NULL || text == NULL || index == 0)
+ 		return;
++	const uint32 glyphWidth = fGlyphWidth[slot], glyphHeight = fGlyphHeight[slot];
+ 	uint8* world = World();
+ 	if (world == NULL)
+ 		return;
+ 
+-	for (const char* c = text; *c != '\0'; c++, x += (int32)fGlyphWidth) {
++	for (const char* c = text; *c != '\0'; c++, x += (int32)glyphWidth) {
+ 		uint8 code = (uint8)*c;
+ 		if (code < 32 || code > 126)
+ 			continue;					// a space: nothing to draw
+-		const uint8* glyph = fGlyphs + (size_t)(code - 32) * fGlyphWidth * fGlyphHeight;
+-		for (uint32 row = 0; row < fGlyphHeight; row++) {
++		const uint8* glyph = fGlyphs[slot]
++			+ (size_t)(code - 32) * glyphWidth * glyphHeight;
++		for (uint32 row = 0; row < glyphHeight; row++) {
+ 			int32 at = y + (int32)row;
+ 			if (at < 0 || (uint32)at >= fWorldHeight)
+ 				continue;
+ 			uint8* out = world + (size_t)at * fStride;
+-			for (uint32 column = 0; column < fGlyphWidth; column++) {
++			for (uint32 column = 0; column < glyphWidth; column++) {
+ 				int32 across = x + (int32)column;
+ 				if (across < 0 || (uint32)across >= fWorldWidth)
+ 					continue;
+-				if (glyph[row * fGlyphWidth + column] != 0)
++				if (glyph[row * glyphWidth + column] != 0)
+ 					out[across] = index;
+ 			}
+ 		}
+@@ -766,9 +792,28 @@ BGamePane::DrawText(int32 x, int32 y, const char* text, uint8 index)
+ 
+ 
+ void
+-BGamePane::DrawTextInView(int32 x, int32 y, const char* text, uint8 index)
++BGamePane::DrawTextInView(int32 x, int32 y, const char* text, uint8 index,
++	uint32 slot)
++{
++	DrawText(x + fScrollX, y + fScrollY, text, index, slot);
++}
++
++
++void
++BGamePane::SetShaderParam(uint32 index, float value)
++{
++	if (fStatus != B_OK || index >= PRDS_SHADER_PARAMS)
++		return;
++	((float*)(fPool + fPoolOffset + fParamOffset))[index] = value;
++}
++
++
++float
++BGamePane::ShaderParam(uint32 index) const
+ {
+-	DrawText(x + fScrollX, y + fScrollY, text, index);
++	if (fStatus != B_OK || index >= PRDS_SHADER_PARAMS)
++		return 0.0f;
++	return ((const float*)(fPool + fPoolOffset + fParamOffset))[index];
+ }
+ 
+ 
