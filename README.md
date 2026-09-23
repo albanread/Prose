@@ -91,6 +91,13 @@ upstream.
 
 It means I can run the software I want, now.
 
+**The hardware vision for the Prose port of Haiku: the Mac virtual machine
+is the target hardware.** Prose is developed against Apple Silicon — that is
+the target system. Not a stepping stone to physical machines, not a
+lowest-common-denominator build: the Mac VM, on this hardware, is the
+machine Prose is for, and everything here is built and tested against
+exactly that.
+
 It is an iterative project and it has not been extensively tested. Crashes in
 applications and in the system get fixed as they are found. It started on
 15 September 2026.
