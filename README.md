@@ -402,6 +402,7 @@ table there also records why each one exists.
 | 0120 | DHCP: a request answered by nothing at all restarts the negotiation, as RFC 2131 4.4.2 says it should, instead of asking the same unanswered question for ever |
 | 0121 | Retro moves to Demos, which is what it is; Galaxigans stays in Games, which is what it is |
 | 0122 | `sisong` 2.16-8: Compile and Run builds a folder that has a makefile with `make`, so an example that needs a library links |
+| 0123 | The interrupt controller reaches CPUs past the sixteenth, so a machine can have more than sixteen processors |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

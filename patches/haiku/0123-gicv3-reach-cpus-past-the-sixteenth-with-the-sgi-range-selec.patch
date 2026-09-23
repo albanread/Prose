@@ -1,0 +1,170 @@
+From 2cdb5d0adb7e967008c24c5de0942f6480bc6598 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 17:07:53 +0100
+Subject: [PATCH] GICv3: reach CPUs past the sixteenth with the SGI range
+ selector
+
+ICC_SGI1R names its targets with a 16 bit list, one bit per value of the low
+four bits of AFF0, and the range selector says which sixteen values of AFF0 the
+list covers. The SGI code never set it, so it could only reach AFF0 0 to 15 in
+a cluster, and said so in an ASSERT.
+
+Virtualization.framework numbers every CPU in one cluster from 0, so with more
+than sixteen CPUs the seventeenth has AFF0 16. Measured with 20: the first
+unicast ICI to it, from scheduler_loadavg_init(), stopped the boot with "ASSERT
+FAILED: aff0 < 16". In a build without the ASSERT the bit would have spilled
+into AFF1 instead and the interrupt gone to a cluster that does not exist,
+leaving whoever waited for an answer to spin for ever.
+
+Group the targets by AFF3, AFF2, AFF1 and the high four bits of AFF0, and send
+each group its range selector. The GIC Virtualization.framework presents
+supports it: GICD_TYPER reads 0x0478001f, RSS set.
+
+A GIC without a range selector cannot interrupt such a CPU at all, so check
+ICC_CTLR_EL1.RSS once when the controller is set up and panic, naming the CPU,
+rather than send it an interrupt that cannot arrive.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0123-gicv3-reach-cpus-past-the-sixteenth-with-the-sgi-range-selec.patch cb5e458539f5e5f923511c845b3eb9e3c720a79c6805631e21df606841ba7df6
+---
+ .../kernel/arch/arm64/arch_int_gicv3.cpp      | 78 +++++++++++--------
+ src/system/kernel/arch/arm64/gicv3_regs.h     |  4 +
+ 2 files changed, 51 insertions(+), 31 deletions(-)
+
+diff --git a/src/system/kernel/arch/arm64/arch_int_gicv3.cpp b/src/system/kernel/arch/arm64/arch_int_gicv3.cpp
+index 28ce7863e7..6a6437d32d 100644
+--- a/src/system/kernel/arch/arm64/arch_int_gicv3.cpp
++++ b/src/system/kernel/arch/arm64/arch_int_gicv3.cpp
+@@ -60,6 +60,19 @@ GICv3InterruptController::GICv3InterruptController(phys_addr_t gicd_phys_addr,
+ 	reserve_io_interrupt_vectors(fMaxInt, 0, INTERRUPT_TYPE_IRQ);
+ 
+ 	dprintf("GICv3 detected: rev %u, max interrupts %u, TYPER %#x\n", rev, fMaxInt, typer);
++
++	// A CPU whose AFF0 is 16 or more can only be interrupted through the range
++	// selector, so a GIC without one cannot drive it. Say so now: otherwise its
++	// ICIs go to a cluster that does not exist, and whoever waits for an answer
++	// waits for ever.
++	const bool rangeSelector = (READ_SPECIALREG(ICC_CTLR_EL1) & ICC_CTLR_EL1_RSS) != 0;
++	for (uint32 cpu = 0; cpu < fNumCpus; cpu++) {
++		if (!rangeSelector && CPU_AFF0(gCPU[cpu].arch.mpidr) >= 16) {
++			panic("GICv3: CPU %" B_PRIu32 " has AFF0 %u, which needs the range selector "
++				"this GIC does not have", cpu, CPU_AFF0(gCPU[cpu].arch.mpidr));
++		}
++	}
++
+ 	// disable the distributor
+ 	GICD_CTLR = 0;
+ 	_WaitForMask(&GICD_CTLR, GICD_CTLR_RWP, 0);
+@@ -251,16 +264,30 @@ mpidr_aff_mask_to_sgir_mask(uint64_t mpidr)
+ }
+ 
+ 
+-// Send a pending IPI for the AFF3-1 cluster we've been accumulating a mask for.
++// The target list of ICC_SGI1R names sixteen CPUs by the low four bits of their
++// AFF0, and the range selector says which sixteen. So one SGI reaches every CPU
++// that shares AFF3, AFF2, AFF1 and the high four bits of AFF0: a group, here.
++// Without the range selector only AFF0 0 to 15 could be reached at all, and
++// Virtualization.framework puts every CPU in one cluster, numbered from 0, so a
++// machine with more than sixteen could not interrupt the rest.
++static inline uint64_t
++sgi_group(uint64_t mpidr)
++{
++	return mpidr & (CPU_AFF3_MASK | CPU_AFF2_MASK | CPU_AFF1_MASK | 0xf0);
++}
++
++
++// Send a pending IPI to the CPUs of one group, named by a 16 bit target list.
+ static void
+-send_sgi_for_cluster(unsigned int irq, uint64_t aff321, uint64_t aff0_mask)
++send_sgi_for_group(unsigned int irq, uint64_t group, uint64_t targetList)
+ {
+-	if (aff0_mask) {
+-		ASSERT((aff0_mask & 0xffff) == aff0_mask);
+-		const uint64_t sgi1r
+-			= ((irq & 0xf) << 24) | mpidr_aff_mask_to_sgir_mask(aff321) | aff0_mask;
+-		gic_write_sgi1r(sgi1r);
+-	}
++	if (targetList == 0)
++		return;
++
++	const uint64_t rangeSelector = CPU_AFF0(group) >> 4;
++	const uint64_t sgi1r = ((irq & 0xf) << 24) | mpidr_aff_mask_to_sgir_mask(group)
++		| rangeSelector << ICC_SGI1R_RS_SHIFT | targetList;
++	gic_write_sgi1r(sgi1r);
+ }
+ 
+ 
+@@ -269,34 +296,27 @@ GICv3InterruptController::SendMulticastIci(CPUSet& cpu_mask)
+ {
+ 	memory_write_barrier();
+ 
+-	uint64_t curr_aff321 = 0; // Current AFF3-1 we're dealing with.
+-	uint64_t aff0_mask = 0; // 16 bit mask of the AFF0 we're accumulating.
++	uint64_t currentGroup = 0;
++	uint64_t targetList = 0;
++		// the low four bits of AFF0 of each CPU in currentGroup to interrupt
+ 
+ 	for (uint32_t cpu = 0; cpu < fNumCpus; cpu++) {
+ 		if (!cpu_mask.GetBit(static_cast<int32_t>(cpu)))
+ 			continue;
+ 
+ 		const uint64 mpidr = gCPU[cpu].arch.mpidr;
+-		const uint64 aff321 = mpidr & (CPU_AFF3_MASK | CPU_AFF2_MASK | CPU_AFF1_MASK);
+-		const uint64 aff0 = CPU_AFF0(mpidr);
+-
+-		// Without the RS field set, we can only deal with the first
+-		// 16 cpus within a single cluster.
+-		ASSERT(aff0 < 16);
+-
+-		if (aff321 != curr_aff321) {
+-			// AFF3-1 has changed, see if we need to fire a pending IPI
+-			send_sgi_for_cluster(ICI_IRQ, curr_aff321, aff0_mask);
+-			curr_aff321 = aff321;
+-			aff0_mask = 0;
++		const uint64 group = sgi_group(mpidr);
++
++		if (group != currentGroup) {
++			send_sgi_for_group(ICI_IRQ, currentGroup, targetList);
++			currentGroup = group;
++			targetList = 0;
+ 		}
+ 
+-		// Accumulate.
+-		aff0_mask |= 1u << aff0;
++		targetList |= 1u << (CPU_AFF0(mpidr) & 0xf);
+ 	}
+ 
+-	// Fire any leftover accumulated mask.
+-	send_sgi_for_cluster(ICI_IRQ, curr_aff321, aff0_mask);
++	send_sgi_for_group(ICI_IRQ, currentGroup, targetList);
+ }
+ 
+ 
+@@ -306,11 +326,7 @@ GICv3InterruptController::SendUnicastIci(int32 target_cpu)
+ 	memory_write_barrier();
+ 
+ 	const uint64 mpidr = gCPU[target_cpu].arch.mpidr;
+-	const uint64 aff321 = mpidr & (CPU_AFF3_MASK | CPU_AFF2_MASK | CPU_AFF1_MASK);
+-	const uint64 aff0 = CPU_AFF0(mpidr);
+-	ASSERT(aff0 < 16);
+-
+-	send_sgi_for_cluster(ICI_IRQ, aff321, 1u << aff0);
++	send_sgi_for_group(ICI_IRQ, sgi_group(mpidr), 1u << (CPU_AFF0(mpidr) & 0xf));
+ }
+ 
+ 
+diff --git a/src/system/kernel/arch/arm64/gicv3_regs.h b/src/system/kernel/arch/arm64/gicv3_regs.h
+index ad8673f00d..03bda661b5 100644
+--- a/src/system/kernel/arch/arm64/gicv3_regs.h
++++ b/src/system/kernel/arch/arm64/gicv3_regs.h
+@@ -28,6 +28,10 @@
+ 
+ // ICC_SGI1R bit definitions
+ #define ICC_SGI1R_IRM BIT_64(40)
++#define ICC_SGI1R_RS_SHIFT 44
++
++// ICC_CTLR bit definitions
++#define ICC_CTLR_EL1_RSS BIT_64(18)
+ 
+ // Distributor registers.
+ 
