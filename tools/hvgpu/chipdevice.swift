@@ -16,7 +16,10 @@ import Foundation
 import Virtualization
 
 enum PRCH {
-    static let deviceID: UInt16 = 64
+    // 60, not 64: the modern PCI device ID is 0x1040 + this, and the range
+    // ends at 0x107F -- so 64 would be outside it. 61 is the portal, 62 MIDI,
+    // 63 the display.
+    static let deviceID: UInt16 = 60
     static let magic: UInt32 = 0x48435250          // "PRCH" little-endian
     static let version: UInt16 = 1
     static let configSize = 32
@@ -63,7 +66,10 @@ final class ProseChipDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate
         cfg.deviceID = PRCH.deviceID
         cfg.pciClassID = 0x04                  // multimedia
         cfg.pciSubclassID = 0x01               // audio
-        cfg.virtioQueueCount = 1
+        // Two, though only the first is used: the portal and the MIDI port
+        // both declare two, and a one-queue custom device was not enumerated
+        // by the guest at all.
+        cfg.virtioQueueCount = 2
         cfg.deviceSpecificConfiguration = VZVirtioDeviceSpecificConfiguration(configurationData: configData())
         cfg.provider = VZCustomVirtioDeviceDelegateProvider(
             deviceQueue: ProseChipDevice.queue, delegate: self)
