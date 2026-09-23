@@ -55,6 +55,7 @@ private struct Macros {
     var trem = 0
     var tremPhase = 0
     var note = -1               // the MIDI note this voice holds, -1 for none
+    var owner = -1              // which track gated it on
     var age = 0
     var sustain = 0             // the ADSR sustain as written, for tremolo
 }
@@ -149,30 +150,40 @@ final class Trio {
         return track >= 0 && track < kTrioTracks && tracks[track].playing
     }
 
-    /// Release every voice this track's tune is holding. A track that stops
-    /// must not leave a note sounding for ever.
+    /// Release the voices THIS track is holding, and only those. A track that
+    /// stops must not leave a note sounding for ever -- and must not take
+    /// anyone else's with it: a game fires a shot every few frames, and
+    /// silencing all nine would cut the music on every one.
     private func silence(track: Int) {
-        guard tracks[track].playing else { return }
-        for g in 0..<kVoicesPerTrio where macros[g].note >= 0 {
+        for g in 0..<kVoicesPerTrio where macros[g].owner == track {
             macros[g].note = -1
+            macros[g].owner = -1
             chips[g / 3].gateOff(g % 3)
         }
     }
 
     // MARK: the schedule, applied
 
-    private func applyNoteOn(_ abcVoice: Int, _ midi: Int) {
-        // V:n lands on chip (n-1)/3, and inside it the voice the tune most
-        // likely means -- (n-1)%3 -- before any other free one. Seeding the
-        // allocator by the ABC voice is what makes `[I:chip v=k]` reliably
-        // address the voice that V:k+1's notes actually land on.
+    private func applyNoteOn(_ abcVoice: Int, _ midi: Int, track: Int) {
+        // V:n lands on chip (n-1)/3, and inside it the FIRST FREE voice --
+        // the reference player's rule, kept exactly. Preferring the voice the
+        // tune names reads better on paper and sounds different: where two
+        // voices alternate with rests, first-free puts the second voice on
+        // the one the first just released, so it inherits those registers.
+        // That is the sound these tunes were written against.
         let chip = max(0, min(kChipsPerTrio - 1, (abcVoice - 1) / 3))
-        let preferred = max(0, (abcVoice - 1) % 3)
         var chosen = -1
         let base = chip * 3
-        if macros[base + preferred].note < 0 { chosen = preferred }
         if chosen < 0 {
             for v in 0..<3 where macros[base + v].note < 0 { chosen = v; break }
+        }
+        if chosen < 0 {
+            // Nothing free: an idle envelope belonging to us, before anyone
+            // else's sounding note.
+            for v in 0..<3 where chips[chip].isIdle(v) && macros[base + v].owner == track {
+                chosen = v
+                break
+            }
         }
         if chosen < 0 {
             for v in 0..<3 where chips[chip].isIdle(v) { chosen = v; break }
@@ -189,33 +200,47 @@ final class Trio {
         }
         let g = base + chosen
         macros[g].note = midi
-        macros[g].age = tracks[0].position
+        macros[g].owner = track
+        macros[g].age = tracks[track].position
         macros[g].slideCurrent = 0.0
         chips[chip].setFrequencyHz(chosen, hz(Double(midi)))
         chips[chip].gateOn(chosen)
     }
 
-    private func applyNoteOff(_ abcVoice: Int, _ midi: Int) {
+    private func applyNoteOff(_ abcVoice: Int, _ midi: Int, track: Int) {
         let chip = max(0, min(kChipsPerTrio - 1, (abcVoice - 1) / 3))
-        for v in 0..<3 where macros[chip * 3 + v].note == midi {
+        for v in 0..<3 where macros[chip * 3 + v].note == midi
+                && macros[chip * 3 + v].owner == track {
             macros[chip * 3 + v].note = -1
+            macros[chip * 3 + v].owner = -1
             chips[chip].gateOff(v)
             return
         }
     }
 
-    /// A register write. `v=` in the grammar is a GLOBAL voice, 0..8, which
-    /// is what the tunes already written expect; the chip-level registers are
-    /// addressed through whichever voice the tune names.
+    /// A register write. `v=` in the grammar is ONE-BASED, 1 to 9, as the
+    /// reference trio has it: v=5 is chip 1's second voice. A chip-level
+    /// register -- volume, the filter, the pan, the echo -- is addressed
+    /// through whichever voice the tune names, and reaches its whole chip.
+    ///
+    /// A `v=` outside 1..9 addresses no voice, so its per-voice registers are
+    /// dropped and only the chip-level ones land. That is not leniency, it is
+    /// the reference's own behaviour, and tunes written against the older
+    /// zero-based numbering depend on it sounding the way it does.
     private func applyChip(_ voice: Int, _ param: Int, _ value: Int) {
-        let g = max(0, min(kVoicesPerTrio - 1, voice))
-        let chip = g / 3, v = g % 3
+        let g = voice - 1
+        let chip = max(0, min(kChipsPerTrio - 1, g < 0 ? 0 : g / 3))
+        let v = g < 0 || g >= kVoicesPerTrio ? -1 : g % 3
         switch param {
-        case CP.wave: chips[chip].setWave(v, value)
+        case CP.wave:
+            if v >= 0 { chips[chip].setWave(v, value) }
         case CP.pw:
-            chips[chip].setPulseWidth(v, value)
-            macros[g].pwmBase = value
+            if v >= 0 {
+                chips[chip].setPulseWidth(v, value)
+                macros[g].pwmBase = value
+            }
         case CP.a, CP.d, CP.s, CP.r:
+            guard v >= 0 else { break }
             // ADSR arrives a register at a time, so the chip is re-armed from
             // what has been said so far.
             var adsr = adsrOf(g)
@@ -226,7 +251,8 @@ final class Trio {
             default: adsr.3 = value
             }
             setADSR(g, adsr)
-        case CP.filt: chips[chip].routeFilter(v, value != 0)
+        case CP.filt:
+            if v >= 0 { chips[chip].routeFilter(v, value != 0) }
         case CP.cutoff:
             chips[chip].setFilter(cutoff: value, resonance: chips[chip].filterResonance,
                                   mode: chips[chip].filterMode)
@@ -242,14 +268,20 @@ final class Trio {
         case CP.etime:
             echoSamples = max(1, min(kChipSampleRate - 1, value * kChipFrameSamples))
         case CP.efb: echoFeedback = max(0, min(15, value))
-        case CP.arp: macros[g].arp = value; macros[g].arpPos = 0
-        case CP.vib: macros[g].vib = value; macros[g].vibPhase = 0
-        case CP.slide: macros[g].slide = value
+        case CP.arp:
+            if v >= 0 { macros[g].arp = value; macros[g].arpPos = 0 }
+        case CP.vib:
+            if v >= 0 { macros[g].vib = value; macros[g].vibPhase = 0 }
+        case CP.slide:
+            if v >= 0 { macros[g].slide = value }
         case CP.pwm:
-            macros[g].pwm = value
-            macros[g].pwmPhase = 0
-            macros[g].pwmBase = chips[chip].pulseWidth(v)
-        case CP.trem: macros[g].trem = value; macros[g].tremPhase = 0
+            if v >= 0 {
+                macros[g].pwm = value
+                macros[g].pwmPhase = 0
+                macros[g].pwmBase = chips[chip].pulseWidth(v)
+            }
+        case CP.trem:
+            if v >= 0 { macros[g].trem = value; macros[g].tremPhase = 0 }
         case CP.sweep: sweep[chip] = value - 1024
         default: break                  // an unknown register: play the notes
         }
@@ -349,8 +381,8 @@ final class Trio {
                         && tracks[t].steps[tracks[t].cursor].sample <= tracks[t].position {
                     let step = tracks[t].steps[tracks[t].cursor]
                     switch step.kind {
-                    case .noteOn: applyNoteOn(step.voice, step.midi)
-                    case .noteOff: applyNoteOff(step.voice, step.midi)
+                    case .noteOn: applyNoteOn(step.voice, step.midi, track: t)
+                    case .noteOff: applyNoteOff(step.voice, step.midi, track: t)
                     case .chip: applyChip(step.voice, step.param, step.value)
                     }
                     tracks[t].cursor += 1

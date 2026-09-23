@@ -270,7 +270,7 @@ final class Chip {
             // in which every source is already up to date. On a real chip all
             // three oscillators advance together, so the wrap each voice
             // reacts to is detected from its OWN prev-to-raw step.
-            var prev = [voices[0].acc, voices[1].acc, voices[2].acc]
+            let prev = [voices[0].acc, voices[1].acc, voices[2].acc]
             var raw = [0, 0, 0]
             var wrapped = [false, false, false]
             for v in 0..<3 {

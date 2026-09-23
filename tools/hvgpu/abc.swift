@@ -632,19 +632,37 @@ func schedule(_ tune: Tune, sampleRate: Int = kChipSampleRate) -> [Step] {
             voice: c.voice, midi: 0, velocity: 0, param: c.param, value: c.value))
     }
     for n in tune.notes {
-        steps.append(Step(sample: tickToSample(n.tick, bpm: tune.bpm,
-            perBeat: perBeat, sampleRate: sampleRate), kind: .noteOn,
+        let on = tickToSample(n.tick, bpm: tune.bpm, perBeat: perBeat,
+                              sampleRate: sampleRate)
+        // Lift the note a little early, so repeated pitches are re-struck
+        // rather than running together: a twentieth of the note, capped at a
+        // sixteenth of the beat, which is about what a player does without
+        // thinking about it. Without this a phrase of the same note is one
+        // long note, and every phrase is a shade too legato.
+        var offTick = n.tick + n.duration
+        let gap = min(n.duration / 20, perBeat / 16)
+        if gap > 0 && n.duration > gap { offTick -= gap }
+        let off = tickToSample(offTick, bpm: tune.bpm, perBeat: perBeat,
+                               sampleRate: sampleRate)
+        steps.append(Step(sample: on, kind: .noteOn,
             voice: n.voice, midi: n.midi, velocity: n.velocity))
-        steps.append(Step(sample: tickToSample(n.tick + n.duration, bpm: tune.bpm,
-            perBeat: perBeat, sampleRate: sampleRate), kind: .noteOff,
+        steps.append(Step(sample: off > on ? off : on + 1, kind: .noteOff,
             voice: n.voice, midi: n.midi, velocity: 0))
     }
 
-    steps.sort {
-        if $0.sample != $1.sample { return $0.sample < $1.sample }
-        return order($0.kind) < order($1.kind)
+    // Stable: at one instant the order is the order it was written, which is
+    // what a first-free voice allocator downstream depends on. Swift's sort
+    // is not stable, so the index is the last tie-break.
+    let ordered = steps.enumerated().sorted {
+        if $0.element.sample != $1.element.sample {
+            return $0.element.sample < $1.element.sample
+        }
+        if order($0.element.kind) != order($1.element.kind) {
+            return order($0.element.kind) < order($1.element.kind)
+        }
+        return $0.offset < $1.offset
     }
-    return steps
+    return ordered.map { $0.element }
 }
 
 private func order(_ kind: StepKind) -> Int {
