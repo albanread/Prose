@@ -14,6 +14,7 @@
 // General MIDI one, the same synth the guest's own MIDI port already plays.
 import Foundation
 import Virtualization
+import os
 
 enum PRCH {
     // 60, not 64: the modern PCI device ID is 0x1040 + this, and the range
@@ -60,6 +61,9 @@ final class ProseChipDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate
         return ownSynth?.ok == true ? ownSynth : nil
     }
     private var plays = 0, midiPlays = 0, refusals = 0
+    /// What the status bar watches: tunes started, and whether anything is
+    /// sounding now. Written on the device queue, read on the main thread.
+    let activity = OSAllocatedUnfairLock(initialState: (started: 0, chip: 0, synth: 0))
 
     var configuration: VZCustomVirtioDeviceConfiguration {
         let cfg = VZCustomVirtioDeviceConfiguration()
@@ -93,6 +97,14 @@ final class ProseChipDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate
     func stop() {
         for t in midiTunes { t.stop() }
         audio.stop()
+    }
+
+    /// True while any track is still sounding, on either machine.
+    var sounding: Bool {
+        for t in 0..<PRCH.tracks where audio.trio.isPlaying(track: t) || midiTunes[t].playing {
+            return true
+        }
+        return false
     }
 
     var stats: String {
@@ -202,11 +214,13 @@ final class ProseChipDevice: NSObject, VZCustomVirtioDeviceConfigurationDelegate
         if !tune.isChipTune && !tune.midiPrograms.isEmpty, let synth = generalMIDI() {
             midiTunes[track].play(tune, on: synth, loop: loop)
             midiPlays += 1
+            activity.withLock { $0.started += 1; $0.synth += 1 }
             log("chip: track \(track): \(tune.notes.count) notes to the synth, "
                 + "program \(tune.midiPrograms.values.first ?? 0)")
         } else {
             let result = audio.trio.play(source, track: track, loop: loop)
             plays += 1
+            activity.withLock { $0.started += 1; $0.chip += 1 }
             log("chip: track \(track): \(result.notes) notes on the trio"
                 + (result.warnings.isEmpty ? ""
                    : ", \(result.warnings.count) bar line(s) the durations did not land on"))

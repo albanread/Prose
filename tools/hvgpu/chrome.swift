@@ -231,6 +231,7 @@ final class StatusBar: NSView {
     let sound = StatusItem(symbol: "speaker.wave.2", name: "Sound", lights: [.systemGreen], showsLabel: false)
     let microphone = StatusItem(symbol: "mic.fill", name: "Microphone", showsLabel: false)
     let midi = StatusItem(symbol: "pianokeys", name: "MIDI", lights: [.systemBlue], showsLabel: false)
+    let chip = StatusItem(symbol: "waveform", name: "Chip", lights: [.systemGreen], showsLabel: false)
     private var messageExpiry: DispatchWorkItem?
 
     static func label(monospaced: Bool = false) -> NSTextField {
@@ -250,7 +251,7 @@ final class StatusBar: NSView {
         message.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
         microphone.icon.contentTintColor = .systemOrange
         microphone.isHidden = true
-        let right = NSStackView(views: [cpu, disk, network, sound, microphone, midi])
+        let right = NSStackView(views: [cpu, disk, network, sound, microphone, midi, chip])
         right.spacing = 14
         for stack in [left, right] {
             stack.orientation = .horizontal
@@ -517,6 +518,7 @@ final class WindowChrome: NSObject {
     private var last: VMCounters?
     private var lastCPU: (nanos: UInt64, time: UInt64)?
     private var lastMIDI = 0
+    private var lastChip = 0
     private var locateAttempts = 0
     private var guestIP: String?
     private var ipCheckedAt = 0
@@ -555,6 +557,7 @@ final class WindowChrome: NSObject {
         let bar = content.statusBar
         bar.sound.isHidden = args.contains("--no-sound")
         bar.midi.isHidden = args.contains("--no-midi")
+        bar.chip.isHidden = args.contains("--no-chip")
         bar.network.isHidden = args.contains("--no-net")
         bar.disk.toolTip = "Disk: \(diskURL.lastPathComponent)"
 
@@ -584,7 +587,8 @@ final class WindowChrome: NSObject {
         window.toolbar?.validateVisibleItems()
         updateUptime()
         if controller.vm?.state != .running {
-            for light in [bar.disk.lights, bar.network.lights, bar.midi.lights].joined() { light.setLit(false) }
+            for light in [bar.disk.lights, bar.network.lights, bar.midi.lights,
+                          bar.chip.lights].joined() { light.setLit(false) }
             bar.sound.lights.first?.setLit(false)
             bar.microphone.isHidden = true
             bar.cpu.label.stringValue = "–"
@@ -615,6 +619,16 @@ final class WindowChrome: NSObject {
             lastMIDI = midiCount
             bar.midi.lights.first?.flash()
         }
+
+        // The chip is ours too: its light is lit while anything is sounding and
+        // flashes as each tune starts, so a tune that never arrives and a tune
+        // that arrives and says nothing look different.
+        let chipActivity = controller.chip.activity.withLock { $0 }
+        if chipActivity.started != lastChip {
+            lastChip = chipActivity.started
+            bar.chip.lights.first?.flash()
+        }
+        bar.chip.lights.first?.setLit(controller.chip.sounding)
 
         if running, let monitor = controller.monitor {
             // the process at once, its network port a moment later; then look less often
@@ -678,6 +692,9 @@ final class WindowChrome: NSObject {
         bar.microphone.toolTip = "Prose is recording from the Mac's sound input"
         bar.midi.toolTip = "MIDI: \(midiCount) messages from Prose, played on the Mac's synthesizer "
             + "(CoreMIDI source “\(ProseMIDIDevice.endpointName)”)"
+        bar.chip.toolTip = "Chip: \(chipActivity.started) tunes sent as notation — "
+            + "\(chipActivity.chip) on the three-chip synthesiser, \(chipActivity.synth) "
+            + "on the Mac's General MIDI one"
     }
 
     private func updateDisplay() {
