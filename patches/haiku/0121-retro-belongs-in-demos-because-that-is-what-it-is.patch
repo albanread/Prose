@@ -1,0 +1,60 @@
+From 28c4fdcf089e29b23c48f671e03bb4bbe884b70a Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 13:42:06 +0100
+Subject: [PATCH] Retro belongs in Demos, because that is what it is
+
+Retro exists to show what a game pane does -- an indexed world the host's GPU
+turns into pixels, sprites, per-scanline palettes, a shader you can replace at
+run time. It is a demonstration, not a game, and it sat in the Games folder
+next to Minesweeper because /boot/system/apps is where applications go.
+
+SYSTEM_DEMOS installs to /boot/system/demos, which is what the Deskbar's Demos
+folder links to, so that is where it goes. Galaxigans stays in Games: it is one.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0121-retro-belongs-in-demos-because-that-is-what-it-is.patch 59c8996ac01e952d56756e2bc3906ace53bee3b7b6957892fce87f5d1b41596d
+---
+ build/jam/DeskbarCategories          | 1 -
+ build/jam/images/definitions/regular | 3 +--
+ 2 files changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/build/jam/DeskbarCategories b/build/jam/DeskbarCategories
+index cecf49de9d..9d70b10520 100644
+--- a/build/jam/DeskbarCategories
++++ b/build/jam/DeskbarCategories
+@@ -83,7 +83,6 @@ DESKBAR_CATEGORY_Games =
+ 	Minesweeper
+ 	Peggy
+ 	ProseOthello
+-	Retro
+ 	W6
+ 	;
+ 
+diff --git a/build/jam/images/definitions/regular b/build/jam/images/definitions/regular
+index c85d21f471..a5eb1281a0 100644
+--- a/build/jam/images/definitions/regular
++++ b/build/jam/images/definitions/regular
+@@ -49,7 +49,6 @@ SYSTEM_APPS += [ FFilterByBuildFeatures
+ 	PowerStatus
+ 	Galaxigans
+ 	RemoteDesktop
+-	Retro
+ 	Screenshot
+ 	SerialConnect
+ 	SoftwareUpdater
+@@ -69,7 +68,6 @@ DESKBAR_APPLICATIONS +=
+ 	People
+ 	Galaxigans
+ 	PoorMan
+-	Retro
+ 	SerialConnect
+ 	SoftwareUpdater
+ 	SoundRecorder
+@@ -95,6 +93,7 @@ SYSTEM_PREFERENCES += [ FFilterByBuildFeatures
+ SYSTEM_DEMOS += [ FFilterByBuildFeatures
+ 	Chart
+ 	Clock
++	Retro
+ 	Cortex@expat
+ 	FontDemo
+ 	GLTeapot@mesa
