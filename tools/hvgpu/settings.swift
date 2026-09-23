@@ -204,6 +204,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         name.alignment = .right
         name.translatesAutoresizingMaskIntoConstraints = false
         name.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        proxyPort.stringValue = "\(Settings.guestProxyPort)"
         proxyPort.translatesAutoresizingMaskIntoConstraints = false
         proxyPort.widthAnchor.constraint(equalToConstant: 72).isActive = true
         proxyPort.target = self
@@ -285,6 +286,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             filling.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         }
         w.contentView = content
+        // The window was made with a guessed height, and the column inside it
+        // has grown since. Ask the layout how tall it actually needs to be and
+        // give it that, or the last rows are squeezed out of sight.
+        content.layoutSubtreeIfNeeded()
+        w.setContentSize(NSSize(width: content.fittingSize.width,
+                                height: content.fittingSize.height))
     }
 
     private func refresh() {
@@ -306,9 +313,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         // listen on until a machine is running.
         let proxy = controller.guestProxy
         if !Settings.guestProxy {
-            proxyNote.stringValue = "Off. The guest goes out through vmnet alone."
+            proxyNote.stringValue = "Off — the guest goes out through vmnet alone"
         } else if proxy.isRunning {
-            proxyNote.stringValue = "Listening on \(proxy.summary)"
+            proxyNote.stringValue = "Listening on \(proxy.summary) — applies at once"
         } else {
             proxyNote.stringValue = "Starts when the machine does."
         }
