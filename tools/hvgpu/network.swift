@@ -259,10 +259,30 @@ extension Controller {
 
     /// Set an address the Mac has not given away, with the bridge as gateway
     /// and resolver. Three commands, and the machine is on the network.
+    /// What the guest has is learned when the Network menu is built, so a click
+    /// that arrives before that -- a script, or a menu driven from outside --
+    /// would find nothing and say so in the words of a different failure.
     @objc func assignStaticAddress(_ sender: Any?) {
-        guard let wired = guestInterfaces.first, let bridge = hostBridge(),
-              let address = freeAddress(on: bridge) else {
-            chrome?.content.statusBar.show(message: "No free address on \(hostBridge()?.interface ?? "the bridge")")
+        guard !guestInterfaces.isEmpty else {
+            chrome?.content.statusBar.show(message: "Asking the guest what it has…")
+            refreshNetwork { [weak self] _ in self?.setStaticAddress() }
+            return
+        }
+        setStaticAddress()
+    }
+
+    /// Each way this can fail says which one it was: they need different fixes.
+    func setStaticAddress() {
+        guard let wired = guestInterfaces.first else {
+            chrome?.content.statusBar.show(message: "The guest has no network interface")
+            return
+        }
+        guard let bridge = hostBridge() else {
+            chrome?.content.statusBar.show(message: "No bridge to be on — is networking switched on?")
+            return
+        }
+        guard let address = freeAddress(on: bridge) else {
+            chrome?.content.statusBar.show(message: "No free address on \(bridge.interface)")
             return
         }
         chrome?.content.statusBar.show(message: "Setting \(address)…")
