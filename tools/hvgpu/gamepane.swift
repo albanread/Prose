@@ -17,6 +17,7 @@ enum Pane {
     static let maxPanes = 8
     static let maxClipRects = 32
     static let maxSprites = 64
+    static let spritePalettes = 64
     static let maxBuffers = 3
     static let maxShaderBytes = 16384
 
@@ -136,27 +137,43 @@ static inline float2 pane_locate(VOut in, constant PaneParams &p, constant uint4
 
 let paneShaderSource = paneShaderPrelude + """
 
-// 1-15 come from this row's sixteen, 16-255 from the global palette, unless
-// per-scanline palettes are off -- then everything is global. That split is
-// the whole trick: a raster bar costs one palette write, not a repaint.
-static inline float4 lookup(device const uint *pool, constant PaneParams &p,
-                            uint index, uint row, bool global) {
-    if (index == 0u) return float4(0.0);
-    uint at = (!global && index < 16u && (p.flags & kFlagScanline) != 0u)
-        ? p.paletteWords + 256u + min(row, p.worldHeight - 1u) * 16u + index
-        : p.paletteWords + index;
+static inline float4 entry(device const uint *pool, uint at) {
     uint v = pool[at];
     return float4(float((v >> 16) & 0xFF), float((v >> 8) & 0xFF), float(v & 0xFF), 255.0) / 255.0;
+}
+
+// The world: 1-15 come from this row's sixteen, 16-255 from the global palette,
+// unless per-scanline palettes are off -- then everything is global. That split
+// is the whole trick: a raster bar costs one palette write, not a repaint.
+static inline float4 lookup(device const uint *pool, constant PaneParams &p,
+                            uint index, uint row) {
+    if (index == 0u) return float4(0.0);
+    uint at = (index < 16u && (p.flags & kFlagScanline) != 0u)
+        ? p.paletteWords + 256u + min(row, p.worldHeight - 1u) * 16u + index
+        : p.paletteWords + index;
+    return entry(pool, at);
+}
+
+// A sprite: palette 0 is the global one (all 255 colours for an eight-bit
+// sprite, the first 15 for a four-bit one), 1 to 63 are sixteen of its own.
+// Never the scanline palette -- a sprite crossing a raster split should not
+// change colour halfway down.
+static inline float4 spriteColour(device const uint *pool, constant PaneParams &p,
+                                  uint index, uint palette) {
+    if (index == 0u) return float4(0.0);
+    uint at = palette == 0u
+        ? p.paletteWords + min(index, 255u)
+        : p.paletteWords + 256u + p.worldHeight * 16u + palette * 16u + (index & 15u);
+    return entry(pool, at);
 }
 
 // Sprites are 48 bytes in the pool, drawn after the world, last on top. Each
 // fragment is inverse-transformed into sprite space, which is what buys
 // rotation and fractional scale over a byte blitter. Four-bit sprites pack two
-// pixels to a byte, low nibble first, and take their sixteen colours from the
-// bank the palette base selects.
+// pixels to a byte, low nibble first, and name a palette of their own.
 static inline uint spriteIndexAt(device const uint *pool, constant PaneParams &p,
                                  device const uchar *bytes, float2 world, float2 viewPos,
-                                 thread uint &base, thread float &alpha) {
+                                 thread uint &palette, thread float &alpha) {
     for (int i = int(p.spriteCount) - 1; i >= 0; i--) {
         uint w = p.spriteWords + uint(i) * 12u;
         float2 origin = float2(float(int(pool[w])), float(int(pool[w + 1])));
@@ -183,13 +200,16 @@ static inline uint spriteIndexAt(device const uint *pool, constant PaneParams &p
 
         uint x = uint(local.x), row = uint(local.y);
         uint index;
-        if ((flags & 8u) != 0u) {
+        bool four = (flags & 8u) != 0u;
+        if (four) {
             uint packed = bytes[offset + row * stride + (x >> 1)];
             index = (x & 1u) != 0u ? (packed >> 4) : (packed & 0x0Fu);
         } else
             index = bytes[offset + row * stride + x];
         if (index == 0u) continue;
-        base = pool[w + 11];
+        // only a four-bit sprite has a palette of its own; eight bits of index
+        // are the global palette by definition
+        palette = four ? min(pool[w + 11], 63u) : 0u;
         alpha = a;
         return index;
     }
@@ -213,16 +233,14 @@ fragment float4 pane_fmain(VOut in [[stage_in]],
             colour = float4(float((v >> 16) & 0xFF), float((v >> 8) & 0xFF), float(v & 0xFF), 255.0) / 255.0;
         } else {
             uint index = bytes[p.bufferOffset + row * p.strideBytes + uint(world.x)];
-            colour = lookup(pool, p, index, row, false);
+            colour = lookup(pool, p, index, row);
         }
     }
 
-    uint base = 0; float spriteAlpha = 1.0;
-    uint s = spriteIndexAt(pool, p, bytes, world, viewPos, base, spriteAlpha);
+    uint palette = 0; float spriteAlpha = 1.0;
+    uint s = spriteIndexAt(pool, p, bytes, world, viewPos, palette, spriteAlpha);
     if (s != 0u) {
-        // a sprite's colours are always global: a sprite crossing a raster
-        // split should not change colour halfway down
-        float4 sc = lookup(pool, p, min(s + base, 255u), row, true);
+        float4 sc = spriteColour(pool, p, s, palette);
         colour = float4(mix(colour.rgb, sc.rgb, spriteAlpha * sc.a),
                         max(colour.a, sc.a * spriteAlpha));
     }

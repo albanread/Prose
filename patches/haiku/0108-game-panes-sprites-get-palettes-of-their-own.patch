@@ -1,0 +1,266 @@
+From 975a168b6096132ff74f01c950ed1fff1674e502 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 07:14:15 +0100
+Subject: [PATCH] game panes: sprites get palettes of their own
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A four-bit sprite took its sixteen colours from the global palette at an
+offset, so sprites and the world competed for one budget of 256: eight
+distinct sprite palettes ate half of what the background had to draw
+with. They now name one of 63 palettes of their own, appended to the
+block that already holds the global 256 and the scanline rows — four
+kilobytes, and the world keeps all of its colours.
+
+Palette 0 is the global one, which is the whole of the rule: an eight-bit
+sprite indexes the 256 as before, a four-bit sprite on palette 0 takes
+the first fifteen, and in scanline mode those are the entries the row
+palette shadows anyway, so it costs the world nothing. No flag.
+
+It also puts the earlier special case on a footing: sprite colours never
+come from the scanline palette, not because of a rule about raster
+splits, but because a sprite's palette is not the row's.
+
+What this is really for is animation. A hit flash, a power-up, an enemy
+in its harder colours, a group fading out: one number a frame, or sixteen
+writes for a whole group, and no pixels touched. Retro's balloons now
+carry three palettes and one of them flashes.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0108-game-panes-sprites-get-palettes-of-their-own.patch d2950e04e84b4288b9365ed2eea0891a7883ccadeaf4f0ef3fcfea35f2bb8136
+---
+ headers/os/game/GamePane.h                    | 19 ++++--
+ .../graphics/prose_display/prose_display.h    |  9 ++-
+ src/apps/retro/Retro.cpp                      | 59 ++++++++++++-------
+ src/kits/game/GamePane.cpp                    | 29 ++++++++-
+ 4 files changed, 86 insertions(+), 30 deletions(-)
+
+diff --git a/headers/os/game/GamePane.h b/headers/os/game/GamePane.h
+index 45f3f8e7eb..83736e5606 100644
+--- a/headers/os/game/GamePane.h
++++ b/headers/os/game/GamePane.h
+@@ -83,6 +83,15 @@ public:
+ 			void				SetScanlineColors(uint32 row, uint8 first,
+ 									uint32 count, const rgb_color* colors);
+ 
++	// Sprite palettes: sixteen colours each, 1 to 63. Palette 0 is the global
++	// one and cannot be set here. Recolouring a sprite -- a hit flash, a
++	// power-up, an enemy in its harder colours -- is then one number a frame,
++	// and recolouring a whole group is sixteen writes, not a redraw.
++			void				SetSpriteColor(uint8 palette, uint8 index,
++									rgb_color color);
++			void				SetSpriteColors(uint8 palette, uint8 first,
++									uint32 count, const rgb_color* colors);
++
+ 	// The view: how much of the world the window shows, and from where.
+ 			void				SetView(uint32 width, uint32 height);
+ 			void				SetScroll(int32 x, int32 y);
+@@ -117,17 +126,17 @@ public:
+ 	// a shape once; list the ones you want each frame, then Present().
+ 	//
+ 	// `pixels` is always one byte per pixel. At a depth of 4 the values are 0
+-	// to 15, packed two to a byte here, and the palette base picks which bank
+-	// of sixteen colours they mean: sixteen-colour sprites at half the memory
+-	// and a bank swap instead of a redraw. Index 0 is transparent either way,
+-	// and a sprite's colours always come from the global palette.
++	// to 15, packed two to a byte here, and the sprite names one of the 63
++	// sprite palettes: sixteen-colour sprites at half the memory, and a palette
++	// swap instead of a redraw. Index 0 is transparent at either depth. An
++	// eight-bit sprite indexes the global palette whatever palette it names.
+ 			int32				DefineSprite(const uint8* pixels,
+ 									uint32 width, uint32 height,
+ 									uint32 depth = 8);
+ 			void				ClearSprites();
+ 			status_t			DrawSprite(int32 shape, int32 x, int32 y,
+ 									float scale = 1.0f, float rotation = 0.0f,
+-									float alpha = 1.0f, uint8 paletteBase = 0,
++									float alpha = 1.0f, uint8 palette = 0,
+ 									uint32 flags = 0);
+ 
+ 	// A frame. Present() makes the buffer just drawn the live one and moves
+diff --git a/headers/private/graphics/prose_display/prose_display.h b/headers/private/graphics/prose_display/prose_display.h
+index f707393877..2636c34266 100644
+--- a/headers/private/graphics/prose_display/prose_display.h
++++ b/headers/private/graphics/prose_display/prose_display.h
+@@ -33,6 +33,7 @@
+ #define PRDS_MAX_PANES				8
+ #define PRDS_MAX_CLIP_RECTS			32
+ #define PRDS_MAX_SPRITES			64
++#define PRDS_SPRITE_PALETTES		64	/* 0 is the global palette; 1-63 are the sprites' own */
+ #define PRDS_PANE_BUFFERS_MAX		3
+ 
+ #define PRDS_PANE_INDEXED8			1	/* one byte per pixel, 0 transparent */
+@@ -150,7 +151,9 @@ struct prds_pane_create {
+ 	uint32	buffers;			/* 1..PRDS_PANE_BUFFERS_MAX */
+ 	uint64	offset;				/* pool offset of buffer 0 */
+ 	uint64	buffer_stride;		/* bytes between buffer n and n+1 */
+-	uint64	palette_offset;		/* pool offset of 256 + world_height * 16 BGRA entries */
++	uint64	palette_offset;		/* pool offset of the palette block: 256 global BGRA
++								   entries, then world_height rows of 16 for the
++								   scanline palette, then PRDS_SPRITE_PALETTES of 16 */
+ } _PACKED;
+ 
+ struct prds_pane_config {
+@@ -206,7 +209,9 @@ struct prds_sprite {
+ 	float	scale;				/* 1.0 = one world pixel per sprite pixel */
+ 	float	rotation;			/* radians, about the sprite's centre */
+ 	float	alpha;				/* 0..1 */
+-	uint32	palette_base;		/* added to each non-zero index */
++	uint32	palette;			/* 0: the global palette; 1-63: that sprite palette's
++								   sixteen. Four-bit sprites only -- an eight-bit one
++								   indexes the global palette whatever this says */
+ } _PACKED;
+ 
+ struct prds_resp {
+diff --git a/src/apps/retro/Retro.cpp b/src/apps/retro/Retro.cpp
+index 78d187f4a5..a04d1f4657 100644
+--- a/src/apps/retro/Retro.cpp
++++ b/src/apps/retro/Retro.cpp
+@@ -41,9 +41,14 @@ enum {
+ 	kHillLit	= 18,
+ 	kStar		= 19,
+ 	kLogo		= 20,
+-	kShipFirst	= 24,		// the ship's eight
+-	kBankA		= 32,		// two banks of sixteen for the four-bit sprites
+-	kBankB		= 48
++	kShipFirst	= 24		// the ship's eight
++};
++
++// The four-bit balloons' own palettes; nothing of the world's 256 goes on them.
++enum {
++	kPaletteCalm	= 1,
++	kPaletteWarm	= 2,
++	kPaletteFlash	= 3
+ };
+ 
+ static const uint32 kStars = 120;
+@@ -211,22 +216,32 @@ RetroPane::_MakePalette()
+ 		SetColor(kShipFirst + i, c);
+ 	}
+ 
+-	// Two banks of sixteen for the four-bit sprites: the same shape drawn
+-	// with a different palette base is a different colour and not a redraw.
++	// Three palettes of the balloons' own. The same shape drawn with a
++	// different palette is a different balloon and not a redraw -- and none of
++	// it costs the world a single one of its 256 colours.
+ 	for (uint32 i = 1; i < 16; i++) {
+ 		float k = (float)i / 15.0f;
+-		rgb_color a;
+-		a.red = (uint8)(20 + k * 60);
+-		a.green = (uint8)(90 + k * 150);
+-		a.blue = (uint8)(120 + k * 120);
+-		a.alpha = 255;
+-		SetColor(kBankA + i, a);
+-		rgb_color b;
+-		b.red = (uint8)(110 + k * 140);
+-		b.green = (uint8)(30 + k * 60);
+-		b.blue = (uint8)(120 + k * 130);
+-		b.alpha = 255;
+-		SetColor(kBankB + i, b);
++		rgb_color calm;
++		calm.red = (uint8)(20 + k * 60);
++		calm.green = (uint8)(90 + k * 150);
++		calm.blue = (uint8)(120 + k * 120);
++		calm.alpha = 255;
++		SetSpriteColor(kPaletteCalm, i, calm);
++
++		rgb_color warm;
++		warm.red = (uint8)(110 + k * 140);
++		warm.green = (uint8)(30 + k * 60);
++		warm.blue = (uint8)(120 + k * 130);
++		warm.alpha = 255;
++		SetSpriteColor(kPaletteWarm, i, warm);
++
++		// what a hit flash is: one number a frame, no pixels touched
++		rgb_color flash;
++		flash.red = 255;
++		flash.green = (uint8)(200 + k * 55);
++		flash.blue = (uint8)(160 + k * 95);
++		flash.alpha = 255;
++		SetSpriteColor(kPaletteFlash, i, flash);
+ 	}
+ }
+ 
+@@ -409,13 +424,17 @@ RetroPane::Loop()
+ 		// and a sprite, which the host scales and turns
+ 		ClearSprites();
+ 		if (fBalloon >= 0) {
+-			// the same sixteen-colour shape three times, two banks between them
++					// the same sixteen-colour shape three times, its own palettes
+ 			for (int32 i = 0; i < 3; i++) {
+ 				double phase = t * 0.13 + i * 0.37;
+ 				int32 x = (int32)(fmod(phase, 1.0) * (kWorldWidth + 80.0)) - 40;
+ 				int32 y = (int32)(14 + i * 22 + sin(t * 0.9 + i) * 6.0);
+-				DrawSprite(fBalloon, x, y, 1.0f + i * 0.5f, 0.0f, 1.0f,
+-					i == 1 ? kBankB : kBankA);
++				// one of them flashes every couple of seconds: the same
++				// pixels, a different palette, nothing redrawn
++				uint8 palette = i == 1 ? kPaletteWarm : kPaletteCalm;
++				if (i == 2 && fmod(t, 2.0) < 0.12)
++					palette = kPaletteFlash;
++				DrawSprite(fBalloon, x, y, 1.0f + i * 0.5f, 0.0f, 1.0f, palette);
+ 			}
+ 		}
+ 		if (fShip >= 0) {
+diff --git a/src/kits/game/GamePane.cpp b/src/kits/game/GamePane.cpp
+index c6a5f1ae9e..ba528472bd 100644
+--- a/src/kits/game/GamePane.cpp
++++ b/src/kits/game/GamePane.cpp
+@@ -129,7 +129,8 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	fBufferOffset = 0;
+ 	fBufferStride = ALIGN_UP((uint64)fStride * worldHeight, 64);
+ 	fPaletteOffset = fBufferOffset + fBufferStride * fBuffers;
+-	uint64 paletteSize = (256 + (uint64)worldHeight * 16) * 4;
++	uint64 paletteSize = (256 + (uint64)worldHeight * 16
++		+ PRDS_SPRITE_PALETTES * 16) * 4;
+ 	fSpriteTableOffset = ALIGN_UP(fPaletteOffset + paletteSize, 64);
+ 	fSpriteArenaOffset = fSpriteTableOffset
+ 		+ PRDS_MAX_SPRITES * sizeof(struct prds_sprite);
+@@ -272,6 +273,28 @@ BGamePane::SetScanlineColors(uint32 row, uint8 first, uint32 count,
+ }
+ 
+ 
++void
++BGamePane::SetSpriteColor(uint8 palette, uint8 index, rgb_color color)
++{
++	if (fStatus != B_OK || palette == 0 || palette >= PRDS_SPRITE_PALETTES
++		|| index == 0 || index >= 16)
++		return;
++	uint32* colors = (uint32*)(fPool + fPoolOffset + fPaletteOffset);
++	colors[256 + fWorldHeight * 16 + palette * 16 + index] = to_bgrx(color);
++}
++
++
++void
++BGamePane::SetSpriteColors(uint8 palette, uint8 first, uint32 count,
++	const rgb_color* colors)
++{
++	if (colors == NULL)
++		return;
++	for (uint32 i = 0; i < count; i++)
++		SetSpriteColor(palette, first + i, colors[i]);
++}
++
++
+ //	#pragma mark - the view
+ 
+ 
+@@ -500,7 +523,7 @@ BGamePane::ClearSprites()
+ 
+ status_t
+ BGamePane::DrawSprite(int32 shape, int32 x, int32 y, float scale,
+-	float rotation, float alpha, uint8 paletteBase, uint32 flags)
++	float rotation, float alpha, uint8 palette, uint32 flags)
+ {
+ 	if (fStatus != B_OK)
+ 		return B_NO_INIT;
+@@ -523,7 +546,7 @@ BGamePane::DrawSprite(int32 shape, int32 x, int32 y, float scale,
+ 	sprite->scale = scale;
+ 	sprite->rotation = rotation;
+ 	sprite->alpha = alpha;
+-	sprite->palette_base = paletteBase;
++	sprite->palette = palette < PRDS_SPRITE_PALETTES ? palette : 0;
+ 	fSpriteCount++;
+ 	return B_OK;
+ }

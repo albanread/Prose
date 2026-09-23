@@ -390,7 +390,8 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
               pane.paletteOffset % 4 == 0,
               pane.offset >= 0, pane.bufferStride >= pane.stride * pane.worldHeight,
               pane.offset + pane.bufferStride * pane.buffers <= poolSize,
-              pane.paletteOffset + (256 + pane.worldHeight * 16) * 4 <= poolSize
+              pane.paletteOffset + (256 + pane.worldHeight * 16
+                  + Pane.spritePalettes * 16) * 4 <= poolSize
         else { return PRDS.errBounds }
         pane.live = true
         presentLock.withLock { paneTable[id] = pane }

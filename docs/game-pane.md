@@ -90,9 +90,10 @@ Index 0 is transparent: the desktop shows through. Indices 1–15 come from a
 machines look like more than they were: a raster split every line, for free,
 because the palette is a texture the fragment shader indexes by row.
 
-The palette block is 256 global BGRA entries followed by `world_height` rows of
-16. With `PRDS_PANE_F_SCANLINE` clear, 1–15 come from the global palette too
-and the rows are ignored.
+The palette block is 256 global BGRA entries, then `world_height` rows of 16
+for the scanline palette, then 64 palettes of 16 for the sprites. With
+`PRDS_PANE_F_SCANLINE` clear, 1–15 come from the global palette too and the
+rows are ignored.
 
 ## Scroll and overscan
 
@@ -130,12 +131,22 @@ inverse-transforming each fragment into sprite space — at retro resolutions a
 64-sprite loop is nothing, and it buys rotation and sub-pixel scale that a byte
 blitter cannot do.
 
-A sprite is 8 or 4 bits a pixel. At four, two pixels share a byte (low nibble
-first) and the palette base picks which bank of sixteen colours the values
-mean: half the memory, and recolouring a sprite is a number rather than a
-redraw. Art is written the way it is drawn — one byte a pixel — and the kit
-packs it. Index 0 is transparent at either depth, and a sprite's colours always
-come from the global palette, so one crossing a raster split does not change
+A sprite is 8 or 4 bits a pixel. At four, two pixels share a byte, low nibble
+first; art is written the way it is drawn, one byte a pixel, and the kit packs
+it. Index 0 is transparent at either depth.
+
+Sprites have **63 palettes of their own**, sixteen colours each, appended to the
+palette block. A four-bit sprite names one of them. Palette 0 is the global
+palette, which is the whole of the rule: an eight-bit sprite indexes the 256 as
+before, a four-bit sprite on palette 0 takes the first fifteen — and with
+per-scanline palettes on, those are the entries the row palette shadows anyway,
+so palette 0 costs the world nothing.
+
+The point is not the four kilobytes it saves. It is that recolouring a sprite —
+a hit flash, a power-up, an enemy in its harder colours — becomes one number a
+frame, and recolouring a group becomes sixteen writes, with no pixels touched.
+That is what the eight-bit machines used their palettes for. A sprite never
+reads the scanline palette, so one crossing a raster split does not change
 colour halfway down.
 
 ## Blitting
@@ -184,5 +195,6 @@ died, so a crashed game does not leave a picture on the screen.
 `BGamePane` in `libgame.so`, `<game/GamePane.h>`. It is a `BDirectWindow`, so
 it is an ordinary window: it has a title bar, it moves, it goes behind other
 windows, it quits. `DirectConnected` forwards the geometry; the program gets
-`World()`, `SetColor()`, `SetScanlineColor()`, the blitters, `SetShader()`,
+`World()`, `SetColor()`, `SetScanlineColor()`, `SetSpriteColor()`, the
+blitters, `SetShader()`,
 `DefineSprite()`, `DrawSprite()`, `Present()` and `WaitForRetrace()`.
