@@ -1,0 +1,355 @@
+From c8479bd5c3edd26cd7e6ebd33decde82278e6ce0 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Wed, 23 Sep 2026 07:25:35 +0100
+Subject: [PATCH] game panes: an overlay that can read the pane
+
+Layer 0 could only go underneath, because a function that draws from its
+own coordinates and nothing else cannot filter anything. A second slot
+now runs over the finished pane and is handed it:
+
+    float3 background(pane p)
+    float4 overlay(float4 colour, pane p)
+
+with p.colour(at) and p.smooth(at) for the picture, p.index(at) for the
+raw palette index and p.palette(i) for a colour. That is the whole of
+what a filter needs, so heat haze, reflection, bloom, aberration and
+curvature stop being things the host has to offer as options and become
+the program's own business. Still nothing else is reachable: not the
+pool at large, not another pane, not the host.
+
+It is `overlay` and not `filter` because MSL already has metal::filter,
+the sampler enumeration, and the two are ambiguous at the call site.
+
+Retro's overlay raises heat off the ground, bleeds the bright pixels and
+drops the light at the corners; 4 turns it on and off.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Prose-Patch: 0109-game-panes-an-overlay-that-can-read-the-pane.patch 11646f97e5d8a9f523cfdfb939f63030110279d2f6c501cae6a99a173e1487ad
+---
+ headers/os/game/GamePane.h                    | 38 +++++++---
+ .../graphics/prose_display/prose_display.h    |  4 +-
+ src/apps/retro/Retro.cpp                      | 74 +++++++++++++++----
+ src/kits/game/GamePane.cpp                    | 32 ++++++--
+ 4 files changed, 117 insertions(+), 31 deletions(-)
+
+diff --git a/headers/os/game/GamePane.h b/headers/os/game/GamePane.h
+index 83736e5606..1aa7973ab7 100644
+--- a/headers/os/game/GamePane.h
++++ b/headers/os/game/GamePane.h
+@@ -110,16 +110,32 @@ public:
+ 									uint32 height,
+ 									game_blit_op op = B_GAME_COPY_KEYED);
+ 
+-	// Layer 0: a fragment function of your own, under the world. Write
++	// Two fragment functions of your own, in Metal Shading Language, compiled
++	// by the host. Layer 0 goes under the world and shows wherever the world
++	// leaves index 0; the overlay goes over everything and is handed the
++	// finished pane, which it may resample anywhere -- which is what a heat
++	// haze, a reflection, a bloom or a screen curvature is. Write
+ 	//
+-	//     float3 background(float2 uv, float2 size, float time, uint frame)
++	//     float3 background(pane p)
++	//     float4 overlay(float4 colour, pane p)
+ 	//
+-	// in Metal Shading Language; the host compiles it. `uv` runs 0 to 1 across
+-	// the view, `size` is the view in pane pixels, `time` is seconds. It draws
+-	// a pixel from its own coordinates and can reach nothing else. When it does
+-	// not compile the call fails and ShaderError() is the compiler's complaint.
+-	// A NULL or empty source takes the layer away again.
+-			status_t			SetShader(const char* metalSource);
++	// (`overlay` and not `filter`: MSL already has `metal::filter`.) The `pane`
++	// struct carries where the fragment is and when -- `p.uv` 0 to 1 across the
++	// view, `p.size` that view in pane pixels, `p.time` in seconds, `p.frame` --
++	// and three ways of looking at the pane:
++	//
++	//     float4 p.colour(float2 at)   the finished pane, nearest
++	//     float4 p.smooth(float2 at)   the same, interpolated
++	//     uint   p.index(float2 at)    the palette index there, 0 transparent
++	//     float3 p.palette(uint i)     a global palette entry
++	//
++	// `colour()` and `smooth()` are black in a background function, which runs
++	// before there is a picture. Neither function can reach anything else: not
++	// the pool at large, not another pane, not the host. A source that does not
++	// compile fails the call and leaves the compiler's complaint in
++	// ShaderError(); a NULL or empty one takes that layer away again.
++			status_t			SetBackgroundShader(const char* metalSource);
++			status_t			SetOverlayShader(const char* metalSource);
+ 			const char*			ShaderError() const;
+ 
+ 	// Sprites are transformed by the host, so they scale and rotate. Define
+@@ -160,6 +176,7 @@ private:
+ 
+ 			void				_Configure();
+ 			void				_Free();
++			status_t			_SetShader(const char* source, uint32 slot);
+ 
+ 			status_t			fStatus;
+ 			int					fDevice;
+@@ -178,8 +195,9 @@ private:
+ 			uint64				fPaletteOffset;
+ 			uint64				fSpriteTableOffset;
+ 			uint64				fSpriteArenaOffset;
+-			uint64				fShaderOffset;
+-			size_t				fShaderSize;
++			uint64				fShaderOffset;		// background, then overlay
++			size_t				fShaderSize;		// each of the two
++			uint64				fFailedShader;		// where the last complaint landed
+ 			size_t				fSpriteArenaSize;
+ 			size_t				fSpriteArenaUsed;
+ 			uint32				fSpriteCount;
+diff --git a/headers/private/graphics/prose_display/prose_display.h b/headers/private/graphics/prose_display/prose_display.h
+index 2636c34266..1d9e839f76 100644
+--- a/headers/private/graphics/prose_display/prose_display.h
++++ b/headers/private/graphics/prose_display/prose_display.h
+@@ -55,6 +55,8 @@
+ /* Layer 0: a fragment function the guest writes, compiled by the host and run
+    under the pane. The source lives in the pane's allocation. */
+ #define PRDS_SHADER_MAX				16384
++#define PRDS_SHADER_BACKGROUND		0	/* layer 0, under the world */
++#define PRDS_SHADER_OVERLAY			1	/* layer 3, over it, and it may resample the pane */
+ 
+ enum {
+ 	PRDS_CMD_SET_MODE			= 0x0100,
+@@ -193,7 +195,7 @@ struct prds_pane_shader {
+ 	uint32	pane_id;
+ 	uint32	length;				/* bytes of source; 0 removes the shader */
+ 	uint64	offset;				/* pool offset of the source text */
+-	uint32	flags;
++	uint32	flags;				/* PRDS_SHADER_BACKGROUND or PRDS_SHADER_OVERLAY */
+ 	uint32	reserved;
+ } _PACKED;
+ 
+diff --git a/src/apps/retro/Retro.cpp b/src/apps/retro/Retro.cpp
+index a04d1f4657..d07d55e33d 100644
+--- a/src/apps/retro/Retro.cpp
++++ b/src/apps/retro/Retro.cpp
+@@ -9,6 +9,7 @@
+  *
+  * 1, 2, 3   the filter: plain, scanlines, tube
+  * 0         layer 0 on and off: the shader sky, or the indexed one
++ * 4         the overlay on and off: heat, bloom and a little falloff
+  * space     stop and start the scroll
+  */
+ 
+@@ -69,7 +70,8 @@ private:
+ 			void				_MakeShip();
+ 			void				_MakeBalloon();
+ 			void				_MakeLogo();
+-			void				_SetShader(bool on);
++			void				_SetSky(bool on);
++			void				_SetOverlay(bool on);
+ 			void				_DrawSky(double t);
+ 			void				_DrawLand();
+ 			void				_DrawStars(int32 frame);
+@@ -78,6 +80,7 @@ private:
+ 			bool				fQuit;
+ 			bool				fScrolling;
+ 			bool				fShaderSky;
++			bool				fOverlay;
+ 			int32				fShip;
+ 			int32				fBalloon;
+ 			uint8				fLogo[32 * 32];
+@@ -125,6 +128,7 @@ RetroPane::RetroPane()
+ 	fQuit(false),
+ 	fScrolling(true),
+ 	fShaderSky(true),
++	fOverlay(true),
+ 	fShip(-1),
+ 	fBalloon(-1)
+ {
+@@ -140,7 +144,8 @@ RetroPane::RetroPane()
+ 	_MakeShip();
+ 	_MakeBalloon();
+ 	_MakeLogo();
+-	_SetShader(true);
++	_SetSky(true);
++	_SetOverlay(true);
+ 
+ 	srand(1);
+ 	for (uint32 i = 0; i < kStars; i++) {
+@@ -182,7 +187,8 @@ RetroPane::Key(int32 key)
+ 		case '1': SetEffect(B_GAME_PANE_PLAIN); break;
+ 		case '2': SetEffect(B_GAME_PANE_SCANLINES); break;
+ 		case '3': SetEffect(B_GAME_PANE_CRT); break;
+-		case '0': _SetShader(!fShaderSky); break;
++		case '0': _SetSky(!fShaderSky); break;
++		case '4': _SetOverlay(!fOverlay); break;
+ 		case ' ': fScrolling = !fScrolling; break;
+ 		case B_ESCAPE: PostMessage(B_QUIT_REQUESTED); break;
+ 	}
+@@ -272,31 +278,31 @@ RetroPane::_MakeBalloon()
+ /// Layer 0: a sky the host's GPU draws, under everything the world leaves
+ /// transparent. Switched off, the indexed sky and its raster bar come back.
+ void
+-RetroPane::_SetShader(bool on)
++RetroPane::_SetSky(bool on)
+ {
+ 	if (!on) {
+-		SetShader(NULL);
++		SetBackgroundShader(NULL);
+ 		fShaderSky = false;
+ 		return;
+ 	}
+ 	static const char* kSky =
+-		"float3 background(float2 uv, float2 size, float time, uint frame)\n"
++		"float3 background(pane p)\n"
+ 		"{\n"
+ 		"    float3 sky = mix(float3(0.02, 0.03, 0.14), float3(0.55, 0.30, 0.42),\n"
+-		"                     pow(clamp(uv.y / 0.62, 0.0, 1.0), 1.5));\n"
+-		"    float aspect = size.x / size.y;\n"
++		"                     pow(clamp(p.uv.y / 0.62, 0.0, 1.0), 1.5));\n"
++		"    float aspect = p.size.x / p.size.y;\n"
+ 		"    float2 sun = float2(0.66, 0.50);\n"
+-		"    float d = distance(float2(uv.x * aspect, uv.y), float2(sun.x * aspect, sun.y));\n"
++		"    float d = distance(float2(p.uv.x * aspect, p.uv.y), float2(sun.x * aspect, sun.y));\n"
+ 		"    sky += float3(1.00, 0.68, 0.33) * exp(-d * 11.0) * 1.4;\n"
+-		"    float band = sin(uv.x * 5.0 + time * 0.30 + sin(uv.y * 13.0) * 0.7);\n"
++		"    float band = sin(p.uv.x * 5.0 + p.time * 0.30 + sin(p.uv.y * 13.0) * 0.7);\n"
+ 		"    sky += float3(0.30, 0.16, 0.24) * smoothstep(0.72, 1.0, band);\n"
+-		"    float2 cell = floor(uv * size);\n"
++		"    float2 cell = floor(p.uv * p.size);\n"
+ 		"    float star = fract(sin(dot(cell, float2(12.9898, 78.233))) * 43758.5453);\n"
+-		"    if (star > 0.9970 && uv.y < 0.45)\n"
+-		"        sky += float3(0.55 + 0.45 * sin(time * 3.0 + star * 90.0));\n"
++		"    if (star > 0.9970 && p.uv.y < 0.45)\n"
++		"        sky += float3(0.55 + 0.45 * sin(p.time * 3.0 + star * 90.0));\n"
+ 		"    return sky;\n"
+ 		"}\n";
+-	if (SetShader(kSky) != B_OK) {
++	if (SetBackgroundShader(kSky) != B_OK) {
+ 		fprintf(stderr, "Retro: layer 0 would not compile:\n%s\n", ShaderError());
+ 		fShaderSky = false;
+ 		return;
+@@ -305,6 +311,46 @@ RetroPane::_SetShader(bool on)
+ }
+ 
+ 
++/// The overlay: handed the finished pane, and free to look anywhere in it.
++/// Heat rising off the ground displaces what is behind it, bright pixels
++/// bleed into their neighbours, and the light falls off at the corners --
++/// none of which the pane could do for itself, and none of which the pane
++/// has to know about.
++void
++RetroPane::_SetOverlay(bool on)
++{
++	if (!on) {
++		SetOverlayShader(NULL);
++		fOverlay = false;
++		return;
++	}
++	static const char* kOverlay =
++		"float4 overlay(float4 colour, pane p)\n"
++		"{\n"
++		"    float heat = smoothstep(0.34, 0.60, p.uv.y) * (1.0 - smoothstep(0.60, 0.78, p.uv.y));\n"
++		"    float2 uv = p.uv + float2(sin(p.uv.y * 60.0 + p.time * 4.0) * 0.007 * heat, 0.0);\n"
++		"    float4 c = p.smooth(uv);\n"
++		"    float4 glow = float4(0.0);\n"
++		"    for (int i = 0; i < 4; i++) {\n"
++		"        float a = float(i) * 1.5707963 + 0.4;\n"
++		"        glow += p.colour(uv + float2(cos(a), sin(a)) * 0.013);\n"
++		"    }\n"
++		"    glow *= 0.25;\n"
++		"    float bright = max(max(glow.r, glow.g), glow.b);\n"
++		"    c.rgb += glow.rgb * smoothstep(0.55, 1.0, bright) * 0.6;\n"
++		"    float2 d = p.uv * 2.0 - 1.0;\n"
++		"    c.rgb *= 1.0 - 0.18 * dot(d, d);\n"
++		"    return c;\n"
++		"}\n";
++	if (SetOverlayShader(kOverlay) != B_OK) {
++		fprintf(stderr, "Retro: the overlay would not compile:\n%s\n", ShaderError());
++		fOverlay = false;
++		return;
++	}
++	fOverlay = true;
++}
++
++
+ void
+ RetroPane::_MakeShip()
+ {
+diff --git a/src/kits/game/GamePane.cpp b/src/kits/game/GamePane.cpp
+index ba528472bd..d09b7c5bf1 100644
+--- a/src/kits/game/GamePane.cpp
++++ b/src/kits/game/GamePane.cpp
+@@ -135,12 +135,15 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	fSpriteArenaOffset = fSpriteTableOffset
+ 		+ PRDS_MAX_SPRITES * sizeof(struct prds_sprite);
+ 	fSpriteArenaOffset = ALIGN_UP(fSpriteArenaOffset, 64);
++	// two shader buffers, one for each layer: a source goes in, and the
++	// compiler's complaint comes back in its place
+ 	fShaderSize = PRDS_SHADER_MAX;
+ 	fShaderOffset = ALIGN_UP(fSpriteArenaOffset + fSpriteArenaSize, 64);
++	fFailedShader = fShaderOffset;
+ 
+ 	struct prds_pane_alloc alloc;
+ 	memset(&alloc, 0, sizeof(alloc));
+-	alloc.size = fShaderOffset + fShaderSize;
++	alloc.size = fShaderOffset + fShaderSize * 2;
+ 	alloc.format = PRDS_PANE_INDEXED8;
+ 	alloc.world_width = worldWidth;
+ 	alloc.world_height = worldHeight;
+@@ -156,7 +159,7 @@ BGamePane::BGamePane(BRect frame, const char* title, uint32 worldWidth,
+ 	fPaneID = alloc.pane_id;
+ 	fPoolOffset = alloc.pool_offset;
+ 
+-	memset(fPool + fPoolOffset, 0, (size_t)(fShaderOffset + fShaderSize));
++	memset(fPool + fPoolOffset, 0, (size_t)(fShaderOffset + fShaderSize * 2));
+ 	fStatus = B_OK;
+ }
+ 
+@@ -477,26 +480,43 @@ BGamePane::DefineSprite(const uint8* pixels, uint32 width, uint32 height, uint32
+ 
+ 
+ status_t
+-BGamePane::SetShader(const char* metalSource)
++BGamePane::SetBackgroundShader(const char* metalSource)
++{
++	return _SetShader(metalSource, PRDS_SHADER_BACKGROUND);
++}
++
++
++status_t
++BGamePane::SetOverlayShader(const char* metalSource)
++{
++	return _SetShader(metalSource, PRDS_SHADER_OVERLAY);
++}
++
++
++status_t
++BGamePane::_SetShader(const char* metalSource, uint32 slot)
+ {
+ 	if (fStatus != B_OK)
+ 		return B_NO_INIT;
+ 	BAutolock lock(fLock);
+ 
++	uint64 at = fShaderOffset + (uint64)slot * fShaderSize;
+ 	struct prds_pane_shader_request request;
+ 	memset(&request, 0, sizeof(request));
+ 	request.pane_id = fPaneID;
+-	request.offset = fShaderOffset;
++	request.offset = at;
++	request.flags = slot;
+ 
+ 	size_t length = metalSource != NULL ? strlen(metalSource) : 0;
+ 	if (length > 0) {
+ 		if (length + 1 > fShaderSize)
+ 			return B_NAME_TOO_LONG;
+-		memcpy(fPool + fPoolOffset + fShaderOffset, metalSource, length + 1);
++		memcpy(fPool + fPoolOffset + at, metalSource, length + 1);
+ 		request.length = (uint32)length;
+ 	}
+ 	if (ioctl(fDevice, PRDS_PANE_SHADER, &request, sizeof(request)) != 0) {
+ 		// the host has put the compiler's complaint where the source was
++		fFailedShader = at;
+ 		return B_BAD_DATA;
+ 	}
+ 	return B_OK;
+@@ -508,7 +528,7 @@ BGamePane::ShaderError() const
+ {
+ 	if (fStatus != B_OK)
+ 		return "";
+-	const char* text = (const char*)(fPool + fPoolOffset + fShaderOffset);
++	const char* text = (const char*)(fPool + fPoolOffset + fFailedShader);
+ 	return memchr(text, 0, fShaderSize) != NULL ? text : "";
+ }
+ 

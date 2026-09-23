@@ -7,7 +7,8 @@ EXAMPLES = \
 	03-window \
 	04-drawing \
 	05-attributes \
-	06-threads
+	06-threads \
+	07-game
 
 all clean:
 	@for example in $(EXAMPLES); do \

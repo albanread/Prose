@@ -1120,6 +1120,8 @@ final class Presenter: NSObject {
     var snowPipeline: MTLRenderPipelineState!
     var panePipeline: MTLRenderPipelineState!      // retro mode (gamepane.swift)
     private var poolBuffer: MTLBuffer?             // the surface pool, on this device
+    private var paneTextures: [Int: MTLTexture] = [:]   // a filtered pane's own picture
+    private var blackTexture: MTLTexture?          // what a background function sees
     var layer: CAMetalLayer!
     var window: NSWindow!
     var view: MetalView!
@@ -1352,6 +1354,10 @@ final class Presenter: NSObject {
             $0.visible && $0.flags & Pane.flagFullscreen != 0
         }
         let cb = queue.makeCommandBuffer()!
+        // A pane with an overlay is drawn into a picture of its own first, so
+        // the overlay has something to resample. Its pass must end before the
+        // drawable's begins.
+        let filtered = hasPicture ? encodePaneImages(gpu, cb) : [:]
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = drawable.texture
         rp.colorAttachments[0].storeAction = .store
@@ -1377,7 +1383,7 @@ final class Presenter: NSObject {
             enc.setFragmentBytes(&p, length: MemoryLayout<SnowParams>.stride, index: 0)
         }
         if !covered { enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3) }
-        if hasPicture { drawPanes(gpu, enc, surface, fit(for: layer.drawableSize, surface)) }
+        if hasPicture { drawPanes(gpu, enc, surface, fit(for: layer.drawableSize, surface), filtered) }
         enc.endEncoding()
         cb.present(drawable)
         cb.commit()
@@ -1406,6 +1412,7 @@ final class Presenter: NSObject {
               let cb = queue.makeCommandBuffer() else { return nil }
 
         presentLock.lock()
+        let filtered = encodePaneImages(gpu, cb)
         let covered = gpu.panes.contains { $0.visible && $0.flags & Pane.flagFullscreen != 0 }
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = texture
@@ -1421,7 +1428,7 @@ final class Presenter: NSObject {
                 enc.setFragmentBytes(&p, length: MemoryLayout<ShaderParams>.stride, index: 1)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             }
-            drawPanes(gpu, enc, surface, p)
+            drawPanes(gpu, enc, surface, p, filtered)
             enc.endEncoding()
         }
         cb.commit()
@@ -1443,43 +1450,128 @@ final class Presenter: NSObject {
                        intent: .defaultIntent)
     }
 
-    private func drawPanes(_ gpu: PresentSource, _ enc: MTLRenderCommandEncoder,
-                           _ surface: FrameSurface, _ fit: ShaderParams) {
-        guard panePipeline != nil, let memory = gpu.poolMemory else { return }
-        // The pool has to be wrapped by the device that draws with it; the
-        // display device makes its own for compute and that is not this one.
-        if poolBuffer == nil {
+    /// The pool as this device sees it, wrapped once. The display device makes
+    /// its own for compute and that is not this one.
+    private func pool(_ gpu: PresentSource) -> MTLBuffer? {
+        if poolBuffer == nil, let memory = gpu.poolMemory {
             poolBuffer = device.makeBuffer(bytesNoCopy: memory.base, length: memory.length,
                                            options: .storageModeShared, deallocator: nil)
         }
-        guard let pool = poolBuffer else { return }
-        var bound = false
-        for pane in gpu.panes where pane.visible {
-            var p = PaneParams()
-            p.worldWidth = UInt32(pane.worldWidth)
-            p.worldHeight = UInt32(pane.worldHeight)
-            p.strideBytes = UInt32(pane.stride)
-            p.bufferOffset = UInt32(pane.liveOffset)
-            p.paletteWords = UInt32(pane.paletteOffset / 4)
-            p.format = pane.format
-            p.flags = pane.flags
-            p.effect = pane.effect
-            p.scroll = SIMD2<Int32>(Int32(pane.scrollX), Int32(pane.scrollY))
-            p.view = SIMD2<UInt32>(UInt32(pane.viewWidth), UInt32(pane.viewHeight))
+        return poolBuffer
+    }
+
+    /// One pixel of nothing: what `colour()` reads in a background function,
+    /// which runs before there is a picture to read.
+    private func black() -> MTLTexture? {
+        if blackTexture == nil {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                width: 1, height: 1, mipmapped: false)
+            desc.usage = .shaderRead
+            desc.storageMode = .shared
+            blackTexture = device.makeTexture(descriptor: desc)
+            var zero: UInt32 = 0
+            blackTexture?.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                                  withBytes: &zero, bytesPerRow: 4)
+        }
+        return blackTexture
+    }
+
+    /// The uniforms for one pane. `fit` nil means the pane's own picture: the
+    /// view fills the target exactly, so the mapping is the identity and there
+    /// is nothing to clip against.
+    private func paneParams(_ pane: PaneState, _ fit: ShaderParams?,
+                            _ surface: FrameSurface?) -> PaneParams {
+        var p = PaneParams()
+        p.worldWidth = UInt32(pane.worldWidth)
+        p.worldHeight = UInt32(pane.worldHeight)
+        p.strideBytes = UInt32(pane.stride)
+        p.bufferOffset = UInt32(pane.liveOffset)
+        p.paletteWords = UInt32(pane.paletteOffset / 4)
+        p.format = pane.format
+        p.flags = pane.flags
+        p.effect = pane.effect
+        p.scroll = SIMD2<Int32>(Int32(pane.scrollX), Int32(pane.scrollY))
+        p.view = SIMD2<UInt32>(UInt32(pane.viewWidth), UInt32(pane.viewHeight))
+        p.spriteCount = UInt32(pane.spriteCount)
+        p.spriteWords = UInt32(pane.spriteOffset / 4)
+        p.frame = UInt32(truncatingIfNeeded: ticks)
+        p.time = Float(CACurrentMediaTime() - paneEpoch)
+        if let fit, let surface {
             p.dest = SIMD4<Float>(Float(pane.destX), Float(pane.destY),
                                   Float(pane.destWidth), Float(pane.destHeight))
             p.scale = fit.scale
             p.bias = fit.bias
             p.guest = SIMD2<Float>(Float(surface.width), Float(surface.height))
             p.clipCount = UInt32(pane.clip.count)
-            p.spriteCount = UInt32(pane.spriteCount)
-            p.spriteWords = UInt32(pane.spriteOffset / 4)
-            p.frame = UInt32(truncatingIfNeeded: ticks)
-            p.time = Float(CACurrentMediaTime() - paneEpoch)
+        } else {
+            p.dest = SIMD4<Float>(0, 0, Float(pane.viewWidth), Float(pane.viewHeight))
+            p.scale = SIMD2<Float>(1, 1)
+            p.bias = SIMD2<Float>(0, 0)
+            p.guest = SIMD2<Float>(Float(pane.viewWidth), Float(pane.viewHeight))
+            p.clipCount = 1
+        }
+        return p
+    }
 
-            var clip = pane.clip.map {
-                SIMD4<UInt32>(UInt32($0.x), UInt32($0.y), UInt32($0.w), UInt32($0.h))
+    private func clipRects(_ pane: PaneState, _ own: Bool) -> [SIMD4<UInt32>] {
+        if own { return [SIMD4<UInt32>(0, 0, UInt32(pane.viewWidth), UInt32(pane.viewHeight))] }
+        return pane.clip.map { SIMD4<UInt32>(UInt32($0.x), UInt32($0.y), UInt32($0.w), UInt32($0.h)) }
+    }
+
+    /// Draw each overlaid pane into a picture of its own, at the pane's own
+    /// resolution — which is what the overlay then resamples, and why a heat
+    /// haze or a bloom moves in the pane's pixels rather than the Mac's.
+    private func encodePaneImages(_ gpu: PresentSource, _ cb: MTLCommandBuffer) -> [Int: MTLTexture] {
+        guard panePipeline != nil, let pool = pool(gpu) else { return [:] }
+        var made: [Int: MTLTexture] = [:]
+        for (id, pane) in gpu.panes.enumerated() where pane.visible && pane.filter != nil {
+            let width = pane.viewWidth, height = pane.viewHeight
+            var texture = paneTextures[id]
+            if texture == nil || texture!.width != width || texture!.height != height {
+                let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                    width: width, height: height, mipmapped: false)
+                desc.usage = [.renderTarget, .shaderRead]
+                desc.storageMode = .private
+                texture = device.makeTexture(descriptor: desc)
+                paneTextures[id] = texture
             }
+            guard let texture else { continue }
+
+            let rp = MTLRenderPassDescriptor()
+            rp.colorAttachments[0].texture = texture
+            rp.colorAttachments[0].loadAction = .clear
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+            rp.colorAttachments[0].storeAction = .store
+            guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { continue }
+            var p = paneParams(pane, nil, nil)
+            var clip = clipRects(pane, true)
+            enc.setFragmentBuffer(pool, offset: 0, index: 0)
+            enc.setFragmentBuffer(pool, offset: 0, index: 2)
+            enc.setFragmentBytes(&p, length: MemoryLayout<PaneParams>.stride, index: 1)
+            enc.setFragmentBytes(&clip, length: MemoryLayout<SIMD4<UInt32>>.stride * clip.count, index: 3)
+            enc.setFragmentTexture(black(), index: 0)
+            if let background = pane.background {
+                enc.setRenderPipelineState(background)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            }
+            enc.setRenderPipelineState(panePipeline)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            enc.endEncoding()
+            made[id] = texture
+        }
+        return made
+    }
+
+    /// Retro mode: the guest's palette indices, straight from the pool, over
+    /// the desktop that has just been drawn. Called holding `presentLock`.
+    private func drawPanes(_ gpu: PresentSource, _ enc: MTLRenderCommandEncoder,
+                           _ surface: FrameSurface, _ fit: ShaderParams,
+                           _ filtered: [Int: MTLTexture]) {
+        guard panePipeline != nil, let pool = pool(gpu) else { return }
+        var bound = false
+        for (id, pane) in gpu.panes.enumerated() where pane.visible {
+            var p = paneParams(pane, fit, surface)
+            var clip = clipRects(pane, false)
             if !bound {
                 enc.setFragmentBuffer(pool, offset: 0, index: 0)
                 enc.setFragmentBuffer(pool, offset: 0, index: 2)
@@ -1487,9 +1579,18 @@ final class Presenter: NSObject {
             }
             enc.setFragmentBytes(&p, length: MemoryLayout<PaneParams>.stride, index: 1)
             enc.setFragmentBytes(&clip, length: MemoryLayout<SIMD4<UInt32>>.stride * clip.count, index: 3)
+
+            if let overlay = pane.filter, let picture = filtered[id] {
+                // everything is already in the picture: one pass to put it up
+                enc.setFragmentTexture(picture, index: 0)
+                enc.setRenderPipelineState(overlay)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                continue
+            }
+            enc.setFragmentTexture(black(), index: 0)
             // layer 0 underneath, then the world and its sprites over it
-            if let shader = pane.shader {
-                enc.setRenderPipelineState(shader)
+            if let background = pane.background {
+                enc.setRenderPipelineState(background)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             }
             enc.setRenderPipelineState(panePipeline)

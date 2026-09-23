@@ -3,9 +3,12 @@
 // lookup, per-scanline palettes, scroll, sprites and a CRT filter — with no
 // copy anywhere between the guest's bytes and the drawable.
 //
-// Three layers, bottom to top: a fragment function the guest itself wrote and
-// this compiled (layer 0), the indexed world (layer 1), and sprites, which are
-// composited with the world because they share its palette.
+// Four layers, bottom to top: a fragment function the guest itself wrote and
+// this compiled (layer 0), the indexed world (layer 1), sprites, which are
+// composited with the world because they share its palette, and a second
+// guest-written function that sees the finished pane and may resample it
+// (layer 3) -- which is what makes a filter of any kind the program's own
+// business rather than something this has to offer as an option.
 //
 // Contract: docs/game-pane.md. The guest side is the PRDS pane commands
 // (0x0200-0x0204) and BGamePane in libgame.
@@ -20,6 +23,8 @@ enum Pane {
     static let spritePalettes = 64
     static let maxBuffers = 3
     static let maxShaderBytes = 16384
+    static let slotBackground: UInt32 = 0
+    static let slotFilter: UInt32 = 1
 
     static let formatIndexed8: UInt32 = 1
     static let formatB8G8R8X8: UInt32 = 2
@@ -50,8 +55,9 @@ struct PaneState {
     var bufferIndex = 0
     var spriteOffset = 0, spriteCount = 0
 
-    /// Layer 0, compiled when the guest sent it (gone when it sends none).
-    var shader: MTLRenderPipelineState?
+    /// The guest's own shaders, compiled when it sent them.
+    var background: MTLRenderPipelineState?
+    var filter: MTLRenderPipelineState?
 
     var visible: Bool {
         live && flags & Pane.flagVisible != 0 && !clip.isEmpty
@@ -113,6 +119,52 @@ vertex VOut pane_vmain(uint vid [[vertex_id]]) {
     o.uv = float2((p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5);
     return o;
 }
+
+// What a guest-written function is handed. It carries where it is and when,
+// and the three ways of looking at the pane: the finished picture, the raw
+// palette index, and the palette itself. Nothing else is reachable from it --
+// not the other panes, not the pool at large, not the host.
+struct pane {
+    float2 uv;          // 0 to 1 across the view
+    float2 size;        // the view, in the pane's own pixels
+    float time;         // seconds
+    uint frame;
+
+    device const uchar *bytes;
+    device const uint *pool;
+    constant PaneParams *par;
+    texture2d<float> image;
+
+    // The pane as it stands: layer 0, the world and the sprites, at the pane's
+    // own resolution. Black in a background function, which runs before there
+    // is one. Alpha is 0 where the pane is transparent.
+    float4 colour(float2 at) const {
+        constexpr sampler nearest(coord::normalized, address::clamp_to_edge, filter::nearest);
+        return image.sample(nearest, at);
+    }
+
+    // The same, interpolated: what a displacement wants when it moves by less
+    // than a whole pixel.
+    float4 smooth(float2 at) const {
+        constexpr sampler linear(coord::normalized, address::clamp_to_edge, filter::linear);
+        return image.sample(linear, at);
+    }
+
+    // The palette index under a point, scroll and all; 0 is transparent. This
+    // reads the world buffer, so it answers in a background function too.
+    uint index(float2 at) const {
+        float2 w = at * size + float2(par->scroll);
+        if (any(w < 0.0) || w.x >= float(par->worldWidth) || w.y >= float(par->worldHeight))
+            return 0u;
+        return bytes[par->bufferOffset + uint(w.y) * par->strideBytes + uint(w.x)];
+    }
+
+    // A global palette entry.
+    float3 palette(uint i) const {
+        uint v = pool[par->paletteWords + min(i, 255u)];
+        return float3(float((v >> 16) & 0xFF), float((v >> 8) & 0xFF), float(v & 0xFF)) / 255.0;
+    }
+};
 
 // Where this fragment falls in the pane's own view, or negative when it falls
 // outside the window, outside the clip list, or outside the view itself.
@@ -266,24 +318,47 @@ fragment float4 pane_fmain(VOut in [[stage_in]],
 }
 """
 
-/// Layer 0. The guest writes one function; this puts it in a shader.
+/// The guest writes one function; this puts it in a shader.
 ///
-///     float3 background(float2 uv, float2 size, float time, uint frame)
+///     float3 background(pane p)                    // layer 0, under the world
+///     float4 overlay(float4 colour, pane p)        // layer 3, over it
 ///
-/// `uv` runs 0 to 1 across the pane's view, `size` is that view in pane pixels,
-/// `time` is seconds since the pane was made. Everything Metal's standard
-/// library offers is available, and nothing else: it draws one pixel from its
-/// own coordinates and cannot reach the pool, the palette or the host.
-func layerShaderSource(_ user: String) -> String {
-    paneShaderPrelude + "\n#line 1\n" + user + """
+/// It is `overlay` and not `filter` because MSL already has `metal::filter`,
+/// the sampler enumeration, and the two are ambiguous at the call site.
+///
+/// `pane` is the struct in the prelude: where the fragment is, when, and the
+/// three ways of looking at the pane. A filter is handed the finished picture
+/// at that point and may resample it anywhere, which is what a heat haze, a
+/// reflection, a bloom or a curvature needs. Everything Metal's standard
+/// library offers is available, and nothing else: neither function can reach
+/// the pool at large, the other panes or the host.
+func layerShaderSource(_ user: String, filter: Bool) -> String {
+    let entry = filter ? """
 
-fragment float4 pane_layer0(VOut in [[stage_in]],
+fragment float4 pane_filter(VOut in [[stage_in]],
+                            device const uchar *bytes [[buffer(0)]],
                             constant PaneParams &p [[buffer(1)]],
-                            constant uint4 *clip [[buffer(3)]]) {
+                            device const uint *pool [[buffer(2)]],
+                            constant uint4 *clip [[buffer(3)]],
+                            texture2d<float> image [[texture(0)]]) {
     float2 viewPos = pane_locate(in, p, clip);
     if (viewPos.x < 0.0) discard_fragment();
-    float2 size = float2(p.view);
-    return float4(background(viewPos / size, size, p.time, p.frame), 1.0);
+    pane q = { viewPos / float2(p.view), float2(p.view), p.time, p.frame, bytes, pool, &p, image };
+    return overlay(q.colour(q.uv), q);
+}
+""" : """
+
+fragment float4 pane_layer0(VOut in [[stage_in]],
+                            device const uchar *bytes [[buffer(0)]],
+                            constant PaneParams &p [[buffer(1)]],
+                            device const uint *pool [[buffer(2)]],
+                            constant uint4 *clip [[buffer(3)]],
+                            texture2d<float> image [[texture(0)]]) {
+    float2 viewPos = pane_locate(in, p, clip);
+    if (viewPos.x < 0.0) discard_fragment();
+    pane q = { viewPos / float2(p.view), float2(p.view), p.time, p.frame, bytes, pool, &p, image };
+    return float4(background(q), 1.0);
 }
 """
+    return paneShaderPrelude + "\n#line 1\n" + user + entry
 }

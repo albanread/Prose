@@ -474,10 +474,14 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
         let id = Int(leU32(req, 16))
         guard id < Pane.maxPanes else { return PRDS.errInvalid }
         let length = Int(leU32(req, 20)), offset = Int(leU64(req, 24))
+        let slot = leU32(req, 32) & 1
+        let filter = slot == Pane.slotFilter
         guard length <= Pane.maxShaderBytes, offset >= 0,
               offset + max(length, 1) <= poolSize else { return PRDS.errBounds }
         if length == 0 {
-            presentLock.withLock { paneTable[id].shader = nil }
+            presentLock.withLock {
+                if filter { paneTable[id].filter = nil } else { paneTable[id].background = nil }
+            }
             seq.withLock { $0 += 1 }
             return PRDS.respOK
         }
@@ -488,15 +492,23 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
             return PRDS.errState
         }
         do {
-            let library = try device.makeLibrary(source: layerShaderSource(source), options: nil)
+            let library = try device.makeLibrary(source: layerShaderSource(source, filter: filter),
+                                                 options: nil)
             let desc = MTLRenderPipelineDescriptor()
             desc.vertexFunction = library.makeFunction(name: "pane_vmain")
-            desc.fragmentFunction = library.makeFunction(name: "pane_layer0")
+            desc.fragmentFunction = library.makeFunction(name: filter ? "pane_filter" : "pane_layer0")
             desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            desc.colorAttachments[0].isBlendingEnabled = true
+            desc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            desc.colorAttachments[0].sourceAlphaBlendFactor = .one
+            desc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             let pipeline = try device.makeRenderPipelineState(descriptor: desc)
-            presentLock.withLock { paneTable[id].shader = pipeline }
+            presentLock.withLock {
+                if filter { paneTable[id].filter = pipeline } else { paneTable[id].background = pipeline }
+            }
             seq.withLock { $0 += 1 }
-            log("prds: pane \(id): layer 0 compiled, \(length) bytes")
+            log("prds: pane \(id): \(filter ? "overlay" : "layer 0") compiled, \(length) bytes")
             return PRDS.respOK
         } catch {
             let message = "\(error)"
@@ -505,8 +517,10 @@ final class PRDSDevice: NSObject, PresentSource, VZCustomVirtioDeviceConfigurati
                 memcpy(pool + offset, text, room)
                 (pool + offset + room).storeBytes(of: UInt8(0), as: UInt8.self)
             }
-            presentLock.withLock { paneTable[id].shader = nil }
-            log("prds: pane \(id): layer 0 did not compile: \(message)")
+            presentLock.withLock {
+                if filter { paneTable[id].filter = nil } else { paneTable[id].background = nil }
+            }
+            log("prds: pane \(id): \(filter ? "overlay" : "layer 0") did not compile: \(message)")
             return PRDS.errInvalid
         }
     }

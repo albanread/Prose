@@ -12,6 +12,7 @@ thing.
 | `04-drawing` | A view that paints itself |
 | `05-attributes` | Named values beside a file's contents, which the file system indexes |
 | `06-threads` | Threads, and the lock that keeps them honest |
+| `07-game` | A game pane: palette indices, a sprite, and a filter of your own |
 
 ## Building them
 

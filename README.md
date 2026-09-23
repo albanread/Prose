@@ -104,7 +104,7 @@ their work produced, and everything that makes it good is theirs.
   Virtualization.framework VM with custom virtio devices of its own — a
   shared-surface display, keyboard and tablet, a MIDI port — plus networking,
   sound, and a Mac folder shared into the guest.
-- **`patches/haiku`** — 105 patches against Haiku at hrev60122, applied to a
+- **`patches/haiku`** — 107 patches against Haiku at hrev60122, applied to a
   local tree to build the guest.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
@@ -157,12 +157,16 @@ per-scanline palettes, scrolling, sprites that scale and rotate, and a CRT
 filter, all on the Mac's GPU. Nothing is copied between the byte a program
 writes and the drawable.
 
-Under the indexed world sits **layer 0**: a fragment function the program itself
-wrote, sent as Metal source and compiled by the host, showing wherever the world
-leaves index 0. That is the division of labour the design is for — smooth things
-(skies, gradients, water) are what a shader is good at and what an indexed
-buffer is worst at; sharp things (tiles, text, sprites) are the other way round.
-A program gets both in one window and neither has to imitate the other.
+Under the indexed world sits **layer 0**, and over everything an **overlay**:
+two fragment functions the program itself wrote, sent as Metal source and
+compiled by the host. That is the division of labour the design is for — smooth
+things (skies, gradients, water) are what a shader is good at and what an
+indexed buffer is worst at; sharp things (tiles, text, sprites) are the other
+way round. A program gets both in one window and neither has to imitate the
+other. The overlay is handed the finished pane and may resample it anywhere, so
+a heat haze, a reflection, a bloom or a screen curvature is something a program
+writes rather than something Prose has to have thought of.
+[docs/writing-a-game.md](docs/writing-a-game.md) is the guide.
 
 It is a `BDirectWindow`, for the half of `BDirectWindow` worth having. A direct
 client on Prose does get a real pointer into the front buffer and pixels written
@@ -242,9 +246,9 @@ cd ~/examples && make
 | MIDI | The guest's MIDI played by the Mac's synthesizer and published to CoreMIDI |
 | Storage | NVMe, virtio-block, and a Mac folder mounted in the guest |
 | Automation | A portal device the guest answers on — run a command, get its exit status — and an AppleScript dictionary |
-| Games | Retro mode: indexed-palette panes composited by the Mac's GPU — per-scanline palettes, scrolling, sprites, a CRT filter ([docs/game-pane.md](docs/game-pane.md)) |
+| Games | Retro mode: indexed-palette panes composited by the Mac's GPU — per-scanline and sprite palettes, scrolling, sprites, and two shader slots of the program's own ([docs/writing-a-game.md](docs/writing-a-game.md)) |
 | Look | Two conventional window frames of its own, and themes — wallpaper, colours and frame together — chosen from the host's View menu ([docs/decorators.md](docs/decorators.md)) |
-| Development | clang and lld (LLVM 23), `make`, Haiku's headers and link libraries, and six examples: the machine compiles and runs its own programs |
+| Development | clang and lld (LLVM 23), `make`, Haiku's headers and link libraries, and seven examples: the machine compiles and runs its own programs |
 | Software | ~120 applications, a web browser, codecs, OpenSSL; ProseWriter, a word processor, and Sisong, a programmer's editor, ported and built here |
 
 ## Requirements
@@ -378,6 +382,8 @@ table there also records why each one exists.
 | 0106 | `libgame`: `BGamePane.SetShader()` and sixteen-colour sprites in palette banks |
 | 0107 | Retro: a shader sky under the indexed world, and balloons in two banks |
 | 0108 | Game panes: 63 sprite palettes of sixteen, so sprites stop competing with the world for its 256 colours |
+| 0109 | Game panes: an overlay shader handed the finished pane, which it may resample — so filters are the program's own business |
+| 0110 | `prose_examples` 1.0-2: `07-game`, a complete game pane among the examples |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

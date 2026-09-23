@@ -101,21 +101,34 @@ The world buffer may be larger than the view. `scroll_x` / `scroll_y` pick the
 top-left of the visible window, in world pixels, and the shader offsets its
 sample. Scrolling costs nothing: no blit, no copy, one integer per frame.
 
-## Layer 0: a shader of your own
+## Shaders of your own
 
-Under the world sits a fragment function the program itself wrote. It sends the
-Metal source — in its own allocation, so only an offset crosses the queue — the
-host compiles it, and it runs wherever the world leaves index 0. The program
-writes one function:
+Two fragment functions the program itself wrote, one under the world and one
+over everything. It sends the Metal source — in its own allocation, so only an
+offset crosses the queue — and the host compiles it.
 
-    float3 background(float2 uv, float2 size, float time, uint frame)
+    float3 background(pane p)                // layer 0, under the world
+    float4 overlay(float4 colour, pane p)    // layer 3, over it
 
-`uv` runs 0 to 1 across the view, `size` is that view in pane pixels, `time` is
-seconds. Metal's standard library is there and nothing else: it draws a pixel
-from its own coordinates and cannot reach the pool, the palette, the other
-panes or the host. Compilation is synchronous, so the call answers yes or no;
-when the answer is no, the compiler's complaint is written back into the buffer
-the source came from and `ShaderError()` reads it.
+(`overlay` and not `filter`: MSL already has `metal::filter`, the sampler
+enumeration, and the two are ambiguous at the call site.)
+
+`pane` carries where the fragment is and when — `p.uv` 0 to 1 across the view,
+`p.size` that view in pane pixels, `p.time`, `p.frame` — and three ways of
+looking at the pane: `p.colour(at)` and `p.smooth(at)` for the finished
+picture, `p.index(at)` for the raw palette index, `p.palette(i)` for a colour.
+
+The overlay being handed the picture, and free to resample it anywhere, is what
+makes a heat haze, a reflection, a bloom, chromatic aberration or a screen
+curvature the program's own business rather than something this has to offer as
+an option. To have something to resample, an overlaid pane is drawn into a
+picture of its own first, at the pane's own resolution — so a haze moves in the
+pane's pixels rather than the Mac's, and a pane with no overlay pays nothing.
+
+Metal's standard library is there and nothing else: neither function can reach
+the pool at large, the other panes or the host. Compilation is synchronous, so
+the call answers yes or no; when the answer is no, the compiler's complaint is
+written back into the buffer the source came from and `ShaderError()` reads it.
 
 That is the division of labour the whole design is for. Smooth things — skies,
 gradients, plasma, water — are what a shader is good at and what an indexed
@@ -158,10 +171,10 @@ faster than any round trip to the host would. The GPU is for what the GPU is
 good at — palette lookup, scaling, rotation, filters — and the byte-banging
 stays where the program is.
 
-## Effects
+## The built-in filter
 
-Per-pane, chosen by the client, applied by the host after compositing: none,
-scanlines, or a CRT (scanlines, aperture mask, a little bloom and corner
+Per-pane, chosen by the client, applied by the host after compositing and
+before the overlay sees it: none, scanlines, or a CRT (scanlines, aperture mask, a little bloom and corner
 falloff). They are fragment-shader passes over the pane's rectangle only; the
 desktop around it is untouched.
 
@@ -175,7 +188,7 @@ Four commands on the PRDS control queue, alongside SET_MODE and COMMIT.
   the world is shown, scroll, flags, effect, and the clip list.
 - `PRDS_CMD_PANE_PRESENT` — which buffer is live, and the sprite list.
 - `PRDS_CMD_PANE_DESTROY`.
-- `PRDS_CMD_PANE_SHADER` — where layer 0's source is, and how long it is.
+- `PRDS_CMD_PANE_SHADER` — which slot, where its source is, and how long.
 
 CONFIG is sent when the window moves; PRESENT once a frame. Both are small:
 PRESENT is 32 bytes and never carries pixels.
@@ -196,5 +209,7 @@ died, so a crashed game does not leave a picture on the screen.
 it is an ordinary window: it has a title bar, it moves, it goes behind other
 windows, it quits. `DirectConnected` forwards the geometry; the program gets
 `World()`, `SetColor()`, `SetScanlineColor()`, `SetSpriteColor()`, the
-blitters, `SetShader()`,
-`DefineSprite()`, `DrawSprite()`, `Present()` and `WaitForRetrace()`.
+blitters, `SetBackgroundShader()`, `SetOverlayShader()`, `DefineSprite()`,
+`DrawSprite()`, `Present()` and `WaitForRetrace()`.
+
+[writing-a-game.md](writing-a-game.md) is the guide to using it.
