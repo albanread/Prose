@@ -231,21 +231,32 @@ final class VMMonitor {
     // MARK: the guest's address
 
     /// The IP bootpd leased to our MAC address (the file lists the newest lease first).
+    /// The address the Mac's DHCP server last gave this machine -- and only
+    /// while that lease is still good.
+    ///
+    /// The lease file keeps an entry long after it has run out, so reading the
+    /// address without reading the expiry reports a machine as having a number
+    /// it no longer holds. That is worse than reporting nothing: a status bar
+    /// showing an address is a status bar saying the network works.
     func guestIP() -> String? {
         guard let mac = guestMAC,
               let text = try? String(contentsOfFile: VMMonitor.leaseFile, encoding: .utf8) else { return nil }
-        var ip: String?, hw: String?
+        var ip: String?, hw: String?, expires: TimeInterval?
         for line in text.split(separator: "\n") {
             let entry = line.trimmingCharacters(in: .whitespaces)
             if entry == "{" {
                 ip = nil
                 hw = nil
+                expires = nil
             } else if entry.hasPrefix("ip_address=") {
                 ip = String(entry.dropFirst("ip_address=".count))
             } else if entry.hasPrefix("hw_address=") {
                 // "1,26:a0:4f:35:97:d2" (hardware type, then octets without leading zeros)
                 hw = entry.split(separator: ",", maxSplits: 1).last.map { VMMonitor.normalizedMAC(String($0)) }
+            } else if entry.hasPrefix("lease=0x") {
+                expires = TimeInterval(UInt64(entry.dropFirst("lease=0x".count), radix: 16) ?? 0)
             } else if entry == "}", hw == mac, let ip {
+                guard let expires, expires > Date().timeIntervalSince1970 else { return nil }
                 return ip
             }
         }

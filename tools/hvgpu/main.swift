@@ -1658,6 +1658,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
     lazy var router = InputRouter(presenter: presenter)
     lazy var automation = Automation(controller: self)      // automation.swift
     lazy var settingsWindow = SettingsWindow(controller: self)   // settings.swift
+    let networkMenu = NSMenu(title: "Network")                   // network.swift
+    var guestInterfaces: [GuestInterface] = []
     let midi = ProseMIDIDevice()
     let chip = ProseChipDevice()               // chipdevice.swift: ABC in, sound out
     let portal = ProsePortalDevice()           // portal.swift: the guest answers the host
@@ -1719,7 +1721,12 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
             headlessVsync = vsync
         }
         presenterGPU = displaySource
-        portal.onHello = { [weak self] in DispatchQueue.main.async { self?.refreshThemes() } }
+        portal.onHello = { [weak self] in
+            DispatchQueue.main.async {
+                self?.refreshThemes()
+                self?.refreshNetwork()
+            }
+        }
         monitor = VMMonitor(diskImage: diskURL, guestMAC: args.contains("--no-net") ? nil : macAddress.string)
 
         bootVM()

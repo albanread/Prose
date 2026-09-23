@@ -79,6 +79,13 @@ func makeMainMenu(_ controller: Controller) -> NSMenu {
     keys.submenu = controller.makeSendKeysMenu()
     machine.addItem(keys)
     machine.addItem(.separator())
+    // the machine's address, and how to give it one (network.swift)
+    let network = NSMenuItem(title: "Network", action: nil, keyEquivalent: "")
+    network.submenu = controller.networkMenu
+    network.toolTip = "What address this machine has, and how to set one when the Mac's "
+        + "DHCP server will not give it one."
+    machine.addItem(network)
+    machine.addItem(.separator())
     add(machine, "Take Screenshot", #selector(Controller.takeScreenshot(_:)), "s")
     add(machine, "Open Guest Log", #selector(Controller.openGuestLog(_:)), "l")
     machine.addItem(.separator())
@@ -132,6 +139,7 @@ func makeMainMenu(_ controller: Controller) -> NSMenu {
     theme.submenu = controller.themeMenu
     theme.toolTip = "A decorator, the system's colours and the wallpaper, kept by the machine."
     controller.rebuildThemeMenu()
+    controller.rebuildNetworkMenu()
     view.addItem(theme)
     view.addItem(.separator())
     // the Mac side of HostFS: what the machine sees as its HostFS volume
