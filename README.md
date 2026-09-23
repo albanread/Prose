@@ -104,7 +104,7 @@ their work produced, and everything that makes it good is theirs.
   Virtualization.framework VM with custom virtio devices of its own — a
   shared-surface display, keyboard and tablet, a MIDI port — plus networking,
   sound, and a Mac folder shared into the guest.
-- **`patches/haiku`** — 107 patches against Haiku at hrev60122, applied to a
+- **`patches/haiku`** — 109 patches against Haiku at hrev60122, applied to a
   local tree to build the guest.
 - **`packages`** — `prosepkg`, a haikuports recipe builder for arm64, because
   the package server has almost nothing for this architecture.
@@ -384,6 +384,8 @@ table there also records why each one exists.
 | 0108 | Game panes: 63 sprite palettes of sixteen, so sprites stop competing with the world for its 256 colours |
 | 0109 | Game panes: an overlay shader handed the finished pane, which it may resample — so filters are the program's own business |
 | 0110 | `prose_examples` 1.0-2: `07-game`, a complete game pane among the examples |
+| 0111 | `libgame`: sprites loaded from a picture, and text rendered from a system font |
+| 0112 | `prose_examples` 1.0-3: `07-game` loads its ship from a PNG and draws its score |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

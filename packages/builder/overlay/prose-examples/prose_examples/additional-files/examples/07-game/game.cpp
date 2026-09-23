@@ -3,6 +3,10 @@
 // runs over the top of them.
 //
 // Left and right steer, space drops a star. Build with "make" and run it.
+//
+// The ship comes out of lander.png, indexed into a palette of its own as it
+// loads, and the score is drawn with the system's own font: neither the art
+// nor the letters are arrays in this file.
 
 #include <Application.h>
 #include <GamePane.h>
@@ -33,6 +37,7 @@ private:
 	int32		fShape;
 	float		fX;
 	float		fStep;
+	int32		fScore;
 	float		fStars[16];
 };
 
@@ -70,7 +75,8 @@ Game::Game()
 	fQuit(false),
 	fShape(-1),
 	fX(kWidth / 2),
-	fStep(0)
+	fStep(0),
+	fScore(0)
 {
 	AddChild(new Keys(Bounds()));
 	CenterOnScreen();
@@ -94,23 +100,29 @@ Game::Game()
 	SetColor(kFloor, floor);
 	SetColor(kStar, star);
 
-	// A sprite palette of its own, so the ship costs the world no colours.
-	for (uint32 i = 1; i < 16; i++) {
-		float k = (float)i / 15.0f;
-		rgb_color c = { (uint8)(200 - k * 40), (uint8)(60 + k * 170),
-			(uint8)(90 + k * 140), 255 };
-		SetSpriteColor(kShip, i, c);
+	// The ship: a picture, indexed into sprite palette kShip as it loads, so
+	// its colours are its own and the world keeps all 255 of its.
+	fShape = DefineSprite("lander.png", 4, kShip);
+	if (fShape < 0) {
+		// run from somewhere else: a shape in code, so the example still works
+		uint8 pixels[12 * 12];
+		memset(pixels, 0, sizeof(pixels));
+		for (uint32 y = 0; y < 12; y++) {
+			uint32 half = y / 2 + 1;
+			for (uint32 x = 6 - half; x < 6 + half && x < 12; x++)
+				pixels[y * 12 + x] = 1 + (y * 14) / 11;
+		}
+		for (uint32 i = 1; i < 16; i++) {
+			float k = (float)i / 15.0f;
+			rgb_color c = { (uint8)(200 - k * 40), (uint8)(60 + k * 170),
+				(uint8)(90 + k * 140), 255 };
+			SetSpriteColor(kShip, i, c);
+		}
+		fShape = DefineSprite(pixels, 12, 12, 4);
 	}
 
-	// A sixteen-colour shape: one byte a pixel going in, packed by the kit.
-	uint8 pixels[12 * 12];
-	memset(pixels, 0, sizeof(pixels));
-	for (uint32 y = 0; y < 12; y++) {
-		uint32 half = y / 2 + 1;
-		for (uint32 x = 6 - half; x < 6 + half && x < 12; x++)
-			pixels[y * 12 + x] = 1 + (y * 14) / 11;
-	}
-	fShape = DefineSprite(pixels, 12, 12, 4);
+	// The score is drawn with a system font, rendered once into glyphs.
+	SetTextFont(NULL, 10.0f);
 
 	// And a filter over the lot: the picture bent a little, and brighter
 	// pixels bleeding into their neighbours.
@@ -187,20 +199,28 @@ Game::Loop()
 			if (fStars[i] < 0.0f)
 				continue;
 			int32 y = (int32)(kHeight - 32 - fStars[i]);
-			FillRect((int32)fX + 5, y, 2, 4, kStar);
+			FillRect((int32)fX + 7, y, 2, 4, kStar);
 			fStars[i] += 3.0f;
-			if (y < 0)
+			if (y < 0) {
 				fStars[i] = -1.0f;
+				fScore += 10;
+			}
 		}
 
 		fX += fStep;
 		fStep *= 0.85f;
 		if (fX < 0) fX = 0;
-		if (fX > kWidth - 24) fX = kWidth - 24;
+		if (fX > kWidth - 32) fX = kWidth - 32;
 
 		ClearSprites();
 		if (fShape >= 0)
 			DrawSprite(fShape, (int32)fX, kHeight - 48, 2.0f, 0.0f, 1.0f, kShip);
+
+		// text goes into the world with everything else, so the overlay
+		// filters it too and it costs none of the 64 sprites
+		char score[32];
+		snprintf(score, sizeof(score), "SCORE %05d", (int)fScore);
+		DrawText(4, 4, score, kStar);
 
 		Present();
 		if (WaitForRetrace() != B_OK)

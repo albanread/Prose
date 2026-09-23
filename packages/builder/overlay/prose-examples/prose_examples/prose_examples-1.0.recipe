@@ -14,7 +14,7 @@ They are installed read-only, so take a copy to work on:
 HOMEPAGE="https://github.com/albanread/Prose"
 COPYRIGHT="2026 Prose"
 LICENSE="MIT"
-REVISION="2"
+REVISION="3"
 ARCHITECTURES="any"
 
 PROVIDES="

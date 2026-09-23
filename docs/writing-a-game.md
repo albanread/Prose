@@ -97,7 +97,22 @@ pane->Present();
 `pixels` is always one byte a pixel going in; at a depth of 4 the values are 0
 to 15 and the kit packs them two to a byte. Position is in world coordinates —
 pass `B_GAME_SPRITE_SCREEN` in `flags` for a sprite that ignores the scroll,
-which is what a score or a cursor wants.
+which is what a cursor wants.
+
+Art does not have to be an array in your source. `DefineSprite()` also takes a
+`BBitmap` or a path to anything the Translation Kit reads:
+
+```cpp
+int32 ship = pane->DefineSprite("lander.png", 4, 1);
+```
+
+At four bits the picture's colours are written into the sprite palette you name
+and the sprite indexes that, so loading it is the whole of setting it up. At
+eight they are matched against the global palette as it already stands and
+nothing is written, which is for a sprite meant to share the world's colours.
+A pixel less than half opaque becomes index 0. More distinct colours than there
+is room for are matched to the nearest already taken, so a stray anti-aliased
+pixel costs you a shade rather than the sprite.
 
 Scale and rotation are the host's: each fragment is inverse-transformed into
 sprite space, so a sprite turns and scales smoothly in a way a byte blitter
@@ -105,6 +120,25 @@ cannot. Up to 64 a frame.
 
 Recolouring is a number. A hit flash, a power-up, an enemy in its harder
 colours — draw the same shape with a different palette and nothing is redrawn.
+
+## Text
+
+```cpp
+pane->SetTextFont(NULL, 10.0f);          // once
+...
+pane->DrawTextInView(4, 4, "SCORE 00120", kInk);
+```
+
+`SetTextFont()` renders a system font — any family, any size — once into glyph
+shapes of its own, so there is no font data in your program. With no `BFont` it
+takes the first fixed-width family it finds, which is what a grid of characters
+wants. ASCII 32 to 126.
+
+`DrawText()` blits those glyphs into the world with everything else, so text is
+part of the scene: it sits under the sprites, the overlay filters it along with
+the rest, and it costs none of the 64 sprites a frame. `DrawTextInView()` is
+the same thing offset by the scroll, which is what a score wants. A string is
+one colour — draw it twice, a pixel apart, for a shadow.
 
 ## Shaders
 

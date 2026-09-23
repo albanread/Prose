@@ -162,6 +162,15 @@ That is what the eight-bit machines used their palettes for. A sprite never
 reads the scanline palette, so one crossing a raster split does not change
 colour halfway down.
 
+## Text
+
+In the guest, in the kit, out of the system's own font engine: `SetTextFont()`
+renders a family and size once into glyph shapes, and `DrawText()` blits them
+into the world with the same byte blitter as everything else. So text is part
+of the scene rather than a layer over it — the overlay filters it, it sits
+under the sprites, and it costs none of the 64 a frame. No font data in the
+program, and no text in the wire protocol.
+
 ## Blitting
 
 In the guest, in the kit, on the CPU. The world buffer is one byte per pixel in
