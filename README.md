@@ -418,6 +418,7 @@ table there also records why each one exists.
 | 0136 | The profiler works: `profile` and `profile -a` name the functions time goes to, user and kernel |
 | 0137 | Profiles charge time spent in a syscall to the syscall, not to the caller's caller |
 | 0138 | `malloc` scales with threads and keeps its heap in one piece: small blocks come from per-thread caches without a lock, freeing another thread's block no longer searches every pool, and the heap no longer splits into thousands of areas. 4-600 times the throughput with several threads; the Mojo compiler 15-30% faster |
+| 0139 | The host's shared folders are mounted at `/HostFS` again with the new allocator, and DriveSetup shows a disk's volume name reliably: both read a name from freed memory |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

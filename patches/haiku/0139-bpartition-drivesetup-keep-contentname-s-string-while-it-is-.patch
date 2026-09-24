@@ -1,0 +1,73 @@
+From 9f908a04cfeecd6552cafa4e850f27b04ca03721 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 08:32:30 +0100
+Subject: [PATCH] BPartition, DriveSetup: keep ContentName()'s string while it
+ is used
+
+BPartition::ContentName() returns a BString. GetMountPoint() kept a pointer
+into that temporary ("const char* volumeName = ContentName();") and read the
+volume name after the string was freed, and DriveSetup's disk view did the
+same with a device's name.
+
+The allocator used to leave a freed block's bytes alone, so the dangling
+reads found the name still there. Patch 0138's thread caches link freed
+blocks through their first word: mount_server mounted the host's shared
+folders at a directory named with pointer bytes instead of /HostFS, and
+GetMountPoint() of the unmounted EFI partition never returned.
+
+The BString now lives as long as its characters are used.
+
+Test: HaikuArmQemu's tools/mountpoint/mountpointtest -- GetMountPoint() of
+every partition with a file system answers, and an unmounted one's is
+"/<volume name>" (FAIL 0/1, a hang, before; PASS 3/3 after).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0139-bpartition-drivesetup-keep-contentname-s-string-while-it-is-.patch 4709e028dc13979e38c12a083c8f7db968daac37130b2c4a578c65f20a941508
+---
+ src/apps/drivesetup/DiskView.cpp           | 9 +++++----
+ src/kits/storage/disk_device/Partition.cpp | 6 ++++--
+ 2 files changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/src/apps/drivesetup/DiskView.cpp b/src/apps/drivesetup/DiskView.cpp
+index 8873594be4..e1539c66aa 100644
+--- a/src/apps/drivesetup/DiskView.cpp
++++ b/src/apps/drivesetup/DiskView.cpp
+@@ -323,16 +323,17 @@ public:
+ 
+ 	virtual bool Visit(BDiskDevice* device)
+ 	{
+-		const char* name;
++		BString name;
+ 		if (device->Name() != NULL && device->Name()[0] != '\0')
+ 			name = device->Name();
+ 		else
+ 			name = B_TRANSLATE("Device");
+ 
+-		if (BString(device->ContentName()).Length() > 0)
+-			name = device->ContentName();
++		BString contentName = device->ContentName();
++		if (contentName.Length() > 0)
++			name = contentName;
+ 
+-		PartitionView* view = new PartitionView(name, 1.0,
++		PartitionView* view = new PartitionView(name.String(), 1.0,
+ 			device->Offset(), 0, device->ID(), device);
+ 		fViewMap.Put(device->ID(), view);
+ 		fView->GetLayout()->AddView(view);
+diff --git a/src/kits/storage/disk_device/Partition.cpp b/src/kits/storage/disk_device/Partition.cpp
+index 747880c0c3..864e9983a2 100644
+--- a/src/kits/storage/disk_device/Partition.cpp
++++ b/src/kits/storage/disk_device/Partition.cpp
+@@ -507,8 +507,10 @@ BPartition::GetMountPoint(BPath* mountPoint) const
+ 	}
+ 
+ 	// partition not mounted
+-	// get the volume name
+-	const char* volumeName = ContentName();
++	// get the volume name (ContentName() returns a BString, which has to live
++	// for as long as its characters are used)
++	BString contentName = ContentName();
++	const char* volumeName = contentName.String();
+ 	if (volumeName == NULL || strlen(volumeName) == 0)
+ 		volumeName = Name();
+ 	if (volumeName == NULL || strlen(volumeName) == 0)
