@@ -1,0 +1,305 @@
+From a318e634a1483621264231b875a8205d8d47d3e7 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:19:38 +0100
+Subject: [PATCH] app_server: fix what the static analysis found
+
+- ServerPicture: a copy of a picture that draws another one lost the list
+  of nested pictures, and drawing the copy crashed app_server. Both
+  BPicture(const BPicture&) and recording a DrawPicture() into another
+  picture make such copies. The copy now copies the nested pictures, and
+  Play() copes with a picture without any.
+- ClientMemoryAllocator: rows of 1 GB overflowed a bitmap's length to 0 (an
+  int32 multiplication), and a block of no size, which shares its base with
+  its neighbours, was handed out; Free() then merged it with itself and used
+  it after freeing it. Such blocks are refused, and the length is computed
+  in 64 bits.
+- DefaultDecorator: int8 loops over the border width never ended once a bold
+  font above about 300 points made the border 128 pixels wide.
+- Painter: a gradient without color stops painted stack contents; it now
+  paints nothing, as a gradient of TYPE_NONE does.
+- Remote drawing: a wheel event whose deltas could not be read was queued
+  anyway, and ReadBitmap() ignored its reads' results.
+
+Test: HaikuArmQemu's tools/analysis-fixes/afxtest, picture-clone-nested,
+bitmap-length-overflow, gradient-without-stops and decorator-wide-border.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0147-app-server-fix-what-the-static-analysis-found.patch 5702cdd465bf5a24cf4d164d36cc674039e2d982c05ae8d8b51e05efadfd4ff4
+---
+ src/servers/app/ClientMemoryAllocator.cpp     |  7 +++-
+ src/servers/app/ServerBitmap.h                |  2 +-
+ src/servers/app/ServerPicture.cpp             | 19 +++++++++--
+ .../app/decorator/DefaultDecorator.cpp        | 32 +++++++++----------
+ src/servers/app/drawing/Painter/Painter.cpp   |  8 ++++-
+ .../interface/remote/RemoteEventStream.cpp    |  9 ++++--
+ .../interface/remote/RemoteMessage.cpp        | 32 +++++++++++--------
+ 7 files changed, 73 insertions(+), 36 deletions(-)
+
+diff --git a/src/servers/app/ClientMemoryAllocator.cpp b/src/servers/app/ClientMemoryAllocator.cpp
+index 99c1e9fea4..5754f91060 100644
+--- a/src/servers/app/ClientMemoryAllocator.cpp
++++ b/src/servers/app/ClientMemoryAllocator.cpp
+@@ -71,6 +71,11 @@ ClientMemoryAllocator::Allocate(size_t size, block** _address)
+ 	if (fApplication == NULL)
+ 		return NULL;
+ 
++	// a block without size would share its base with its neighbours, and
++	// Free() could not tell them apart
++	if (size == 0)
++		return NULL;
++
+ 	BAutolock locker(fLock);
+ 
+ 	// Search best matching free block from the list
+@@ -152,7 +157,7 @@ ClientMemoryAllocator::Free(block* freeBlock)
+ 				after = block;
+ 		}
+ 
+-		if (before != NULL && after != NULL) {
++		if (before != NULL && after != NULL && before != after) {
+ 			// merge with adjacent blocks
+ 			before->size += after->size + freeBlock->size;
+ 			fFreeBlocks.Remove(after);
+diff --git a/src/servers/app/ServerBitmap.h b/src/servers/app/ServerBitmap.h
+index ab04bc8c7b..3e7bf1d585 100644
+--- a/src/servers/app/ServerBitmap.h
++++ b/src/servers/app/ServerBitmap.h
+@@ -127,7 +127,7 @@ public:
+ uint32
+ ServerBitmap::BitsLength() const
+ {
+-	int64 length = fBytesPerRow * fHeight;
++	int64 length = (int64)fBytesPerRow * fHeight;
+ 	return (length > 0 && length <= UINT32_MAX) ? (uint32)length : 0;
+ }
+ 
+diff --git a/src/servers/app/ServerPicture.cpp b/src/servers/app/ServerPicture.cpp
+index 09b9f2889a..0c95347d30 100644
+--- a/src/servers/app/ServerPicture.cpp
++++ b/src/servers/app/ServerPicture.cpp
+@@ -1078,6 +1078,17 @@ ServerPicture::ServerPicture(const ServerPicture& picture)
+ 		size);
+ 
+ 	PictureDataWriter::SetTo(fData.Get());
++
++	// The copied ops refer to the nested pictures by their index. Copy them
++	// as well, since the destructor disowns the pictures it nests.
++	if (picture.fPictures.IsSet()) {
++		for (int32 i = 0; i < picture.fPictures->CountItems(); i++) {
++			BReference<ServerPicture> nested(new(std::nothrow)
++				ServerPicture(*picture.fPictures->ItemAt(i)), true);
++			if (nested == NULL || NestPicture(nested) < 0)
++				break;
++		}
++	}
+ }
+ 
+ 
+@@ -1245,10 +1256,14 @@ ServerPicture::Play(Canvas* target)
+ 	if (mallocIO == NULL)
+ 		return;
+ 
+-	CanvasCallbacks callbacks(target, *fPictures.Get());
++	// a picture that nests none has no list
++	PictureList noPictures;
++	PictureList& pictures = fPictures.IsSet() ? *fPictures.Get() : noPictures;
++
++	CanvasCallbacks callbacks(target, pictures);
+ 
+ 	BPrivate::PicturePlayer player(mallocIO->Buffer(),
+-		mallocIO->BufferLength(), PictureList::Private(fPictures.Get()).AsBList());
++		mallocIO->BufferLength(), PictureList::Private(&pictures).AsBList());
+ 	player.Play(callbacks);
+ }
+ 
+diff --git a/src/servers/app/decorator/DefaultDecorator.cpp b/src/servers/app/decorator/DefaultDecorator.cpp
+index 858ae98132..d1e142715a 100644
+--- a/src/servers/app/decorator/DefaultDecorator.cpp
++++ b/src/servers/app/decorator/DefaultDecorator.cpp
+@@ -221,8 +221,8 @@ DefaultDecorator::_DrawFrame(BRect rect)
+ 				ComponentColors colors;
+ 				_GetComponentColors(COMPONENT_TOP_BORDER, colors, fTopTab);
+ 
+-				for (int8 i = 0; i < fBorderWidth; i++) {
+-					const int8 colorsIndex = COLORS_INDEX(i, fBorderWidth, 5);
++				for (int32 i = 0; i < fBorderWidth; i++) {
++					const int32 colorsIndex = COLORS_INDEX(i, fBorderWidth, 5);
+ 					fDrawingEngine->StrokeLine(
+ 						BPoint(border.left + i, border.top + i),
+ 						BPoint(border.right - i, border.top + i),
+@@ -245,8 +245,8 @@ DefaultDecorator::_DrawFrame(BRect rect)
+ 				ComponentColors colors;
+ 				_GetComponentColors(COMPONENT_LEFT_BORDER, colors, fTopTab);
+ 
+-				for (int8 i = 0; i < fBorderWidth; i++) {
+-					const int8 colorsIndex = COLORS_INDEX(i, fBorderWidth, 5);
++				for (int32 i = 0; i < fBorderWidth; i++) {
++					const int32 colorsIndex = COLORS_INDEX(i, fBorderWidth, 5);
+ 					fDrawingEngine->StrokeLine(
+ 						BPoint(border.left + i, border.top + i),
+ 						BPoint(border.left + i, border.bottom - i),
+@@ -258,8 +258,8 @@ DefaultDecorator::_DrawFrame(BRect rect)
+ 				ComponentColors colors;
+ 				_GetComponentColors(COMPONENT_BOTTOM_BORDER, colors, fTopTab);
+ 
+-				for (int8 i = 0; i < fBorderWidth; i++) {
+-					const int8 colorsIndex = COLORS_INDEX(i, fBorderWidth, 5);
++				for (int32 i = 0; i < fBorderWidth; i++) {
++					const int32 colorsIndex = COLORS_INDEX(i, fBorderWidth, 5);
+ 					fDrawingEngine->StrokeLine(
+ 						BPoint(border.left + i, border.bottom - i),
+ 						BPoint(border.right - i, border.bottom - i),
+@@ -271,8 +271,8 @@ DefaultDecorator::_DrawFrame(BRect rect)
+ 				ComponentColors colors;
+ 				_GetComponentColors(COMPONENT_RIGHT_BORDER, colors, fTopTab);
+ 
+-				for (int8 i = 0; i < fBorderWidth; i++) {
+-					const int8 colorsIndex = COLORS_INDEX(i, fBorderWidth, 5);
++				for (int32 i = 0; i < fBorderWidth; i++) {
++					const int32 colorsIndex = COLORS_INDEX(i, fBorderWidth, 5);
+ 					fDrawingEngine->StrokeLine(
+ 						BPoint(border.right - i, border.top + i),
+ 						BPoint(border.right - i, border.bottom - i),
+@@ -290,8 +290,8 @@ DefaultDecorator::_DrawFrame(BRect rect)
+ 				ComponentColors colors;
+ 				_GetComponentColors(COMPONENT_TOP_BORDER, colors, fTopTab);
+ 
+-				for (int8 i = 0; i < fBorderWidth; i++) {
+-					const int8 colorsIndex = COLORS_INDEX(i, fBorderWidth, 3);
++				for (int32 i = 0; i < fBorderWidth; i++) {
++					const int32 colorsIndex = COLORS_INDEX(i, fBorderWidth, 3);
+ 					fDrawingEngine->StrokeLine(
+ 						BPoint(border.left + i, border.top + i),
+ 						BPoint(border.right - i, border.top + i),
+@@ -314,8 +314,8 @@ DefaultDecorator::_DrawFrame(BRect rect)
+ 				ComponentColors colors;
+ 				_GetComponentColors(COMPONENT_LEFT_BORDER, colors, fTopTab);
+ 
+-				for (int8 i = 0; i < fBorderWidth; i++) {
+-					const int8 colorsIndex = COLORS_INDEX(i, fBorderWidth, 3);
++				for (int32 i = 0; i < fBorderWidth; i++) {
++					const int32 colorsIndex = COLORS_INDEX(i, fBorderWidth, 3);
+ 					fDrawingEngine->StrokeLine(
+ 						BPoint(border.left + i, border.top + i),
+ 						BPoint(border.left + i, border.bottom - i),
+@@ -337,8 +337,8 @@ DefaultDecorator::_DrawFrame(BRect rect)
+ 				ComponentColors colors;
+ 				_GetComponentColors(COMPONENT_BOTTOM_BORDER, colors, fTopTab);
+ 
+-				for (int8 i = 0; i < fBorderWidth; i++) {
+-					const int8 colorsIndex = COLORS_INDEX(i, fBorderWidth, 3);
++				for (int32 i = 0; i < fBorderWidth; i++) {
++					const int32 colorsIndex = COLORS_INDEX(i, fBorderWidth, 3);
+ 					fDrawingEngine->StrokeLine(
+ 						BPoint(border.left + i, border.bottom - i),
+ 						BPoint(border.right - i, border.bottom - i),
+@@ -350,8 +350,8 @@ DefaultDecorator::_DrawFrame(BRect rect)
+ 				ComponentColors colors;
+ 				_GetComponentColors(COMPONENT_RIGHT_BORDER, colors, fTopTab);
+ 
+-				for (int8 i = 0; i < fBorderWidth; i++) {
+-					const int8 colorsIndex = COLORS_INDEX(i, fBorderWidth, 3);
++				for (int32 i = 0; i < fBorderWidth; i++) {
++					const int32 colorsIndex = COLORS_INDEX(i, fBorderWidth, 3);
+ 					fDrawingEngine->StrokeLine(
+ 						BPoint(border.right - i, border.top + i),
+ 						BPoint(border.right - i, border.bottom - i),
+diff --git a/src/servers/app/drawing/Painter/Painter.cpp b/src/servers/app/drawing/Painter/Painter.cpp
+index be3bbe4579..d935ad5c66 100644
+--- a/src/servers/app/drawing/Painter/Painter.cpp
++++ b/src/servers/app/drawing/Painter/Painter.cpp
+@@ -1116,7 +1116,7 @@ void
+ Painter::FillRectVerticalGradient(BRect r,
+ 	const BGradientLinear& gradient) const
+ {
+-	if (!fValidClipping)
++	if (!fValidClipping || gradient.CountColorStops() == 0)
+ 		return;
+ 
+ 	// Make sure the color array is no larger than the screen height.
+@@ -2073,6 +2073,12 @@ Painter::_RasterizePath(VertexSource& path, const BGradient& gradient)
+ {
+ 	GTRACE("Painter::_RasterizePath\n");
+ 
++	if (gradient.CountColorStops() == 0) {
++		// no colors to draw, like TYPE_NONE; _MakeGradient() would leave
++		// them undefined
++		return _Clipped(_BoundingBox(path));
++	}
++
+ 	agg::trans_affine gradientTransform;
+ 
+ 	switch (gradient.GetType()) {
+diff --git a/src/servers/app/drawing/interface/remote/RemoteEventStream.cpp b/src/servers/app/drawing/interface/remote/RemoteEventStream.cpp
+index 2a3f242798..34a3a07cf3 100644
+--- a/src/servers/app/drawing/interface/remote/RemoteEventStream.cpp
++++ b/src/servers/app/drawing/interface/remote/RemoteEventStream.cpp
+@@ -155,8 +155,13 @@ RemoteEventStream::EventReceived(RemoteMessage& message)
+ 		case RP_MOUSE_WHEEL_CHANGED:
+ 		{
+ 			float xDelta, yDelta;
+-			message.Read(xDelta);
+-			message.Read(yDelta);
++			if (message.Read(xDelta) != B_OK
++				|| message.Read(yDelta) != B_OK) {
++				// a truncated message is no event
++				delete event;
++				return false;
++			}
++
+ 			event->AddFloat("be:wheel_delta_x", xDelta);
+ 			event->AddFloat("be:wheel_delta_y", yDelta);
+ 			break;
+diff --git a/src/servers/app/drawing/interface/remote/RemoteMessage.cpp b/src/servers/app/drawing/interface/remote/RemoteMessage.cpp
+index 515d3f17b0..1a270d6451 100644
+--- a/src/servers/app/drawing/interface/remote/RemoteMessage.cpp
++++ b/src/servers/app/drawing/interface/remote/RemoteMessage.cpp
+@@ -333,21 +333,27 @@ status_t
+ RemoteMessage::ReadBitmap(BBitmap** _bitmap, bool minimal,
+ 	color_space colorSpace, uint32 flags)
+ {
+-	uint32 bitsLength;
+-	int32 width, height, bytesPerRow;
+-
+-	Read(width);
+-	Read(height);
+-	Read(bytesPerRow);
+-
+-	if (!minimal) {
+-		Read(colorSpace);
+-		Read(flags);
++	uint32 bitsLength = 0;
++	int32 width = 0, height = 0, bytesPerRow = 0;
++
++	status_t result = Read(width);
++	if (result == B_OK)
++		result = Read(height);
++	if (result == B_OK)
++		result = Read(bytesPerRow);
++
++	if (result == B_OK && !minimal) {
++		result = Read(colorSpace);
++		if (result == B_OK)
++			result = Read(flags);
+ 	}
+ 
+-	Read(bitsLength);
++	if (result == B_OK)
++		result = Read(bitsLength);
++	if (result != B_OK)
++		return result;
+ 
+-	if (bitsLength > fDataLeft)
++	if (width <= 0 || height <= 0 || bitsLength > fDataLeft)
+ 		return B_ERROR;
+ 
+ #ifndef CLIENT_COMPILE
+@@ -359,7 +365,7 @@ RemoteMessage::ReadBitmap(BBitmap** _bitmap, bool minimal,
+ 	if (bitmap == NULL)
+ 		return B_NO_MEMORY;
+ 
+-	status_t result = bitmap->InitCheck();
++	result = bitmap->InitCheck();
+ 	if (result != B_OK) {
+ 		delete bitmap;
+ 		return result;

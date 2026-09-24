@@ -1,0 +1,357 @@
+From 8f773471924b183a33333757f899fe4da8c29351 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:19:37 +0100
+Subject: [PATCH] storage, translation, network and media kits: fix what the
+ static analysis found
+
+- BQuery: an unquoted '%' without its closing '%' made _ParseDates() loop
+  forever ("name==100%", or Tracker's Find with a '"' and a '%'), and an
+  escaped quote ended the quoting.
+- The text sniffer (in the registrar) read its UTF-16 buffer past the
+  length it had filled: in the troff check for a file that is only a BOM or
+  a "." line, and in the keyword scan for any multibyte text.
+- BTranslatorRoster: every directory of a path list but the last lost its
+  last character, and a missing directory added garbage to the count.
+- BNetEndpoint: IsDataPending() on a closed endpoint did FD_SET(-1).
+- BNetworkAddress: IPv6 prefix lengths were rounded down to whole bytes.
+- BMediaFile: a file that no reader takes, a writer without a format, or
+  SetTo(BUrl) leaked the BFile (or adapter) and its descriptor.
+- BMediaEncoder: SetFormat() with an output format that no encoder takes
+  released the encoder and then used it.
+- BMediaTheme: a parameter web without groups made the default theme use a
+  tab view it never created.
+- BFileInterface: the formats were advanced by sizeof(media_format)
+  elements at a time.
+- BMediaClientNode: a buffer for an input that is gone crashed the node.
+- BAdapterIO: FlushBefore() leaked the new buffer whenever it did not adopt
+  it, and hid the error.
+
+Test: HaikuArmQemu's tools/analysis-fixes/afxtest, query-lone-percent,
+text-sniffer, translator-path-list, net-endpoint-closed,
+ipv6-prefix-length, media-file-descriptors, media-encoder-bad-format,
+media-theme-empty-web and adapter-io-flush.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0145-storage-translation-network-and-media-kits-fix-what-the-stat.patch f8b5cd93309b9ce2d3bde9b2679186ec2354a46a3dd5ec44b179cfa8ca71947a
+---
+ src/kits/media/DefaultMediaTheme.cpp            |  5 +++++
+ src/kits/media/FileInterface.cpp                |  2 +-
+ src/kits/media/MediaEncoder.cpp                 | 10 ++++++++--
+ src/kits/media/MediaFile.cpp                    | 13 +++++++++++--
+ src/kits/media/experimental/AdapterIO.cpp       | 17 +++++++++++++----
+ src/kits/media/experimental/MediaClientNode.cpp |  9 +++++++--
+ src/kits/network/libnetapi/NetEndpoint.cpp      |  7 +++++++
+ src/kits/network/libnetapi/NetworkAddress.cpp   |  3 ++-
+ src/kits/storage/Query.cpp                      |  9 ++++++++-
+ src/kits/storage/mime/TextSnifferAddon.cpp      |  6 +++---
+ src/kits/translation/TranslatorRoster.cpp       |  9 ++++++---
+ 11 files changed, 71 insertions(+), 19 deletions(-)
+
+diff --git a/src/kits/media/DefaultMediaTheme.cpp b/src/kits/media/DefaultMediaTheme.cpp
+index 799ae8763b..df8dca7bfc 100644
+--- a/src/kits/media/DefaultMediaTheme.cpp
++++ b/src/kits/media/DefaultMediaTheme.cpp
+@@ -865,6 +865,11 @@ DefaultMediaTheme::MakeViewFor(BParameterWeb *web, const BRect *hintRect)
+ 		tabView->AddTab(scrollView);
+ 	}
+ 
++	// A web without groups, or with hidden ones only, has no view: the
++	// caller then says the node has no controls
++	if (tabView == NULL)
++		return NULL;
++
+ 	if (hintRect != NULL) {
+ 		tabView->MoveTo(hintRect->LeftTop());
+ 		tabView->ResizeTo(hintRect->Size());
+diff --git a/src/kits/media/FileInterface.cpp b/src/kits/media/FileInterface.cpp
+index c2be4db6e5..d0d1e3cc1d 100644
+--- a/src/kits/media/FileInterface.cpp
++++ b/src/kits/media/FileInterface.cpp
+@@ -118,7 +118,7 @@ BFileInterface::HandleMessage(int32 message,
+ 			while (GetNextFileFormat(&cookie, formats) == B_OK) {
+ 				if (cookie >= request->num_formats)
+ 					break;
+-				formats += sizeof(media_format);
++				formats++;
+ 			}
+ 			reply.filled_slots = cookie;
+ 			request->SendReply(B_OK, &reply, sizeof(reply));
+diff --git a/src/kits/media/MediaEncoder.cpp b/src/kits/media/MediaEncoder.cpp
+index 4030efb93e..44281f58ac 100644
+--- a/src/kits/media/MediaEncoder.cpp
++++ b/src/kits/media/MediaEncoder.cpp
+@@ -120,8 +120,14 @@ BMediaEncoder::SetFormat(media_format* inputFormat,
+ 	if (!fEncoder)
+ 		return B_NO_INIT;
+ 
+-	if (outputFormat != NULL)
+-		SetTo(outputFormat);
++	if (outputFormat != NULL) {
++		// SetTo() releases the current encoder first
++		status_t status = SetTo(outputFormat);
++		if (status != B_OK)
++			return status;
++		if (fEncoder == NULL)
++			return B_NO_INIT;
++	}
+ 
+ 	//TODO: How we support mfi?
+ 	return fEncoder->SetUp(inputFormat);
+diff --git a/src/kits/media/MediaFile.cpp b/src/kits/media/MediaFile.cpp
+index 0a6ba56b06..6d11ae45be 100644
+--- a/src/kits/media/MediaFile.cpp
++++ b/src/kits/media/MediaFile.cpp
+@@ -152,6 +152,8 @@ BMediaFile::SetTo(const BUrl& url)
+ 	CALLED();
+ 
+ 	_UnInit();
++	fDeleteSource = true;
++		// the streamer's adapter is ours, as in the BUrl constructors
+ 	_InitReader(NULL, &url);
+ 
+ 	return fErr;
+@@ -510,6 +512,10 @@ BMediaFile::_InitReader(BDataIO* source, const BUrl* url, int32 flags)
+ 	else if (BFile* file = dynamic_cast<BFile*>(source))
+ 		fErr = file->InitCheck();
+ 
++	// ours from here on, so that _UnInit() deletes it also when no reader
++	// takes the file
++	fSource = source;
++
+ 	if (fErr != B_OK)
+ 		return;
+ 
+@@ -523,8 +529,6 @@ BMediaFile::_InitReader(BDataIO* source, const BUrl* url, int32 flags)
+ 	if (fErr != B_OK)
+ 		return;
+ 
+-	fSource = source;
+-
+ 	fExtractor->GetFileFormatInfo(&fMFI);
+ 	fTrackNum = fExtractor->StreamCount();
+ 	fTrackList = (BMediaTrack**)malloc(fTrackNum * sizeof(BMediaTrack*));
+@@ -542,6 +546,10 @@ BMediaFile::_InitWriter(BDataIO* target, const BUrl* url,
+ {
+ 	CALLED();
+ 
++	// ours from here on, so that _UnInit() deletes it also when no writer
++	// takes the file
++	fSource = target;
++
+ 	if (fileFormat == NULL) {
+ 		fErr = B_BAD_VALUE;
+ 		return;
+@@ -556,6 +564,7 @@ BMediaFile::_InitWriter(BDataIO* target, const BUrl* url,
+ 
+ 	if (target == NULL) {
+ 		_InitStreamer(*url, &target);
++		fSource = target;
+ 		if (fErr != B_OK)
+ 			return;
+ 	}
+diff --git a/src/kits/media/experimental/AdapterIO.cpp b/src/kits/media/experimental/AdapterIO.cpp
+index 0bc8107386..7e0730938f 100644
+--- a/src/kits/media/experimental/AdapterIO.cpp
++++ b/src/kits/media/experimental/AdapterIO.cpp
+@@ -6,8 +6,11 @@
+ 
+ #include "AdapterIO.h"
+ 
++#include <AutoDeleter.h>
++
+ #include <MediaIO.h>
+ 
++#include <new>
+ #include <string.h>
+ 
+ #include "MediaDebug.h"
+@@ -49,6 +52,9 @@ public:
+ 	status_t FlushBefore(off_t position, BPositionIO* buffer, const void* oldBuffer,
+ 		size_t oldLength)
+ 	{
++		// the new buffer is ours; it replaces the old one on success
++		ObjectDeleter<BPositionIO> bufferDeleter(buffer);
++
+ 		AutoWriteLocker _(fLock);
+ 		off_t relative = _PositionToRelative(position);
+ 		if (relative < 0)
+@@ -64,7 +70,7 @@ public:
+ 			return status;
+ 		fBackPosition -= relative;
+ 		fStartOffset += relative;
+-		SetBuffer(buffer);
++		SetBuffer(bufferDeleter.Detach());
+ 		return B_OK;
+ 	}
+ 
+@@ -412,10 +418,13 @@ BAdapterIO::SetBuffer(BPositionIO* buffer)
+ status_t
+ BAdapterIO::FlushBefore(off_t position)
+ {
+-	BMallocIO* buffer = new BMallocIO();
++	BMallocIO* buffer = new(std::nothrow) BMallocIO();
++	if (buffer == NULL)
++		return B_NO_MEMORY;
++
+ 	BMallocIO* oldBuffer = (BMallocIO*)fBuffer->Buffer();
+-	fBuffer->FlushBefore(position, buffer, oldBuffer->Buffer(), oldBuffer->BufferLength());
+-	return B_OK;
++	return fBuffer->FlushBefore(position, buffer, oldBuffer->Buffer(),
++		oldBuffer->BufferLength());
+ }
+ 
+ 
+diff --git a/src/kits/media/experimental/MediaClientNode.cpp b/src/kits/media/experimental/MediaClientNode.cpp
+index 2da6981e28..5313f25231 100644
+--- a/src/kits/media/experimental/MediaClientNode.cpp
++++ b/src/kits/media/experimental/MediaClientNode.cpp
+@@ -612,9 +612,14 @@ BMediaClientNode::_HandleBuffer(BBuffer* buffer)
+ 	media_destination dest;
+ 	dest.id = buffer->Header()->destination;
+ 	BMediaInput* conn = fOwner->_FindInput(dest);
++	if (conn == NULL) {
++		// for an input that is gone (a buffer still in flight after a
++		// disconnect)
++		buffer->Recycle();
++		return;
++	}
+ 
+-	if (conn != NULL)
+-		conn->HandleBuffer(buffer);
++	conn->HandleBuffer(buffer);
+ 
+ 	// TODO: Investigate system level latency logging
+ 
+diff --git a/src/kits/network/libnetapi/NetEndpoint.cpp b/src/kits/network/libnetapi/NetEndpoint.cpp
+index fa8a529b4a..4e93476fbb 100644
+--- a/src/kits/network/libnetapi/NetEndpoint.cpp
++++ b/src/kits/network/libnetapi/NetEndpoint.cpp
+@@ -477,6 +477,13 @@ BNetEndpoint::IsDataPending(bigtime_t timeout)
+ 	struct timeval tv;
+ 	fd_set fds;
+ 
++	// a closed endpoint has no socket, and FD_SET(-1) writes far outside
++	// the set
++	if (fSocket < 0 || fSocket >= FD_SETSIZE) {
++		fStatus = B_NO_INIT;
++		return false;
++	}
++
+ 	FD_ZERO(&fds);
+ 	FD_SET(fSocket, &fds);
+ 
+diff --git a/src/kits/network/libnetapi/NetworkAddress.cpp b/src/kits/network/libnetapi/NetworkAddress.cpp
+index e2d98067da..6b159bdf3b 100644
+--- a/src/kits/network/libnetapi/NetworkAddress.cpp
++++ b/src/kits/network/libnetapi/NetworkAddress.cpp
+@@ -871,8 +871,9 @@ BNetworkAddress::PrefixLength() const
+ 			// TODO : see if we can use the optimized addr_bitcount for this
+ 			ssize_t result = 0;
+ 			for (uint8 i = 0; i < sizeof(in6_addr); i++) {
++				// the mask's bits run from each byte's top bit down
+ 				for (uint8 j = 0; j < 8; j++) {
+-					if (!(mask.sin6_addr.s6_addr[i] & (1 << j)))
++					if (!(mask.sin6_addr.s6_addr[i] & (0x80 >> j)))
+ 						return result;
+ 					result++;
+ 				}
+diff --git a/src/kits/storage/Query.cpp b/src/kits/storage/Query.cpp
+index 906e83eff5..f0f6f287a6 100644
+--- a/src/kits/storage/Query.cpp
++++ b/src/kits/storage/Query.cpp
+@@ -538,15 +538,22 @@ BQuery::_ParseDates(BString& parsedPredicate)
+ 
+ 	while (pos[0]) {
+ 		if (pos[0] == '\\') {
++			// skip the escaped character, too; an escaped quote does not
++			// end a string
+ 			pos++;
++			if (pos[0] != '\0')
++				pos++;
+ 			continue;
+ 		}
+ 		if (pos[0] == '"')
+ 			quotes = !quotes;
+ 		else if (!quotes && pos[0] == '%') {
+ 			const char* end = strchr(pos + 1, '%');
+-			if (end == NULL)
++			if (end == NULL) {
++				// no date, just a '%'
++				pos++;
+ 				continue;
++			}
+ 
+ 			parsedPredicate.Append(start, pos - start);
+ 			start = end + 1;
+diff --git a/src/kits/storage/mime/TextSnifferAddon.cpp b/src/kits/storage/mime/TextSnifferAddon.cpp
+index 06a0bdc5cd..112c24abc3 100644
+--- a/src/kits/storage/mime/TextSnifferAddon.cpp
++++ b/src/kits/storage/mime/TextSnifferAddon.cpp
+@@ -172,7 +172,7 @@ file_ascmagic(DatabaseLocation* databaseLocation, const unsigned char *buf,
+ 
+ 	if ((nbuf = (unsigned char*)malloc((nbytes + 1) * sizeof(nbuf[0]))) == NULL)
+ 		goto done;
+-	if ((ubuf = (my_unichar*)malloc((nbytes + 1) * sizeof(ubuf[0]))) == NULL)
++	if ((ubuf = (my_unichar*)calloc(nbytes + 1, sizeof(ubuf[0]))) == NULL)
+ 		goto done;
+ 
+ 	/*
+@@ -235,7 +235,7 @@ file_ascmagic(DatabaseLocation* databaseLocation, const unsigned char *buf,
+ 	 * I believe Plan 9 troff allows non-ASCII characters in the names
+ 	 * of macros, so this test might possibly fail on such a file.
+ 	 */
+-	if (*ubuf == '.') {
++	if (ulen > 0 && *ubuf == '.') {
+ 		my_unichar *tp = ubuf + 1;
+ 
+ 		while (ISSPC(*tp))
+@@ -277,7 +277,7 @@ file_ascmagic(DatabaseLocation* databaseLocation, const unsigned char *buf,
+ 		/*
+ 		 * find the next whitespace
+ 		 */
+-		for (end = i + 1; end < nbytes; end++)
++		for (end = i + 1; end < ulen; end++)
+ 			if (ISSPC(ubuf[end]))
+ 				break;
+ 
+diff --git a/src/kits/translation/TranslatorRoster.cpp b/src/kits/translation/TranslatorRoster.cpp
+index 44ca528cd4..033fc37ab5 100644
+--- a/src/kits/translation/TranslatorRoster.cpp
++++ b/src/kits/translation/TranslatorRoster.cpp
+@@ -383,7 +383,7 @@ BTranslatorRoster::Private::AddPaths(const char* paths)
+ 		BString path;
+ 
+ 		if (end != NULL) {
+-			path.SetTo(paths, end - 1 - paths);
++			path.SetTo(paths, end - paths);
+ 			paths = end + 1;
+ 		} else {
+ 			path.SetTo(paths);
+@@ -393,7 +393,7 @@ BTranslatorRoster::Private::AddPaths(const char* paths)
+ 		// Keep the last error that occured, and return it
+ 		// but don't overwrite it, if the last path was
+ 		// added successfully.
+-		int32 count;
++		int32 count = 0;
+ 		status_t error = AddPath(path.String(), &count);
+ 		if (error != B_NO_ERROR)
+ 			status = error;
+@@ -417,6 +417,9 @@ BTranslatorRoster::Private::AddPaths(const char* paths)
+ status_t
+ BTranslatorRoster::Private::AddPath(const char* path, int32* _added)
+ {
++	if (_added != NULL)
++		*_added = 0;
++
+ 	BDirectory directory(path);
+ 	status_t status = directory.InitCheck();
+ 	if (status != B_OK)
+@@ -921,7 +924,7 @@ BTranslatorRoster::Private::_RescanChanged()
+ {
+ 	while (!fRescanEntries.empty()) {
+ 		EntryRefSet::iterator iterator = fRescanEntries.begin();
+-		int32 count;
++		int32 count = 0;
+ 		CreateTranslators(*iterator, count);
+ 
+ 		fRescanEntries.erase(iterator);

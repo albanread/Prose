@@ -1,0 +1,75 @@
+From 7acf785cb3acda82dc6b7f102afdc70d0432e0b5 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:26:06 +0100
+Subject: [PATCH] fat, ntfs, nfs4: a write of nothing writes nothing
+
+POSIX has a write of zero bytes to a regular file return 0 and do nothing
+else. write() never asks the file system for one, but writev() with an
+empty vector does, and then:
+
+- fat called it an I/O error, since no bytes were written -- after
+  extending the file to the write's position when that lay past its end,
+  and truncating it back;
+- ntfs and nfs4 extended the file to the write's position.
+
+Before patch 0141, all three also took the kernel into the file cache's
+NULL function call. They now return at once, as bfs, ext2 and hostfs do.
+
+Test: HaikuArmQemu's tools/analysis-fixes/afxtest, writev-zero-length on a
+FAT image: writev(), readv() and a positioned writev() of an empty vector
+return 0, and the file stays empty.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0149-fat-ntfs-nfs4-a-write-of-nothing-writes-nothing.patch 2f6550515b41eecffcb6ae7b949dd8ddc7ea0dfe0fe90bfaef1a2ad5cefc2a29
+---
+ src/add-ons/kernel/file_systems/fat/kernel_interface.cpp  | 5 +++++
+ src/add-ons/kernel/file_systems/nfs4/InodeRegular.cpp     | 4 ++++
+ src/add-ons/kernel/file_systems/ntfs/kernel_interface.cpp | 4 ++++
+ 3 files changed, 13 insertions(+)
+
+diff --git a/src/add-ons/kernel/file_systems/fat/kernel_interface.cpp b/src/add-ons/kernel/file_systems/fat/kernel_interface.cpp
+index 6e68a8a7b7..36f16ef8a7 100644
+--- a/src/add-ons/kernel/file_systems/fat/kernel_interface.cpp
++++ b/src/add-ons/kernel/file_systems/fat/kernel_interface.cpp
+@@ -2351,6 +2351,11 @@ dosfs_write(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, const v
+ 			RETURN_ERROR(B_BAD_VALUE);
+ 	}
+ 
++	// A write of nothing writes nothing: it neither extends the file to pos,
++	// nor is it the I/O error that no bytes written means below.
++	if (*length == 0)
++		return B_OK;
++
+ 	// if they've exceeded their filesize limit, tell them about it
+ 	if (pos >= MSDOSFS_FILESIZE_MAX)
+ 		RETURN_ERROR(B_FILE_TOO_LARGE);
+diff --git a/src/add-ons/kernel/file_systems/nfs4/InodeRegular.cpp b/src/add-ons/kernel/file_systems/nfs4/InodeRegular.cpp
+index 610c1a3c14..7af07de9d8 100644
+--- a/src/add-ons/kernel/file_systems/nfs4/InodeRegular.cpp
++++ b/src/add-ons/kernel/file_systems/nfs4/InodeRegular.cpp
+@@ -430,6 +430,10 @@ Inode::Write(OpenFileCookie* cookie, off_t pos, const void* _buffer,
+ 	if ((cookie->fMode & O_APPEND) != 0)
+ 		pos = fMaxFileSize;
+ 
++	// a write of nothing writes nothing, and does not extend the file to pos
++	if (*_length == 0)
++		return B_OK;
++
+ 	uint64 fileSize = pos + *_length;
+ 	if (fileSize > fMaxFileSize) {
+ 		status_t result = file_cache_set_size(fFileCache, fileSize);
+diff --git a/src/add-ons/kernel/file_systems/ntfs/kernel_interface.cpp b/src/add-ons/kernel/file_systems/ntfs/kernel_interface.cpp
+index 090ce68215..460a11f68c 100644
+--- a/src/add-ons/kernel/file_systems/ntfs/kernel_interface.cpp
++++ b/src/add-ons/kernel/file_systems/ntfs/kernel_interface.cpp
+@@ -909,6 +909,10 @@ fs_write(fs_volume* _volume, fs_vnode* _node, void* _cookie, off_t pos,
+ 	if (pos < 0)
+ 		return B_BAD_VALUE;
+ 
++	// a write of nothing writes nothing, and does not extend the file to pos
++	if (*_length == 0)
++		return B_OK;
++
+ 	if (pos + s64(*_length) > node->size) {
+ 		ntfs_inode* ni = ntfs_inode_open(volume->ntfs, node->inode);
+ 		if (ni == NULL)

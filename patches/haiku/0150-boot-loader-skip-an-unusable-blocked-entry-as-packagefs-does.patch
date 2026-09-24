@@ -1,0 +1,49 @@
+From 09f39fa1449a5b95deaba10b05355aff3b7ce876 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:32:04 +0100
+Subject: [PATCH] boot loader: skip an unusable blocked entry, as packagefs
+ does
+
+The boot loader reads the system's packages settings with its own copy of
+packagefs's PackageSettingsItem, and it had the bug patch 0142 fixed in
+packagefs: an entry that AddEntry() refuses -- an empty name, as in
+BlockedEntries { "" } -- left its out-parameter unset, and the loop marked
+whatever the pointer held as blocked. In the EFI loader that fault stops
+the machine before the kernel starts: one line in
+/boot/system/settings/packages made the system unbootable.
+
+Such an entry is skipped now, and only a memory shortage ends the parsing.
+
+Test: HaikuArmQemu's tools/analysis-fixes/packagefs-boot-test.sh. With
+BlockedEntries { "" bin/fortune } written, the next boot stopped in the
+boot loader (Virtualization.framework: "Internal Virtualization error",
+right after PackageVolumeInfo::SetTo()); now the system comes up with
+bin/fortune blocked.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0150-boot-loader-skip-an-unusable-blocked-entry-as-packagefs-does.patch 844baece3ac07c52e67a4dca1d46d5856ccee315f66c4fbe592646e100984efe
+---
+ .../file_systems/packagefs/PackageSettingsItem.cpp     | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/src/system/boot/loader/file_systems/packagefs/PackageSettingsItem.cpp b/src/system/boot/loader/file_systems/packagefs/PackageSettingsItem.cpp
+index 39934c0570..ddcdefdd27 100644
+--- a/src/system/boot/loader/file_systems/packagefs/PackageSettingsItem.cpp
++++ b/src/system/boot/loader/file_systems/packagefs/PackageSettingsItem.cpp
+@@ -173,9 +173,13 @@ PackageSettingsItem::_AddBlockedEntries(const driver_parameter& parameter)
+ 	for (int i = 0; i < parameter.parameter_count; i++) {
+ 		Entry* entry;
+ 		status_t error = AddEntry(parameter.parameters[i].name, entry);
+-		// abort only in case of serious issues (memory shortage)
+-		if (error == B_NO_MEMORY)
+-			return error;
++		if (error != B_OK) {
++			// abort only in case of serious issues (memory shortage); skip
++			// anything else, such as an empty name, which leaves entry unset
++			if (error == B_NO_MEMORY)
++				return error;
++			continue;
++		}
+ 
+ 		entry->SetBlocked(true);
+ 	}

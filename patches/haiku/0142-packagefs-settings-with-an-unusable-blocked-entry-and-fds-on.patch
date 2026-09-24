@@ -1,0 +1,89 @@
+From 698e2259c673ae82e4d76c5015617b3c09157c5a Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:19:35 +0100
+Subject: [PATCH] packagefs: settings with an unusable blocked entry, and fds
+ on errors
+
+- PackageSettings: an entry that AddEntry() refuses (an empty name, as in
+  BlockedEntries { "" }) left its out-parameter unset, and the loop marked
+  whatever that pointer held as blocked -- at boot, in the kernel. Such an
+  entry is now skipped, and only a memory shortage ends the parsing.
+- Volume: three error paths returned without closing the directory's
+  descriptor, which the DirCloser owns only once fdopendir() succeeded.
+
+Test: a boot with BlockedEntries { "" "bin/fortune" } in the system's
+packages settings; the system comes up, and bin/fortune is blocked.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0142-packagefs-settings-with-an-unusable-blocked-entry-and-fds-on.patch a9e174c573974f526fce2e1a44d37a468606d091819f34e84b66138ab2cb68fc
+---
+ .../packagefs/volume/PackageSettings.cpp      | 10 +++++++---
+ .../file_systems/packagefs/volume/Volume.cpp  | 20 +++++++++++++------
+ 2 files changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/src/add-ons/kernel/file_systems/packagefs/volume/PackageSettings.cpp b/src/add-ons/kernel/file_systems/packagefs/volume/PackageSettings.cpp
+index 4284693a2a..b6c97112f2 100644
+--- a/src/add-ons/kernel/file_systems/packagefs/volume/PackageSettings.cpp
++++ b/src/add-ons/kernel/file_systems/packagefs/volume/PackageSettings.cpp
+@@ -138,9 +138,13 @@ PackageSettingsItem::_AddBlockedEntries(const driver_parameter& parameter)
+ 	for (int i = 0; i < parameter.parameter_count; i++) {
+ 		Entry* entry;
+ 		status_t error = AddEntry(parameter.parameters[i].name, entry);
+-		// abort only in case of serious issues (memory shortage)
+-		if (error == B_NO_MEMORY)
+-			return error;
++		if (error != B_OK) {
++			// abort only in case of serious issues (memory shortage); skip
++			// anything else, such as an empty name, which leaves entry unset
++			if (error == B_NO_MEMORY)
++				return error;
++			continue;
++		}
+ 
+ 		entry->SetBlocked(true);
+ 	}
+diff --git a/src/add-ons/kernel/file_systems/packagefs/volume/Volume.cpp b/src/add-ons/kernel/file_systems/packagefs/volume/Volume.cpp
+index ac0f027917..da0bfef74b 100644
+--- a/src/add-ons/kernel/file_systems/packagefs/volume/Volume.cpp
++++ b/src/add-ons/kernel/file_systems/packagefs/volume/Volume.cpp
+@@ -712,16 +712,21 @@ Volume::_LoadOldPackagesStates(const char* packagesState)
+ 
+ 	struct stat adminDirStat;
+ 	if (fstat(fd, &adminDirStat) < 0) {
++		const status_t error = errno;
+ 		ERROR("Failed to fstat() administrative directory: %s\n",
+-			strerror(errno));
+-		RETURN_ERROR(errno);
++			strerror(error));
++		close(fd);
++		RETURN_ERROR(error);
+ 	}
+ 
+ 	// iterate through the "administrative" dir
+ 	DirCloser dir(fdopendir(fd));
+ 	if (!dir.IsSet()) {
+-		ERROR("Failed to open administrative directory: %s\n", strerror(errno));
+-		RETURN_ERROR(errno);
++		// the directory owns the descriptor only once it is opened
++		const status_t error = errno;
++		ERROR("Failed to open administrative directory: %s\n", strerror(error));
++		close(fd);
++		RETURN_ERROR(error);
+ 	}
+ 
+ 	while (dirent* entry = readdir(dir.Get())) {
+@@ -909,9 +914,12 @@ Volume::_AddInitialPackagesFromDirectory()
+ 
+ 	DirCloser dir(fdopendir(fd));
+ 	if (!dir.IsSet()) {
++		// the directory owns the descriptor only once it is opened
++		const status_t error = errno;
+ 		ERROR("Failed to open packages directory \"%s\": %s\n",
+-			fPackagesDirectory->Path(), strerror(errno));
+-		RETURN_ERROR(errno);
++			fPackagesDirectory->Path(), strerror(error));
++		close(fd);
++		RETURN_ERROR(error);
+ 	}
+ 
+ 	while (dirent* entry = readdir(dir.Get())) {

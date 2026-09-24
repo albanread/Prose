@@ -1,0 +1,195 @@
+From 0b854a7a2bb308308ad7d465a0d6c32f5ee9cfd1 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:19:35 +0100
+Subject: [PATCH] kernel: fix what the static analysis found
+
+Found with clang-tidy's analyzer and GCC's -fanalyzer (HaikuArmQemu's
+tools/static-analysis), each confirmed by reading the code:
+
+- file_cache: do_cache_io() calls a function pointer that only its loop
+  sets, so a zero-length request branched to address 0. writev() with an
+  empty vector on FAT (or NTFS, NFSv4, a userlandfs volume) panicked the
+  kernel from any process. Such a request now returns at once.
+- vfs: when vfs_new_io_context() could not size the descriptor table, it
+  freed the context and then its WriteLocker unlocked it.
+- KMessage: setting a field that has a value already stored the element's
+  size through the NULL SetData() passes. The same source is built into the
+  boot loader (whose boot menu does this), the runtime_loader and libroot.
+- elf: the user symbol lookup of a commpage address tested *_imageName
+  instead of _imageName; load_kernel_add_on() leaked the image, its program
+  headers and a vnode reference when its segments lay too far apart.
+- module: a path that the iterator's stack could not take leaked.
+- Stack.h: Push() raised fMax before realloc(), so after a failed push the
+  next one wrote past the old array.
+- file_map: file_map_stats divided by the number of non-empty maps, which can
+  be 0.
+- interrupts: allocate_io_interrupt_vectors() said it found a run when every
+  start vector was taken, and took any count.
+
+Test: HaikuArmQemu's tools/analysis-fixes/afxtest, writev-zero-length (on a
+FAT image) and kmessage-set-twice.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0141-kernel-fix-what-the-static-analysis-found.patch 1e326e17bc2a4dc7d7cc8f62048b6c828185a767db20dc492f9db0785542d5c4
+---
+ headers/private/util/Stack.h             | 7 +++++--
+ src/system/kernel/cache/file_cache.cpp   | 5 +++++
+ src/system/kernel/cache/file_map.cpp     | 7 +++++--
+ src/system/kernel/elf.cpp                | 4 ++--
+ src/system/kernel/fs/vfs.cpp             | 3 +++
+ src/system/kernel/interrupts.cpp         | 6 +++++-
+ src/system/kernel/messaging/KMessage.cpp | 7 +++++--
+ src/system/kernel/module.cpp             | 6 +++++-
+ 8 files changed, 35 insertions(+), 10 deletions(-)
+
+diff --git a/headers/private/util/Stack.h b/headers/private/util/Stack.h
+index d32a8023c6..ac1875c1c2 100644
+--- a/headers/private/util/Stack.h
++++ b/headers/private/util/Stack.h
+@@ -42,12 +42,15 @@ template<class T> class Stack {
+ 		status_t Push(T value)
+ 		{
+ 			if (fUsed >= fMax) {
+-				fMax += 16;
+-				T *newArray = (T *)realloc(fArray, fMax * sizeof(T));
++				// grow only once the memory is there: callers push again
++				// after a failure
++				const int32 newMax = fMax + 16;
++				T* newArray = (T*)realloc(fArray, newMax * sizeof(T));
+ 				if (newArray == NULL)
+ 					return B_NO_MEMORY;
+ 
+ 				fArray = newArray;
++				fMax = newMax;
+ 			}
+ 			fArray[fUsed++] = value;
+ 			return B_OK;
+diff --git a/src/system/kernel/cache/file_cache.cpp b/src/system/kernel/cache/file_cache.cpp
+index c6e2e9a07b..2e8db19077 100644
+--- a/src/system/kernel/cache/file_cache.cpp
++++ b/src/system/kernel/cache/file_cache.cpp
+@@ -776,6 +776,11 @@ do_cache_io(void* _cacheRef, void* cookie, off_t offset, addr_t buffer,
+ 	TRACE(("cache_io(ref = %p, offset = %lld, buffer = %p, size = %lu, %s)\n",
+ 		ref, offset, (void*)buffer, size, doWrite ? "write" : "read"));
+ 
++	// Nothing to do -- and the loop below, which picks the function that
++	// fills the last bytes of the request, would not run at all.
++	if (size == 0)
++		return B_OK;
++
+ 	int32 pageOffset = offset & (B_PAGE_SIZE - 1);
+ 	offset -= pageOffset;
+ 
+diff --git a/src/system/kernel/cache/file_map.cpp b/src/system/kernel/cache/file_map.cpp
+index 8aa17b22bf..5020ba7fa5 100644
+--- a/src/system/kernel/cache/file_map.cpp
++++ b/src/system/kernel/cache/file_map.cpp
+@@ -566,8 +566,11 @@ dump_file_map_stats(int argc, char** argv)
+ 	kprintf("%" B_PRId32 " file maps (%" B_PRIu32 " empty), %" B_PRIdOFF " file"
+ 		" bytes in total, %" B_PRIdOFF " bytes cached, %" B_PRIu32 " extents\n",
+ 		count, emptyCount, size, mapSize, extents);
+-	kprintf("average %" B_PRIu32 " extents per map for %" B_PRIdOFF " bytes.\n",
+-		extents / (count - emptyCount), mapSize / (count - emptyCount));
++	const uint32 nonEmptyCount = count - emptyCount;
++	if (nonEmptyCount > 0) {
++		kprintf("average %" B_PRIu32 " extents per map for %" B_PRIdOFF
++			" bytes.\n", extents / nonEmptyCount, mapSize / nonEmptyCount);
++	}
+ 
+ 	return 0;
+ }
+diff --git a/src/system/kernel/elf.cpp b/src/system/kernel/elf.cpp
+index 0680407b5d..6fd1cd6127 100644
+--- a/src/system/kernel/elf.cpp
++++ b/src/system/kernel/elf.cpp
+@@ -1382,7 +1382,7 @@ public:
+ 		if (image->info.basic_info.text == fTeam->commpage_address) {
+ 			// commpage requires special treatment since kernel stores symbol
+ 			// information
+-			if (*_imageName != NULL)
++			if (_imageName != NULL)
+ 				*_imageName = "commpage";
+ 			address -= (addr_t)fTeam->commpage_address;
+ 			error = elf_debug_lookup_symbol_address(address, _baseAddress,
+@@ -2219,7 +2219,7 @@ load_kernel_add_on(const char *path)
+ 	// inbetween.
+ 	if ((ssize_t)reservedSize > length + 8 * 1024) {
+ 		status = B_BAD_DATA;
+-		goto error1;
++		goto error3;
+ 	}
+ 
+ 	// reserve that space and allocate the areas from that one
+diff --git a/src/system/kernel/fs/vfs.cpp b/src/system/kernel/fs/vfs.cpp
+index 164abfc519..585a485e80 100644
+--- a/src/system/kernel/fs/vfs.cpp
++++ b/src/system/kernel/fs/vfs.cpp
+@@ -5046,6 +5046,9 @@ vfs_new_io_context(const io_context* parentContext, bool purgeCloseOnExec)
+ 		tableSize = DEFAULT_FD_TABLE_SIZE;
+ 
+ 	if (vfs_resize_fd_table(context, tableSize) != B_OK) {
++		// the locker must not unlock the context after it is freed
++		contextLocker.Unlock();
++		rw_lock_destroy(&context->lock);
+ 		free(context);
+ 		return NULL;
+ 	}
+diff --git a/src/system/kernel/interrupts.cpp b/src/system/kernel/interrupts.cpp
+index 1c650a42c6..6b8075e185 100644
+--- a/src/system/kernel/interrupts.cpp
++++ b/src/system/kernel/interrupts.cpp
+@@ -640,8 +640,12 @@ allocate_io_interrupt_vectors(int32 count, int32 *startVector,
+ {
+ 	MutexLocker locker(&sIOInterruptVectorAllocationLock);
+ 
++	if (count <= 0 || count > NUM_IO_VECTORS)
++		return B_BAD_VALUE;
++
+ 	int32 vector = 0;
+-	bool runFound = true;
++	bool runFound = false;
++		// stays false when every candidate start vector is taken
+ 	for (int32 i = 0; i < NUM_IO_VECTORS - (count - 1); i++) {
+ 		if (sAllocatedIOInterruptVectors[i])
+ 			continue;
+diff --git a/src/system/kernel/messaging/KMessage.cpp b/src/system/kernel/messaging/KMessage.cpp
+index a104b0c2f0..5fa7fcbe8d 100644
+--- a/src/system/kernel/messaging/KMessage.cpp
++++ b/src/system/kernel/messaging/KMessage.cpp
+@@ -118,14 +118,17 @@ struct KMessage::FieldHeader {
+ 			return NULL;
+ 		uint8* data = (uint8*)this + headerSize;
+ 		if (HasFixedElementSize()) {
+-			*size = elementSize;
++			// SetData() asks for an element without its size
++			if (size != NULL)
++				*size = elementSize;
+ 			return data + elementSize * index;
+ 		}
+ 		// non-fixed element size: we need to iterate
+ 		FieldValueHeader* valueHeader = (FieldValueHeader*)data;
+ 		for (int i = 0; i < index; i++)
+ 			valueHeader = valueHeader->NextFieldValueHeader();
+-		*size = valueHeader->size;
++		if (size != NULL)
++			*size = valueHeader->size;
+ 		return valueHeader->Data();
+ 	}
+ 
+diff --git a/src/system/kernel/module.cpp b/src/system/kernel/module.cpp
+index 07d159402c..e1e59abfd2 100644
+--- a/src/system/kernel/module.cpp
++++ b/src/system/kernel/module.cpp
+@@ -2051,7 +2051,11 @@ open_module_list_etc(const char* prefix, const char* suffix)
+ 				iterator->prefix_length + 1);
+ #endif
+ 
+-			iterator_push_path_on_stack(iterator, path, length + 1);
++			// the stack takes the path, unless it cannot grow
++			if (iterator_push_path_on_stack(iterator, path, length + 1)
++					!= B_OK) {
++				free(path);
++			}
+ 		}
+ 	} else {
+ 		// include loaded modules in case there is no boot device yet

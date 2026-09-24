@@ -1,0 +1,404 @@
+From c242297c94b6dabe1277e4f0aa5adb64a49e5185 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:19:39 +0100
+Subject: [PATCH] servers and apps: fix what the static analysis found
+
+- registrar: GetRecentDocuments() and GetRecentFolders() copied the file
+  type and signature into 240 byte buffers without a bound -- any
+  application could overflow the registrar's heap. Longer ones are refused.
+- Deskbar: disabled recents submenus leaked on every open of the Deskbar
+  menu, the tray's popup menu leaked when the clock is visible, and each
+  team item leaked its name (one per application launch) along with the
+  copies that TBarApp::Subscribe() hands out.
+- Mail: "MAIL:reply_with" was never used, since ReadAttr() returns the
+  number of bytes read, not B_OK.
+- debug_server: /dev/dprintf was opened read-only, so its stdout and stderr
+  lost everything.
+- net_server: rewriting the dynamic part of resolv.conf wrote without
+  positioning the stream after reading, and left the rest of a longer
+  earlier list behind; the services' pipe was made with pipe(&fReadPipe),
+  counting on fWritePipe to follow it in memory (cppcheck).
+- login, su, passwd: tty errors were printed to the input stream.
+- Deskbar's StatusView and BarView tested (a != x || a != y) and
+  (a == NULL && b == NULL) where they meant && and ||.
+
+Test: HaikuArmQemu's tools/analysis-fixes/afxtest, registrar-long-type and
+text-sniffer (the registrar survives).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0148-servers-and-apps-fix-what-the-static-analysis-found.patch de9e38c66e8cd9ff261eac443ec5f7c93023bebf36d4e9177e3c9cc6d257c6de
+---
+ src/apps/deskbar/BarView.cpp          |  2 +-
+ src/apps/deskbar/DeskbarMenu.cpp      | 12 ++++++++----
+ src/apps/deskbar/ExpandoMenuBar.cpp   | 13 +++++++++++--
+ src/apps/deskbar/ExpandoMenuBar.h     |  4 ++--
+ src/apps/deskbar/StatusView.cpp       |  5 ++---
+ src/apps/deskbar/TeamMenu.cpp         |  6 ++++++
+ src/apps/deskbar/TeamMenuItem.cpp     | 13 +++++++------
+ src/apps/deskbar/TeamMenuItem.h       |  4 ++--
+ src/apps/mail/MailWindow.cpp          |  4 +++-
+ src/bin/multiuser/multiuser_utils.cpp |  4 ++--
+ src/servers/debug/DebugServer.cpp     |  2 +-
+ src/servers/net/NetServer.cpp         | 10 +++++++++-
+ src/servers/net/Services.cpp          |  5 ++++-
+ src/servers/registrar/TRoster.cpp     | 21 ++++++++++++++++-----
+ 14 files changed, 74 insertions(+), 31 deletions(-)
+
+diff --git a/src/apps/deskbar/BarView.cpp b/src/apps/deskbar/BarView.cpp
+index 27d61eed6d..0b090982a3 100644
+--- a/src/apps/deskbar/BarView.cpp
++++ b/src/apps/deskbar/BarView.cpp
+@@ -720,7 +720,7 @@ TBarView::PositionWindow(BRect screenFrame)
+ void
+ TBarView::CheckForScrolling()
+ {
+-	if (fInlineScrollView == NULL && fExpandoMenuBar == NULL)
++	if (fInlineScrollView == NULL || fExpandoMenuBar == NULL)
+ 		return;
+ 
+ 	if (fExpandoMenuBar->CheckForSizeOverrun())
+diff --git a/src/apps/deskbar/DeskbarMenu.cpp b/src/apps/deskbar/DeskbarMenu.cpp
+index ff6160a228..88b8a01d15 100644
+--- a/src/apps/deskbar/DeskbarMenu.cpp
++++ b/src/apps/deskbar/DeskbarMenu.cpp
+@@ -185,12 +185,16 @@ TDeskbarMenu::AddNextItem()
+ 				if (!recentItem[i])
+ 					continue;
+ 
+-				if (recentItem[i]->RecentsEnabled()) {
+-					recentItem[i]->SetTypesList(TypesList());
+-					recentItem[i]->SetTarget(Target());
+-					AddItem(recentItem[i]);
++				if (!recentItem[i]->RecentsEnabled()) {
++					// not added, so not owned by this menu
++					delete recentItem[i];
++					continue;
+ 				}
+ 
++				recentItem[i]->SetTypesList(TypesList());
++				recentItem[i]->SetTarget(Target());
++				AddItem(recentItem[i]);
++
+ 				if (data && fBarView && fBarView->Dragging()) {
+ 					recentItem[i]->InitTrackingHook(data->fTrackingHook,
+ 						&data->fTarget, data->fDragMessage);
+diff --git a/src/apps/deskbar/ExpandoMenuBar.cpp b/src/apps/deskbar/ExpandoMenuBar.cpp
+index f0cf1ed831..4ba36fea47 100644
+--- a/src/apps/deskbar/ExpandoMenuBar.cpp
++++ b/src/apps/deskbar/ExpandoMenuBar.cpp
+@@ -159,7 +159,7 @@ TExpandoMenuBar::MessageReceived(BMessage* message)
+ 			const char* name = NULL;
+ 			message->FindString("name", &name);
+ 
+-			AddTeam(teams, icon, strdup(name), strdup(signature));
++			AddTeam(teams, icon, name, strdup(signature));
+ 			break;
+ 		}
+ 
+@@ -498,6 +498,10 @@ TExpandoMenuBar::BuildItems()
+ 
+ 			if (fFirstBuild && Vertical() && settings->expandNewTeams)
+ 				item->ToggleExpandState(true);
++
++			// the item owns these now
++			barInfo->teams = NULL;
++			barInfo->sig = NULL;
+ 		} else {
+ 			// existing team, update info and add it
+ 			TTeamMenuItem* item = iter->second;
+@@ -537,6 +541,11 @@ TExpandoMenuBar::BuildItems()
+ 		}
+ 	}
+ 
++	// the copies from Subscribe() are ours
++	for (int32 i = 0; i < teamCount; i++)
++		delete (BarTeamInfo*)fTeamList.ItemAt(i);
++	fTeamList.MakeEmpty();
++
+ 	if (CountItems() == 0) {
+ 		// If we're empty, BMenuBar::AttachedToWindow() resizes us to some
+ 		// weird value - we just override it again
+@@ -616,7 +625,7 @@ TExpandoMenuBar::TeamItemAtPoint(BPoint point, BMenuItem** _item)
+ 
+ 
+ void
+-TExpandoMenuBar::AddTeam(BList* team, BBitmap* icon, char* name,
++TExpandoMenuBar::AddTeam(BList* team, BBitmap* icon, const char* name,
+ 	char* signature)
+ {
+ 	TTeamMenuItem* item = new TTeamMenuItem(team, icon, name, signature);
+diff --git a/src/apps/deskbar/ExpandoMenuBar.h b/src/apps/deskbar/ExpandoMenuBar.h
+index 1c0a169e45..d0efded659 100644
+--- a/src/apps/deskbar/ExpandoMenuBar.h
++++ b/src/apps/deskbar/ExpandoMenuBar.h
+@@ -107,8 +107,8 @@ private:
+ 								const void* second);
+ 	static	int32			monitor_team_windows(void* arg);
+ 
+-			void			AddTeam(BList* team, BBitmap* icon, char* name,
+-								char* signature);
++			void			AddTeam(BList* team, BBitmap* icon,
++								const char* name, char* signature);
+ 			void			AddTeam(team_id team, const char* signature);
+ 			void			RemoveTeam(team_id team, bool partial);
+ 
+diff --git a/src/apps/deskbar/StatusView.cpp b/src/apps/deskbar/StatusView.cpp
+index 74611816b0..7770153388 100644
+--- a/src/apps/deskbar/StatusView.cpp
++++ b/src/apps/deskbar/StatusView.cpp
+@@ -424,13 +424,12 @@ TReplicantTray::MouseDown(BPoint where)
+ void
+ TReplicantTray::ShowReplicantMenu(BPoint point)
+ {
+-	BPopUpMenu* menu = new BPopUpMenu("", false, false);
+-
+ 	// If clock is visible show the extended menu, otherwise show "Show clock"
+ 
+ 	if (!fTime->IsHidden(fTime))
+ 		fTime->ShowTimeOptions(ConvertToScreen(point));
+ 	else {
++		BPopUpMenu* menu = new BPopUpMenu("", false, false);
+ 		BMenuItem* item = new BMenuItem(B_TRANSLATE("Show clock"),
+ 			new BMessage(kShowHideTime));
+ 		menu->AddItem(item);
+@@ -1443,7 +1442,7 @@ TDragRegion::Draw(BRect updateRect)
+ void
+ TDragRegion::DrawAfterChildren(BRect updateRect)
+ {
+-	if (fDragLocation != kDontDrawDragRegion || fDragLocation != kNoDragRegion)
++	if (fDragLocation != kDontDrawDragRegion && fDragLocation != kNoDragRegion)
+ 		DrawDragger();
+ }
+ 
+diff --git a/src/apps/deskbar/TeamMenu.cpp b/src/apps/deskbar/TeamMenu.cpp
+index 1adac2c884..0c4b1f914e 100644
+--- a/src/apps/deskbar/TeamMenu.cpp
++++ b/src/apps/deskbar/TeamMenu.cpp
+@@ -162,6 +162,12 @@ TTeamMenu::AttachedToWindow()
+ 					fBarView->GetTrackingHookData());
+ 			}
+ 		}
++
++		// the item owns the team list, the icon and the signature; the
++		// copy from Subscribe() is ours
++		barInfo->teams = NULL;
++		barInfo->sig = NULL;
++		delete barInfo;
+ 	}
+ 
+ 	if (CountItems() == 0) {
+diff --git a/src/apps/deskbar/TeamMenuItem.cpp b/src/apps/deskbar/TeamMenuItem.cpp
+index 5ed2491ccd..a6f339a54e 100644
+--- a/src/apps/deskbar/TeamMenuItem.cpp
++++ b/src/apps/deskbar/TeamMenuItem.cpp
+@@ -70,7 +70,7 @@ static float sHPad, sVPad, sLabelOffset = 0.0f;
+ //	#pragma mark - TTeamMenuItem
+ 
+ 
+-TTeamMenuItem::TTeamMenuItem(BList* team, BBitmap* icon, char* name,
++TTeamMenuItem::TTeamMenuItem(BList* team, BBitmap* icon, const char* name,
+ 	char* signature, float width, float height)
+ 	:
+ 	TTruncatableMenuItem(new TWindowMenu(team, signature))
+@@ -83,7 +83,7 @@ TTeamMenuItem::TTeamMenuItem(float width, float height)
+ 	:
+ 	TTruncatableMenuItem("", NULL)
+ {
+-	_Init(NULL, NULL, strdup(""), strdup(""), width, height);
++	_Init(NULL, NULL, "", strdup(""), width, height);
+ }
+ 
+ 
+@@ -485,8 +485,8 @@ TTeamMenuItem::ExpanderBounds() const
+ 
+ 
+ void
+-TTeamMenuItem::_Init(BList* team, BBitmap* icon, char* name, char* signature,
+-	float width, float height)
++TTeamMenuItem::_Init(BList* team, BBitmap* icon, const char* name,
++	char* signature, float width, float height)
+ {
+ 	if (sHPad == 0.0f) {
+ 		// Initialize the padding values.
+@@ -499,10 +499,11 @@ TTeamMenuItem::_Init(BList* team, BBitmap* icon, char* name, char* signature,
+ 	fIcon = icon;
+ 	fSignature = signature;
+ 
++	// the label is a copy, the name stays the caller's
++	char temp[32];
+ 	if (name == NULL) {
+-		char temp[32];
+ 		snprintf(temp, sizeof(temp), "team %ld", (addr_t)team->ItemAt(0));
+-		name = strdup(temp);
++		name = temp;
+ 	}
+ 
+ 	SetLabel(name);
+diff --git a/src/apps/deskbar/TeamMenuItem.h b/src/apps/deskbar/TeamMenuItem.h
+index 8608510635..27f9970c21 100644
+--- a/src/apps/deskbar/TeamMenuItem.h
++++ b/src/apps/deskbar/TeamMenuItem.h
+@@ -57,7 +57,7 @@ class TWindowMenuItem;
+ class TTeamMenuItem : public TTruncatableMenuItem {
+ public:
+ 								TTeamMenuItem(BList* team, BBitmap* icon,
+-									char* name, char* signature,
++									const char* name, char* signature,
+ 									float width = -1.0f, float height = -1.0f);
+ 								TTeamMenuItem(float width = -1.0f,
+ 									float height = -1.0f);
+@@ -98,7 +98,7 @@ protected:
+ 
+ private:
+ 			void				_Init(BList* team, BBitmap* icon,
+-									char* name, char* signature,
++									const char* name, char* signature,
+ 									float width = -1.0f, float height = -1.0f);
+ 
+ 			bool				_IsSelected() const;
+diff --git a/src/apps/mail/MailWindow.cpp b/src/apps/mail/MailWindow.cpp
+index 2ec5ff5339..817a1235ef 100644
+--- a/src/apps/mail/MailWindow.cpp
++++ b/src/apps/mail/MailWindow.cpp
+@@ -2334,8 +2334,10 @@ TMailWindow::Reply(entry_ref* ref, TMailWindow* window, uint32 type)
+ 	int32 accountID;
+ 	BFile file(window->fRef, B_READ_ONLY);
+ 	if (file.ReadAttr("MAIL:reply_with", B_INT32_TYPE, 0, &accountID,
+-		sizeof(int32)) != B_OK)
++			sizeof(int32)) != static_cast<ssize_t>(sizeof(int32))) {
++		// ReadAttr() returns the number of bytes read, not B_OK
+ 		accountID = -1;
++	}
+ 
+ 	// set mail account
+ 
+diff --git a/src/bin/multiuser/multiuser_utils.cpp b/src/bin/multiuser/multiuser_utils.cpp
+index c59696f0ef..9b48df279a 100644
+--- a/src/bin/multiuser/multiuser_utils.cpp
++++ b/src/bin/multiuser/multiuser_utils.cpp
+@@ -43,7 +43,7 @@ read_password(const char* prompt, char* password, size_t bufferSize,
+ 	int inFD = fileno(in);
+ 	struct termios termAttrs;
+ 	if (tcgetattr(inFD, &termAttrs) != 0) {
+-		fprintf(in, "Error: Failed to get tty attributes: %s\n",
++		fprintf(out, "Error: Failed to get tty attributes: %s\n",
+ 			strerror(errno));
+ 		return errno;
+ 	}
+@@ -52,7 +52,7 @@ read_password(const char* prompt, char* password, size_t bufferSize,
+ 	termAttrs.c_lflag &= ~ECHO;
+ 
+ 	if (tcsetattr(inFD, TCSANOW, &termAttrs) != 0) {
+-		fprintf(in, "Error: Failed to set tty attributes: %s\n",
++		fprintf(out, "Error: Failed to set tty attributes: %s\n",
+ 			strerror(errno));
+ 		return errno;
+ 	}
+diff --git a/src/servers/debug/DebugServer.cpp b/src/servers/debug/DebugServer.cpp
+index 06c2eac28b..decdc9413b 100644
+--- a/src/servers/debug/DebugServer.cpp
++++ b/src/servers/debug/DebugServer.cpp
+@@ -1287,7 +1287,7 @@ main()
+ 	status_t error;
+ 
+ 	// for the time being let the debug server print to the syslog
+-	int console = open("/dev/dprintf", O_RDONLY);
++	int console = open("/dev/dprintf", O_WRONLY);
+ 	if (console < 0) {
+ 		debug_printf("debug_server: Failed to open console: %s\n",
+ 			strerror(errno));
+diff --git a/src/servers/net/NetServer.cpp b/src/servers/net/NetServer.cpp
+index 94a079709a..d61a910758 100644
+--- a/src/servers/net/NetServer.cpp
++++ b/src/servers/net/NetServer.cpp
+@@ -613,7 +613,9 @@ NetServer::_ConfigureResolver(BMessage& resolverConfiguration)
+ 				return B_OK;
+ 			} else if (strncmp(resolveConfBuffer, dynamicDNS, sizeDynamicDNS)
+ 					== 0) {
+-				// Overwrite existing dynamic entries
++				// Overwrite existing dynamic entries; the stream must be
++				// positioned before it can switch from reading to writing
++				fseek(file, 0, SEEK_CUR);
+ 				break;
+ 			}
+ 		}
+@@ -644,6 +646,12 @@ NetServer::_ConfigureResolver(BMessage& resolverConfiguration)
+ 
+ 	fprintf(file, "# End of automatic DHCP additions\n");
+ 
++	// drop what is left of the previous, maybe longer, entries
++	fflush(file);
++	off_t end = ftello(file);
++	if (end >= 0)
++		ftruncate(fileno(file), end);
++
+ 	fclose(file);
+ 
+ 	return B_OK;
+diff --git a/src/servers/net/Services.cpp b/src/servers/net/Services.cpp
+index 12220a7c0e..37651a52ae 100644
+--- a/src/servers/net/Services.cpp
++++ b/src/servers/net/Services.cpp
+@@ -147,10 +147,13 @@ Services::Services(const BMessage& services)
+ {
+ 	// setup pipe to communicate with the listener thread - as the listener
+ 	// blocks on select(), we need a mechanism to interrupt it
+-	if (pipe(&fReadPipe) < 0) {
++	int pipeFDs[2];
++	if (pipe(pipeFDs) < 0) {
+ 		fReadPipe = -1;
+ 		return;
+ 	}
++	fReadPipe = pipeFDs[0];
++	fWritePipe = pipeFDs[1];
+ 
+ 	fcntl(fReadPipe, F_SETFD, FD_CLOEXEC);
+ 	fcntl(fWritePipe, F_SETFD, FD_CLOEXEC);
+diff --git a/src/servers/registrar/TRoster.cpp b/src/servers/registrar/TRoster.cpp
+index f54888ec6a..b42f91bdd3 100644
+--- a/src/servers/registrar/TRoster.cpp
++++ b/src/servers/registrar/TRoster.cpp
+@@ -1758,17 +1758,23 @@ TRoster::_HandleGetRecentEntries(BMessage* request)
+ 		if (!typeError)
+ 			typeError = typeFound == B_STRING_TYPE ? B_OK : B_BAD_TYPE;
+ 		if (!typeError) {
+-			fileTypes = new(nothrow) char*[fileTypesCount];
++			fileTypes = new(nothrow) char*[fileTypesCount]();
+ 			typeError = fileTypes ? B_OK : B_NO_MEMORY;
+ 		}
+ 		if (!typeError) {
+ 			for (int i = 0; !error && i < fileTypesCount; i++) {
+ 				const char* type;
+ 				if (request->FindString("file type", i, &type) == B_OK) {
++					// to_lower() copies the whole string
++					if (strlen(type) >= B_MIME_TYPE_LENGTH) {
++						error = B_BAD_VALUE;
++						break;
++					}
+ 					fileTypes[i] = new(nothrow) char[B_MIME_TYPE_LENGTH];
+ 					error = fileTypes[i] ? B_OK : B_NO_MEMORY;
+ 						// Yes, I do mean to use "error" here, not "typeError"
+-					BPrivate::Storage::to_lower(type, fileTypes[i]);
++					if (!error)
++						BPrivate::Storage::to_lower(type, fileTypes[i]);
+ 						// Types are expected to be lowercase
+ 				}
+ 			}
+@@ -1779,9 +1785,14 @@ TRoster::_HandleGetRecentEntries(BMessage* request)
+ 		const char* sig;
+ 		error = request->FindString("app sig", &sig);
+ 		if (!error) {
+-			appSig = new(nothrow) char[B_MIME_TYPE_LENGTH];
+-			error = appSig ? B_OK : B_NO_MEMORY;
+-			BPrivate::Storage::to_lower(sig, appSig);
++			if (strlen(sig) >= B_MIME_TYPE_LENGTH)
++				error = B_BAD_VALUE;
++			else {
++				appSig = new(nothrow) char[B_MIME_TYPE_LENGTH];
++				error = appSig ? B_OK : B_NO_MEMORY;
++				if (!error)
++					BPrivate::Storage::to_lower(sig, appSig);
++			}
+ 		} else if (error == B_NAME_NOT_FOUND)
+ 			error = B_OK;
+ 	}

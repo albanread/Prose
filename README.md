@@ -420,6 +420,16 @@ table there also records why each one exists.
 | 0138 | `malloc` scales with threads and keeps its heap in one piece: small blocks come from per-thread caches without a lock, freeing another thread's block no longer searches every pool, and the heap no longer splits into thousands of areas. 4-600 times the throughput with several threads; the Mojo compiler 15-30% faster |
 | 0139 | The host's shared folders are mounted at `/HostFS` again with the new allocator, and DriveSetup shows a disk's volume name reliably: both read a name from freed memory |
 | 0140 | Programs that read memory they have freed keep working as they did (Slayer crashed with 0138): the allocator no longer writes into freed blocks, and frees from other threads are faster |
+| 0141 | Writing nothing to a FAT, NTFS or NFS file (an empty `writev()`) no longer panics the kernel; and eight smaller kernel fixes from the static analysis |
+| 0142 | A packages settings file with an empty blocked entry no longer corrupts the kernel at boot |
+| 0143 | Long `syslog()` messages, timers and detached main threads that exit, `mmap()` from a signal handler, dates with dashes, `key =` settings and `UTIME_NOW` all work |
+| 0144 | Fixes in strings, URLs, keys, channel sliders, column lists and fonts from the static analysis |
+| 0145 | Queries with a '%' no longer hang, media files no longer leak descriptors, IPv6 prefixes are right, and more media and network fixes |
+| 0146 | Tracker refuses again to replace a file with a folder (it deleted the file), and five more Tracker fixes |
+| 0147 | app_server no longer crashes drawing copied pictures, or hangs with very large bold fonts |
+| 0148 | Applications can no longer corrupt the registrar with long file types; Deskbar leaks and Mail's reply account fixed |
+| 0149 | Writing nothing to a FAT, NTFS or NFS file returns 0 and leaves the file alone (FAT said it was an I/O error) |
+| 0150 | An empty blocked entry in the packages settings no longer leaves the system unable to boot |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series

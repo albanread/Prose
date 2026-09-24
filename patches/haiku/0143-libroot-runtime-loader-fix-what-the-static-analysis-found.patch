@@ -1,0 +1,342 @@
+From 8b9c7826b25dc278b38e35ecb0297fd33fc4e611 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:19:36 +0100
+Subject: [PATCH] libroot, runtime_loader: fix what the static analysis found
+
+- syslog: the '\n' was stored at the formatted message's full length, past
+  the 2048 byte buffer on the stack, and write_port() sent what lay beyond
+  it. The length is now what vsnprintf() stored.
+- pthread: the main thread's structure is static and a SIGEV_THREAD timer
+  thread's is on its stack, yet once they were detached, their exit freed
+  them. THREAD_NOT_ALLOCATED marks them, and one helper frees the others.
+- runtime_loader: looking up the image of a commpage address stored the
+  symbol name through the NULL that mmap() and pthread_create() pass. A
+  signal handler that ends with a tail call to mmap() crashed in it.
+- parsedate: a '-' in a format advanced the format but not the position,
+  so "12-25-2020 10:30" came out as 00:10.
+- driver_settings: "key =" with nothing after it dropped the parameter and
+  leaked its values; parse errors leaked what was parsed so far.
+- utimensat(): UTIME_NOW was replaced by the caller's tv_sec.
+- strfmon(): va_end() was missing.
+
+Test: HaikuArmQemu's tools/analysis-fixes/afxtest, syslog-long-message,
+pthread-detach-main, timer-thread-exit, commpage-image-lookup,
+parsedate-dash, driver-settings-empty-assignment and utimensat-now.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0143-libroot-runtime-loader-fix-what-the-static-analysis-found.patch 2aa52431a1603912538c0f7e5a3400ad9c6ef3b185c5840dec8a6f4f8a399bc4
+---
+ headers/private/libroot/pthread_private.h     |  2 ++
+ src/system/libroot/os/driver_settings.cpp     | 18 ++++++++++++++++--
+ src/system/libroot/os/parsedate.cpp           |  4 +++-
+ src/system/libroot/posix/pthread/pthread.cpp  | 19 +++++++++++++++----
+ src/system/libroot/posix/stdlib/strfmon.c     | 10 ++++++++--
+ src/system/libroot/posix/sys/utimes.c         | 10 ++++++----
+ src/system/libroot/posix/syslog.cpp           | 15 ++++++++++-----
+ .../libroot/posix/time/timer_support.cpp      |  2 +-
+ src/system/runtime_loader/commpage.cpp        | 13 +++++++++++--
+ src/system/runtime_loader/elf.cpp             |  6 ++++--
+ 10 files changed, 76 insertions(+), 23 deletions(-)
+
+diff --git a/headers/private/libroot/pthread_private.h b/headers/private/libroot/pthread_private.h
+index 8cd64e76e5..9560e2b1e0 100644
+--- a/headers/private/libroot/pthread_private.h
++++ b/headers/private/libroot/pthread_private.h
+@@ -18,6 +18,8 @@
+ #define THREAD_CANCELED				0x04
+ #define THREAD_CANCEL_ENABLED		0x08
+ #define THREAD_CANCEL_ASYNCHRONOUS	0x10
++#define THREAD_NOT_ALLOCATED		0x20
++	// static or on a stack: must never be freed
+ 
+ // _pthread_mutex::flags values
+ #define MUTEX_FLAG_SHARED	0x80000000
+diff --git a/src/system/libroot/os/driver_settings.cpp b/src/system/libroot/os/driver_settings.cpp
+index fb066f7f6e..6182905f54 100644
+--- a/src/system/libroot/os/driver_settings.cpp
++++ b/src/system/libroot/os/driver_settings.cpp
+@@ -287,6 +287,12 @@ parse_parameter(struct driver_parameter *parameter, char **_pos, int32 level)
+ 				? ALLOW_ASSIGNMENT : IGNORE_ASSIGNMENT, false);
+ 			if (status < B_OK)
+ 				break;
++			if (status == NO_PARAMETER) {
++				// "name =" with nothing after the '=': a parameter without
++				// values, not none at all
++				status = B_OK;
++				break;
++			}
+ 
+ 			// enlarge value array and save the value
+ 
+@@ -318,16 +324,20 @@ parse_parameters(struct driver_parameter **_parameters, int *_count,
+ 		status_t status;
+ 
+ 		status = parse_parameter(&parameter, _pos, level);
+-		if (status < B_OK)
++		if (status < B_OK) {
++			free(parameter.values);
+ 			return status;
++		}
+ 
+ 		if (status != NO_PARAMETER) {
+ 			driver_parameter *newParameter;
+ 
+ 			newArray = (driver_parameter*)realloc(*_parameters, (*_count + 1)
+ 				* sizeof(struct driver_parameter));
+-			if (newArray == NULL)
++			if (newArray == NULL) {
++				free(parameter.values);
+ 				return B_NO_MEMORY;
++			}
+ 
+ 			memcpy(&newArray[*_count], &parameter, sizeof(struct driver_parameter));
+ 			newParameter = &newArray[*_count];
+@@ -424,6 +434,10 @@ new_settings(char *buffer, const char *driverName)
+ 	if (parse_settings(handle) == B_OK)
+ 		return handle;
+ 
++	// free what was parsed before the error; the text stays the caller's
++	for (int32 i = handle->settings.parameter_count; i-- > 0;)
++		free_parameter(&handle->settings.parameters[i]);
++	free(handle->settings.parameters);
+ 	free(handle);
+ 	return NULL;
+ }
+diff --git a/src/system/libroot/os/parsedate.cpp b/src/system/libroot/os/parsedate.cpp
+index 389460e754..f6ddc73fd5 100644
+--- a/src/system/libroot/os/parsedate.cpp
++++ b/src/system/libroot/os/parsedate.cpp
+@@ -862,8 +862,10 @@ computeDate(const char* format, bool* optional, parsed_element* elements,
+ 						computeRelativeUnit(*element, tm, _flags);
+ 						break;
+ 					case '-':
+-						// there is no TYPE_DASH element for this (just a flag)
++						// there is no TYPE_DASH element for this (just a flag);
++						// the matcher spends a position on it, so must this
+ 						format++;
++						position++;
+ 						continue;
+ 				}
+ 				break;
+diff --git a/src/system/libroot/posix/pthread/pthread.cpp b/src/system/libroot/posix/pthread/pthread.cpp
+index d0ba48486a..39233c4d3b 100644
+--- a/src/system/libroot/posix/pthread/pthread.cpp
++++ b/src/system/libroot/posix/pthread/pthread.cpp
+@@ -36,10 +36,21 @@ static pthread_attr pthread_attr_default = {
+ };
+ 
+ 
+-static pthread_thread sMainThread;
++static pthread_thread sMainThread = { 0, THREAD_NOT_ALLOCATED };
+ static int sConcurrencyLevel;
+ 
+ 
++/*!	Frees a detached or joined thread's structure -- unless it is the main
++	thread's, or a timer thread's, which are not on the heap.
++*/
++static void
++free_pthread(pthread_thread* thread)
++{
++	if ((thread->flags & THREAD_NOT_ALLOCATED) == 0)
++		free(thread);
++}
++
++
+ static status_t
+ pthread_thread_entry(void*, void* _thread)
+ {
+@@ -73,7 +84,7 @@ __pthread_destroy_thread(void)
+ 	__pthread_key_call_destructors(thread);
+ 
+ 	if ((atomic_or(&thread->flags, THREAD_DEAD) & THREAD_DETACHED) != 0)
+-		free(thread);
++		free_pthread(thread);
+ }
+ 
+ 
+@@ -164,7 +175,7 @@ __pthread_join(pthread_t thread, void** _value, int flags = 0, bigtime_t timeout
+ 		*_value = thread->exit_value;
+ 
+ 	if ((atomic_or(&thread->flags, THREAD_DETACHED) & THREAD_DEAD) != 0)
+-		free(thread);
++		free_pthread(thread);
+ 
+ 	RETURN_AND_TEST_CANCEL(B_OK);
+ }
+@@ -277,7 +288,7 @@ pthread_detach(pthread_t thread)
+ 		return EINVAL;
+ 
+ 	if ((flags & THREAD_DEAD) != 0)
+-		free(thread);
++		free_pthread(thread);
+ 
+ 	return 0;
+ }
+diff --git a/src/system/libroot/posix/stdlib/strfmon.c b/src/system/libroot/posix/stdlib/strfmon.c
+index ffb810f1e5..ff4589e212 100644
+--- a/src/system/libroot/posix/stdlib/strfmon.c
++++ b/src/system/libroot/posix/stdlib/strfmon.c
+@@ -101,9 +101,12 @@ ssize_t
+ strfmon(char *s, size_t maxsize, const char *format, ...)
+ {
+ 	va_list ap;
++	ssize_t result;
+ 	struct lconv* lc = localeconv();
+ 	va_start(ap, format);
+-	return __strfmon(s, maxsize, lc, format, ap);
++	result = __strfmon(s, maxsize, lc, format, ap);
++	va_end(ap);
++	return result;
+ }
+ 
+ 
+@@ -111,9 +114,12 @@ ssize_t
+ strfmon_l(char *s, size_t maxsize, locale_t locale, const char *format, ...)
+ {
+ 	va_list ap;
++	ssize_t result;
+ 	struct lconv* lc = localeconv_l(locale);
+ 	va_start(ap, format);
+-	return __strfmon(s, maxsize, lc, format, ap);
++	result = __strfmon(s, maxsize, lc, format, ap);
++	va_end(ap);
++	return result;
+ }
+ 
+ 
+diff --git a/src/system/libroot/posix/sys/utimes.c b/src/system/libroot/posix/sys/utimes.c
+index d3bd806a1c..1f2757fcc0 100644
+--- a/src/system/libroot/posix/sys/utimes.c
++++ b/src/system/libroot/posix/sys/utimes.c
+@@ -74,24 +74,26 @@ utimensat(int fd, const char *path, const struct timespec times[2], int flag)
+ 		if (times[0].tv_nsec != UTIME_OMIT) {
+ 			mask |= B_STAT_ACCESS_TIME;
+ 
++			// UTIME_NOW keeps the current time set above
+ 			if (times[0].tv_nsec != UTIME_NOW) {
+ 				if (times[0].tv_nsec < 0 || times[0].tv_nsec > 999999999)
+ 					RETURN_AND_SET_ERRNO(EINVAL);
+-			}
+ 
+-			stat.st_atim = times[0];
++				stat.st_atim = times[0];
++			}
+ 		}
+ 
+ 		// modified time
+ 		if (times[1].tv_nsec != UTIME_OMIT) {
+ 			mask |= B_STAT_MODIFICATION_TIME;
+ 
++			// UTIME_NOW keeps the current time set above
+ 			if (times[1].tv_nsec != UTIME_NOW) {
+ 				if (times[1].tv_nsec < 0 || times[1].tv_nsec > 999999999)
+ 					RETURN_AND_SET_ERRNO(EINVAL);
+-			}
+ 
+-			stat.st_mtim = times[1];
++				stat.st_mtim = times[1];
++			}
+ 		}
+ 	} else
+ 		mask |= B_STAT_ACCESS_TIME | B_STAT_MODIFICATION_TIME;
+diff --git a/src/system/libroot/posix/syslog.cpp b/src/system/libroot/posix/syslog.cpp
+index 71482c6f31..0bc0469fa7 100644
+--- a/src/system/libroot/posix/syslog.cpp
++++ b/src/system/libroot/posix/syslog.cpp
+@@ -163,11 +163,16 @@ send_syslog_message(syslog_context *context, int priority, const char *text,
+ 
+ 	int length = vsnprintf(message.message, sizeof(buffer)
+ 		- sizeof(syslog_message), text, args);
+-	if (message.message + length - buffer < (int32)sizeof(buffer)) {
+-		if (length == 0 || message.message[length - 1] != '\n')
+-			message.message[length++] = '\n';
+-	} else
+-		buffer[length - 1] = '\n';
++
++	// vsnprintf() returns the length the whole message would have had; keep
++	// what it stored, and room for the '\n'
++	const int maxLength = (int)(sizeof(buffer) - sizeof(syslog_message)) - 1;
++	if (length < 0)
++		length = 0;
++	else if (length > maxLength)
++		length = maxLength;
++	if (length == 0 || message.message[length - 1] != '\n')
++		message.message[length++] = '\n';
+ 
+ 	status_t status;
+ 	do {
+diff --git a/src/system/libroot/posix/time/timer_support.cpp b/src/system/libroot/posix/time/timer_support.cpp
+index 74e835837d..0c1e804bcc 100644
+--- a/src/system/libroot/posix/time/timer_support.cpp
++++ b/src/system/libroot/posix/time/timer_support.cpp
+@@ -61,7 +61,7 @@ timer_thread_entry(void* _entry, void* _value)
+ 	// init a pthread
+ 	pthread_thread thread;
+ 	__init_pthread(&thread, NULL, NULL);
+-	thread.flags |= THREAD_DETACHED;
++	thread.flags |= THREAD_DETACHED | THREAD_NOT_ALLOCATED;
+ 
+ 	get_user_thread()->pthread = &thread;
+ 
+diff --git a/src/system/runtime_loader/commpage.cpp b/src/system/runtime_loader/commpage.cpp
+index 3ed9473f9b..f346cf2cea 100644
+--- a/src/system/runtime_loader/commpage.cpp
++++ b/src/system/runtime_loader/commpage.cpp
+@@ -99,6 +99,13 @@ get_nearest_commpage_symbol_at_address_locked(void* address, image_id* _imageID,
+ 	if (_imageName != NULL)
+ 		*_imageName = (char*)kCommpageName;
+ 
++	// If the caller does not want the actual symbol name, only the image,
++	// we can just return immediately -- as elf.cpp does. mmap() and
++	// pthread_create() ask this way, and mmap()'s return address is in the
++	// commpage when a signal handler ends by calling it.
++	if (!wantsSymbol)
++		return B_OK;
++
+ 	bool exactMatch = false;
+ 	elf_sym* foundSymbol = NULL;
+ 	addr_t foundLocation = (addr_t)NULL;
+@@ -123,7 +130,8 @@ get_nearest_commpage_symbol_at_address_locked(void* address, image_id* _imageID,
+ 		*_exactMatch = exactMatch;
+ 
+ 	if (foundSymbol != NULL) {
+-		*_symbolName = sCommpageStringTable + foundSymbol->st_name;
++		if (_symbolName != NULL)
++			*_symbolName = sCommpageStringTable + foundSymbol->st_name;
+ 
+ 		if (_type != NULL) {
+ 			if (foundSymbol->Type() == STT_FUNC)
+@@ -137,7 +145,8 @@ get_nearest_commpage_symbol_at_address_locked(void* address, image_id* _imageID,
+ 		if (_location != NULL)
+ 			*_location = (void*)foundLocation;
+ 	} else {
+-		*_symbolName = NULL;
++		if (_symbolName != NULL)
++			*_symbolName = NULL;
+ 		if (_location != NULL)
+ 			*_location = NULL;
+ 	}
+diff --git a/src/system/runtime_loader/elf.cpp b/src/system/runtime_loader/elf.cpp
+index 9a70077226..4944203083 100644
+--- a/src/system/runtime_loader/elf.cpp
++++ b/src/system/runtime_loader/elf.cpp
+@@ -911,7 +911,8 @@ get_nearest_symbol_at_address(void* address, image_id* _imageID,
+ 		*_exactMatch = exactMatch;
+ 
+ 	if (foundSymbol != NULL) {
+-		*_symbolName = SYMNAME(image, foundSymbol);
++		if (_symbolName != NULL)
++			*_symbolName = SYMNAME(image, foundSymbol);
+ 
+ 		if (_type != NULL) {
+ 			if (foundSymbol->Type() == STT_FUNC)
+@@ -926,7 +927,8 @@ get_nearest_symbol_at_address(void* address, image_id* _imageID,
+ 		if (_location != NULL)
+ 			*_location = (void*)foundLocation;
+ 	} else {
+-		*_symbolName = NULL;
++		if (_symbolName != NULL)
++			*_symbolName = NULL;
+ 		if (_location != NULL)
+ 			*_location = NULL;
+ 	}

@@ -1,0 +1,335 @@
+From 30d05bd0c3a90404fc35296bd088ce4100b5b073 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:19:36 +0100
+Subject: [PATCH] app, interface, support kits: fix what the static analysis
+ found
+
+- BString: CharacterEscape() and CharacterDeescape() working in place read
+  their own buffer after _MakeWritable() had moved or freed it, whenever
+  the string held a NUL (or the source pointed into the string). The source
+  is copied first when it lies in the string's buffer.
+- BUrl: the scheme check counted with an int8, which wrapped at 128 and read
+  before the string.
+- BApplication: Quit() on an unlocked application that never ran deleted
+  it, and then unlocked it.
+- BPasswordKey: the copy constructor did not copy.
+- BChannelControl: growing the channel count copied that many bytes of the
+  values and limits, not that many int32s.
+- BColumnListView: dragging a column title right of the last column moved
+  the column to the front, with an uninitialized left edge; it goes to the
+  end now.
+- BFont::StringWidth(), BTextView's context menu and BPrivateScreen used
+  values that are unset when app_server refuses or undo is off.
+- BMessage: a copy whose header could not be allocated was sent.
+- BLayoutBuilder: a menu item that could not be added was deleted, and the
+  builder went on with NULL; it throws, as AddMenu() does.
+- BShape: copying an empty shape passed NULL to memcpy().
+- SimpleLayouter, ComplexLayouter: out of memory, one used an item that was
+  not in its list, the other could never notice the failure (|= on true).
+
+Test: HaikuArmQemu's tools/analysis-fixes/afxtest, string-escape-in-place
+(under the guarded heap), url-long-scheme, application-quit-unlocked,
+password-key-copy, channel-count-grow, column-drag-past-last,
+font-zero-size-width and shape-copy-empty.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0144-app-interface-support-kits-fix-what-the-static-analysis-foun.patch 9c238419041ab6128534c0db8189861bc7851e78ec972c5c16bfc9fa273f8d4b
+---
+ headers/os/interface/LayoutBuilder.h           |  8 ++++++--
+ src/kits/app/Application.cpp                   |  4 +++-
+ src/kits/app/Key.cpp                           |  2 ++
+ src/kits/app/Message.cpp                       |  4 +++-
+ src/kits/interface/ChannelControl.cpp          |  6 +++---
+ src/kits/interface/ColumnListView.cpp          | 11 ++++++++---
+ src/kits/interface/Font.cpp                    |  3 ++-
+ src/kits/interface/PrivateScreen.cpp           |  3 ++-
+ src/kits/interface/Shape.cpp                   | 17 +++++++++++------
+ src/kits/interface/TextView.cpp                |  3 ++-
+ .../interface/layouter/ComplexLayouter.cpp     |  4 ++--
+ src/kits/interface/layouter/SimpleLayouter.cpp | 10 +++++++++-
+ src/kits/support/String.cpp                    | 18 ++++++++++++++++++
+ src/kits/support/Url.cpp                       |  2 +-
+ 14 files changed, 72 insertions(+), 23 deletions(-)
+
+diff --git a/headers/os/interface/LayoutBuilder.h b/headers/os/interface/LayoutBuilder.h
+index 3601369f7f..97264bceb7 100644
+--- a/headers/os/interface/LayoutBuilder.h
++++ b/headers/os/interface/LayoutBuilder.h
+@@ -1738,8 +1738,10 @@ Menu<ParentBuilder>::AddItem(const char* label, BMessage* message,
+ {
+ 	BMenuItem* item = new BMenuItem(label, message, shortcut, modifiers);
+ 	if (!fMenu->AddItem(item)) {
++		// the builder's calls would go through a NULL item: fail as
++		// AddMenu() does
+ 		delete item;
+-		item = NULL;
++		throw std::bad_alloc();
+ 	}
+ 
+ 	return MenuItem<ParentBuilder>(this->fParent, fMenu, item);
+@@ -1761,8 +1763,10 @@ Menu<ParentBuilder>::AddItem(const char* label, uint32 messageWhat,
+ 	}
+ 
+ 	if (!fMenu->AddItem(item)) {
++		// the builder's calls would go through a NULL item: fail as
++		// AddMenu() does
+ 		delete item;
+-		item = NULL;
++		throw std::bad_alloc();
+ 	}
+ 
+ 	return MenuItem<ParentBuilder>(this->fParent, fMenu, item);
+diff --git a/src/kits/app/Application.cpp b/src/kits/app/Application.cpp
+index 8620dbdcc8..bda6e8fbda 100644
+--- a/src/kits/app/Application.cpp
++++ b/src/kits/app/Application.cpp
+@@ -614,9 +614,11 @@ BApplication::Quit()
+ 		if (!Lock())
+ 			return;
+ 	}
+-	// Delete the object, if not running only.
++	// Delete the object, if not running only; the lock goes with it, as in
++	// BLooper::Quit()
+ 	if (!fRunCalled) {
+ 		delete this;
++		return;
+ 	} else if (find_thread(NULL) != fThread) {
+ // ToDo: why shouldn't we set fTerminating to true directly in this case?
+ 		// We are not the looper thread.
+diff --git a/src/kits/app/Key.cpp b/src/kits/app/Key.cpp
+index ffe5374c30..df4df92fbe 100644
+--- a/src/kits/app/Key.cpp
++++ b/src/kits/app/Key.cpp
+@@ -301,6 +301,8 @@ BPasswordKey::BPasswordKey(const char* password, BKeyPurpose purpose,
+ 
+ 
+ BPasswordKey::BPasswordKey(BPasswordKey& other)
++	:
++	BKey(other)
+ {
+ }
+ 
+diff --git a/src/kits/app/Message.cpp b/src/kits/app/Message.cpp
+index b4d6a135bd..10883e3c85 100644
+--- a/src/kits/app/Message.cpp
++++ b/src/kits/app/Message.cpp
+@@ -2149,10 +2149,12 @@ BMessage::_SendMessage(port_id port, team_id portOwner, int32 token,
+ 		// message in its message queue. This will also prevent possible
+ 		// deadlocks when the queue is full.
+ 		copy = new BMessage(*this);
+-		if (copy != NULL) {
++		if (copy != NULL && copy->fHeader != NULL) {
+ 			header = copy->fHeader;
+ 			header->flags = fHeader->flags;
+ 		} else {
++			// the copy's header could not be allocated
++			delete copy;
+ 			direct->Release();
+ 			return B_NO_MEMORY;
+ 		}
+diff --git a/src/kits/interface/ChannelControl.cpp b/src/kits/interface/ChannelControl.cpp
+index 4e8f51ea1a..089b2ed117 100644
+--- a/src/kits/interface/ChannelControl.cpp
++++ b/src/kits/interface/ChannelControl.cpp
+@@ -397,9 +397,9 @@ BChannelControl::SetChannelCount(int32 channel_count)
+ 		int32* newMax = new int32[channel_count];
+ 		int32* newVal = new int32[channel_count];
+ 
+-		memcpy(newMin, fChannelMin, fChannelCount);
+-		memcpy(newMax, fChannelMax, fChannelCount);
+-		memcpy(newVal, fChannelValues, fChannelCount);
++		memcpy(newMin, fChannelMin, fChannelCount * sizeof(int32));
++		memcpy(newMax, fChannelMax, fChannelCount * sizeof(int32));
++		memcpy(newVal, fChannelValues, fChannelCount * sizeof(int32));
+ 
+ 		delete[] fChannelMin;
+ 		delete[] fChannelMax;
+diff --git a/src/kits/interface/ColumnListView.cpp b/src/kits/interface/ColumnListView.cpp
+index fc323c123c..cd417826a4 100644
+--- a/src/kits/interface/ColumnListView.cpp
++++ b/src/kits/interface/ColumnListView.cpp
+@@ -2501,8 +2501,11 @@ TitleView::FindColumn(BPoint position, float* _leftEdge)
+ 		if (!column->IsVisible())
+ 			continue;
+ 
+-		if (leftEdge > position.x)
+-			break;
++		if (leftEdge > position.x) {
++			// left of this column, or in the gap before it
++			*_leftEdge = leftEdge;
++			return index;
++		}
+ 
+ 		if (position.x >= leftEdge
+ 			&& position.x <= leftEdge + column->Width()) {
+@@ -2513,7 +2516,9 @@ TitleView::FindColumn(BPoint position, float* _leftEdge)
+ 		leftEdge += column->Width() + 1;
+ 	}
+ 
+-	return 0;
++	// right of the last column; MoveColumn() appends for -1
++	*_leftEdge = leftEdge;
++	return -1;
+ }
+ 
+ 
+diff --git a/src/kits/interface/Font.cpp b/src/kits/interface/Font.cpp
+index 3eb4aab57c..8219e1d870 100644
+--- a/src/kits/interface/Font.cpp
++++ b/src/kits/interface/Font.cpp
+@@ -1012,7 +1012,8 @@ BFont::StringWidth(const char* string) const
+ 		return 0.0;
+ 
+ 	int32 length = strlen(string);
+-	float width;
++	float width = 0.0;
++		// GetStringWidths() leaves it unset if app_server refuses
+ 	GetStringWidths(&string, &length, 1, &width);
+ 
+ 	return width;
+diff --git a/src/kits/interface/PrivateScreen.cpp b/src/kits/interface/PrivateScreen.cpp
+index fd41531555..321c8d0f93 100644
+--- a/src/kits/interface/PrivateScreen.cpp
++++ b/src/kits/interface/PrivateScreen.cpp
+@@ -254,7 +254,8 @@ BPrivateScreen::GetNextID(int32& id)
+ 	link.StartMessage(AS_GET_NEXT_SCREEN_ID);
+ 	link.Attach<int32>(ID());
+ 
+-	status_t status;
++	status_t status = B_ERROR;
++		// left unset when the round trip to app_server fails
+ 	if (link.FlushWithReply(status) == B_OK && status == B_OK) {
+ 		link.Read<int32>(&id);
+ 		return B_OK;
+diff --git a/src/kits/interface/Shape.cpp b/src/kits/interface/Shape.cpp
+index 83e2fd96b3..1f04f340c0 100644
+--- a/src/kits/interface/Shape.cpp
++++ b/src/kits/interface/Shape.cpp
+@@ -366,13 +366,18 @@ BShape::AddShape(const BShape* otherShape)
+ 	if (!AllocateOps(otherData->opCount) || !AllocatePts(otherData->ptCount))
+ 		return B_NO_MEMORY;
+ 
+-	memcpy(data->opList + data->opCount, otherData->opList,
+-		otherData->opCount * sizeof(uint32));
+-	data->opCount += otherData->opCount;
++	// an empty shape may have no lists at all
++	if (otherData->opCount > 0) {
++		memcpy(data->opList + data->opCount, otherData->opList,
++			otherData->opCount * sizeof(uint32));
++		data->opCount += otherData->opCount;
++	}
+ 
+-	memcpy((void*)(data->ptList + data->ptCount), otherData->ptList,
+-		otherData->ptCount * sizeof(BPoint));
+-	data->ptCount += otherData->ptCount;
++	if (otherData->ptCount > 0) {
++		memcpy((void*)(data->ptList + data->ptCount), otherData->ptList,
++			otherData->ptCount * sizeof(BPoint));
++		data->ptCount += otherData->ptCount;
++	}
+ 
+ 	fBuildingOp = otherShape->fBuildingOp;
+ 
+diff --git a/src/kits/interface/TextView.cpp b/src/kits/interface/TextView.cpp
+index 896c4cc6dc..5fe1426b15 100644
+--- a/src/kits/interface/TextView.cpp
++++ b/src/kits/interface/TextView.cpp
+@@ -5965,7 +5965,8 @@ BTextView::_NullStyleHeight() const
+ void
+ BTextView::_ShowContextMenu(BPoint where)
+ {
+-	bool isRedo;
++	bool isRedo = false;
++		// UndoState() does not set it when undo is off
+ 	undo_state state = UndoState(&isRedo);
+ 	bool isUndo = state != B_UNDO_UNAVAILABLE && !isRedo;
+ 
+diff --git a/src/kits/interface/layouter/ComplexLayouter.cpp b/src/kits/interface/layouter/ComplexLayouter.cpp
+index ee61401251..78bcf59c07 100644
+--- a/src/kits/interface/layouter/ComplexLayouter.cpp
++++ b/src/kits/interface/layouter/ComplexLayouter.cpp
+@@ -492,12 +492,12 @@ ComplexLayouter::_AddOptimizerConstraints()
+ 					// min and max not equal -- add them individually,
+ 					// unless redundant
+ 					if (!minRedundant) {
+-						success |= fOptimizer->AddConstraint(
++						success &= fOptimizer->AddConstraint(
+ 							constraint->start - 1, constraint->end,
+ 							constraint->min, false);
+ 					}
+ 					if (!maxRedundant) {
+-						success |= fOptimizer->AddConstraint(constraint->end,
++						success &= fOptimizer->AddConstraint(constraint->end,
+ 							constraint->start - 1,
+ 							-constraint->effectiveMax, false);
+ 					}
+diff --git a/src/kits/interface/layouter/SimpleLayouter.cpp b/src/kits/interface/layouter/SimpleLayouter.cpp
+index 2bf049fa49..517893164e 100644
+--- a/src/kits/interface/layouter/SimpleLayouter.cpp
++++ b/src/kits/interface/layouter/SimpleLayouter.cpp
+@@ -257,7 +257,15 @@ SimpleLayouter::DistributeSize(int32 size, float weights[], int32 sizes[],
+ 	for (int32 i = 0; i < count; i++) {
+ 		ElementInfo* info = new ElementInfo(i);
+ 		info->weight = weights[i];
+-		elementInfos.AddItem(info);
++		if (!elementInfos.AddItem(info)) {
++			// out of memory: split the size evenly instead
++			delete info;
++			for (int32 j = 0; j < elementInfos.CountItems(); j++)
++				delete (ElementInfo*)elementInfos.ItemAt(j);
++			for (int32 j = 0; j < count; j++)
++				sizes[j] = size / count + (j < size % count ? 1 : 0);
++			return;
++		}
+ 	}
+ 
+ 	// compute integer weights
+diff --git a/src/kits/support/String.cpp b/src/kits/support/String.cpp
+index d2af36c300..d51d29e8cf 100644
+--- a/src/kits/support/String.cpp
++++ b/src/kits/support/String.cpp
+@@ -2575,6 +2575,15 @@ BString&
+ BString::_DoCharacterEscape(const char* string, const char* setOfCharsToEscape,
+ 	char escapeChar)
+ {
++	// _MakeWritable() may move or free this string's buffer, which the
++	// source can be in (the overloads working in place pass it): copy it first
++	BString source;
++	if (fPrivateData != NULL && string >= fPrivateData
++		&& string <= fPrivateData + Length()) {
++		source.SetTo(string);
++		string = source.String();
++	}
++
+ 	if (_MakeWritable(string_length(string), false) != B_OK)
+ 		return *this;
+ 
+@@ -2629,6 +2638,15 @@ BString::_DoCharacterEscape(const char* string, const char* setOfCharsToEscape,
+ BString&
+ BString::_DoCharacterDeescape(const char* string, char escapeChar)
+ {
++	// _MakeWritable() may move or free this string's buffer, which the
++	// source can be in (the overload working in place passes it): copy it
++	BString source;
++	if (fPrivateData != NULL && string >= fPrivateData
++		&& string <= fPrivateData + Length()) {
++		source.SetTo(string);
++		string = source.String();
++	}
++
+ 	if (_MakeWritable(string_length(string), false) != B_OK)
+ 		return *this;
+ 
+diff --git a/src/kits/support/Url.cpp b/src/kits/support/Url.cpp
+index 19c10bc3ee..ecf04c0020 100644
+--- a/src/kits/support/Url.cpp
++++ b/src/kits/support/Url.cpp
+@@ -1382,7 +1382,7 @@ BUrl::_IsHostValid() const
+ bool
+ BUrl::_IsProtocolValid() const
+ {
+-	for (int8 index = 0; index < fProtocol.Length(); index++) {
++	for (int32 index = 0; index < fProtocol.Length(); index++) {
+ 		char c = fProtocol[index];
+ 
+ 		if (index == 0 && !isalpha(c))

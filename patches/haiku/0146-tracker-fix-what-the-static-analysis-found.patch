@@ -1,0 +1,296 @@
+From 520c585cddfdb1fdc8360c7d5d41e0d9a44ce66a Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 10:19:38 +0100
+Subject: [PATCH] Tracker: fix what the static analysis found
+
+- FSUtils: a typo, !(a || b != c) for !(a || b == c), turned off the check
+  that refuses to replace a file with a folder (and the other way round)
+  when copying or moving -- the folder-merge prompt came instead, and
+  "Replace" deleted the file.
+- BNavMenu: a link to an invisible folder deleted the resolved Model while
+  a BModelOpener still held it.
+- TrackerString: the glob '?' and a negated bracket matched the end of the
+  string and went on past it; the 101st '*' was stored past its arrays.
+- WidgetAttributeText: starting to edit a rating or a checkbox fits the
+  value without a pose view, which the truncation asked for its font. The
+  helpers measure with the plain font then, as BPoseView does.
+- BViewState: a view mode of 0 passed the sanity check, and every pose was
+  created and never listed.
+- BPoseView: the lists leaked when "Move to Trash" was cancelled, and an
+  empty one on every move; scripting's "delete Entry" deleted the entries
+  of an owning list, which deleted them again.
+
+Test: HaikuArmQemu's tools/analysis-fixes/afxtest, tracker-glob (also under
+the guarded heap), nav-menu-hidden-link (under the guarded heap) and
+rating-edit-without-view.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0146-tracker-fix-what-the-static-analysis-found.patch bbbf1c1259bb90252101e43662777a46a36d6e8068d7a2f81f48d9c667ce3fb4
+---
+ src/kits/tracker/FSUtils.cpp             |  2 +-
+ src/kits/tracker/NavMenu.cpp             | 19 ++++++-----
+ src/kits/tracker/PoseView.cpp            | 10 ++++--
+ src/kits/tracker/PoseViewScripting.cpp   |  3 +-
+ src/kits/tracker/TrackerString.cpp       | 20 ++++++++---
+ src/kits/tracker/ViewState.cpp           |  9 +++--
+ src/kits/tracker/WidgetAttributeText.cpp | 43 ++++++++++++++++++++++--
+ 7 files changed, 85 insertions(+), 21 deletions(-)
+
+diff --git a/src/kits/tracker/FSUtils.cpp b/src/kits/tracker/FSUtils.cpp
+index 9c5f6f1006..f1dfe8ac18 100644
+--- a/src/kits/tracker/FSUtils.cpp
++++ b/src/kits/tracker/FSUtils.cpp
+@@ -2271,7 +2271,7 @@ CheckName(uint32 moveMode, const BEntry* sourceEntry,
+ 	// ensure that the user isn't trying to replace a file with folder
+ 	// or vice-versa
+ 	if (destIsDir != sourceIsDirectory
+-		&& !(moveMode == kCreateLink || moveMode != kCreateRelativeLink)) {
++		&& !(moveMode == kCreateLink || moveMode == kCreateRelativeLink)) {
+ 		BAlert* alert = new BAlert("", sourceIsDirectory
+ 			? B_TRANSLATE("You cannot replace a file with a folder or a "
+ 				"symbolic link.")
+diff --git a/src/kits/tracker/NavMenu.cpp b/src/kits/tracker/NavMenu.cpp
+index 6b13e569e7..050fed7408 100644
+--- a/src/kits/tracker/NavMenu.cpp
++++ b/src/kits/tracker/NavMenu.cpp
+@@ -612,18 +612,21 @@ BNavMenu::NewModelItem(Model* model, const BMessage* invokeMessage,
+ 		}
+ 
+ 		if (result != NULL) {
+-			BModelOpener opener(result);
+-				// open the model, if it ain't open already
+-
+ 			PoseInfo poseInfo;
+ 			ssize_t size = -1;
+ 
+-			if (result->Node() != NULL) {
+-				size = result->Node()->ReadAttr(kAttrPoseInfo, B_RAW_TYPE, 0,
+-					&poseInfo, sizeof(poseInfo));
+-			}
++			{
++				// the opener must be gone before newResolvedModel is deleted
++				BModelOpener opener(result);
++					// open the model, if it ain't open already
+ 
+-			result->CloseNode();
++				if (result->Node() != NULL) {
++					size = result->Node()->ReadAttr(kAttrPoseInfo, B_RAW_TYPE,
++						0, &poseInfo, sizeof(poseInfo));
++				}
++
++				result->CloseNode();
++			}
+ 
+ 			if (size == sizeof(poseInfo) && !BPoseView::PoseVisible(result,
+ 				&poseInfo)) {
+diff --git a/src/kits/tracker/PoseView.cpp b/src/kits/tracker/PoseView.cpp
+index 3c31cf54d2..2e07d159ca 100644
+--- a/src/kits/tracker/PoseView.cpp
++++ b/src/kits/tracker/PoseView.cpp
+@@ -6205,8 +6205,11 @@ void
+ BPoseView::MoveListToTrash(BObjectList<entry_ref, true>* list, bool selectNext,
+ 	bool deleteDirectly)
+ {
+-	if (!list->CountItems())
++	if (list->IsEmpty()) {
++		// the tasks below would own the list
++		delete list;
+ 		return;
++	}
+ 
+ 	BObjectList<FunctionObject, true>* taskList =
+ 		new BObjectList<FunctionObject, true>(2);
+@@ -6343,8 +6346,11 @@ BPoseView::MoveSelectionOrEntryToTrash(const entry_ref* ref, bool selectNext)
+ 		BAlert* alert = new BAlert("", alertText.String(),
+ 			B_TRANSLATE("Cancel"), B_TRANSLATE("Delete"));
+ 		alert->SetShortcut(0, B_ESCAPE);
+-		if (alert->Go() == 0)
++		if (alert->Go() == 0) {
++			delete entriesToTrash;
++			delete entriesToDeleteOnTheSpot;
+ 			return;
++		}
+ 	}
+ 
+ 	MoveListToTrash(entriesToTrash, selectNext, false);
+diff --git a/src/kits/tracker/PoseViewScripting.cpp b/src/kits/tracker/PoseViewScripting.cpp
+index 3dcd7093f2..0925a8aa0d 100644
+--- a/src/kits/tracker/PoseViewScripting.cpp
++++ b/src/kits/tracker/PoseViewScripting.cpp
+@@ -454,8 +454,7 @@ BPoseView::DeleteProperty(BMessage* specifier, int32 form,
+ 		if (result == B_OK)
+ 			MoveListToTrash(entryList, false, false);
+ 		else {
+-			for (int i = entryList->CountItems() - 1; i >= 0; i--)
+-				delete entryList->ItemAt(i);
++			// the list owns its entries
+ 			delete entryList;
+ 		}
+ 
+diff --git a/src/kits/tracker/TrackerString.cpp b/src/kits/tracker/TrackerString.cpp
+index be4bbef84a..4ee7db88cb 100644
+--- a/src/kits/tracker/TrackerString.cpp
++++ b/src/kits/tracker/TrackerString.cpp
+@@ -254,6 +254,16 @@ TrackerString::StringMatchesPattern(const char* string, const char* pattern,
+ 	while (*pattern != '\0') {
+ 		switch (*pattern) {
+ 			case '?':
++				if (*string == '\0') {
++					// the end of the string is no character to match
++					if (patternLevel == 0)
++						return false;
++
++					pattern = pStorage[--patternLevel];
++					string = sStorage[patternLevel];
++					break;
++				}
++
+ 				pattern++;
+ 				string++;
+ 				if (IsInsideGlyph(string[0]))
+@@ -312,13 +322,14 @@ TrackerString::StringMatchesPattern(const char* string, const char* pattern,
+ 				if (!match)
+ 					return false;
+ 				else {
++					if (patternLevel >= kWildCardMaximum)
++						return false;
++
+ 					pStorage[patternLevel] = pBefore;
+ 					if (IsInsideGlyph(string[0]))
+ 						string = MoveToEndOfGlyph(string);
+ 
+ 					sStorage[patternLevel++] = string;
+-					if (patternLevel > kWildCardMaximum)
+-						return false;
+ 
+ 					pattern++;
+ 					if (IsInsideGlyph(pattern[0]))
+@@ -330,8 +341,9 @@ TrackerString::StringMatchesPattern(const char* string, const char* pattern,
+ 			case '[':
+ 				pattern++;
+ 
+-				if (!MatchesBracketExpression(string, pattern,
+-						caseSensitivity)) {
++				// a negated bracket would match the end of the string
++				if (*string == '\0' || !MatchesBracketExpression(string,
++						pattern, caseSensitivity)) {
+ 					if (patternLevel > 0) {
+ 						pattern = pStorage[--patternLevel];
+ 						string = sStorage[patternLevel];
+diff --git a/src/kits/tracker/ViewState.cpp b/src/kits/tracker/ViewState.cpp
+index 2c6457d3cd..f7a3b7535c 100644
+--- a/src/kits/tracker/ViewState.cpp
++++ b/src/kits/tracker/ViewState.cpp
+@@ -482,6 +482,12 @@ BViewState::_Sanitize(BViewState* state, bool fixOnly)
+ 	if (state == NULL)
+ 		return NULL;
+ 
++	if (state->fViewMode == 0) {
++		// no view mode; a pose view in it would show and keep none of its
++		// poses (only the last icon mode may be unset)
++		state->fViewMode = kListMode;
++	}
++
+ 	if (state->fViewMode == kListMode) {
+ 		if (state->fListOrigin.x < 0)
+ 			state->fListOrigin.x = 0;
+@@ -507,8 +513,7 @@ BViewState::_Sanitize(BViewState* state, bool fixOnly)
+ 	// do a sanity check here
+ 	if ((state->fViewMode != kListMode
+ 			&& state->fViewMode != kIconMode
+-			&& state->fViewMode != kMiniIconMode
+-			&& state->fViewMode != 0)
++			&& state->fViewMode != kMiniIconMode)
+ 		|| (state->fLastIconMode != kListMode
+ 			&& state->fLastIconMode != kIconMode
+ 			&& state->fLastIconMode != kMiniIconMode
+diff --git a/src/kits/tracker/WidgetAttributeText.cpp b/src/kits/tracker/WidgetAttributeText.cpp
+index 443092a752..2020cd701c 100644
+--- a/src/kits/tracker/WidgetAttributeText.cpp
++++ b/src/kits/tracker/WidgetAttributeText.cpp
+@@ -68,6 +68,7 @@ All rights reserved.
+ #include "SettingsViews.h"
+ #include "Utilities.h"
+ #include "ViewState.h"
++#include "WidthBuffer.h"
+ 
+ 
+ #undef B_TRANSLATION_CONTEXT
+@@ -329,10 +330,42 @@ WidgetAttributeText::CheckSettingsChanged()
+ }
+ 
+ 
++/*!	Measures text like BPoseView does, for the callers that have no pose
++	view and only want the value as text (SetupEditing() of the rating and
++	checkbox columns).
++*/
++class PlainFontMeasure {
++public:
++	float StringWidth(const char* string) const
++	{
++		return StringWidth(string, (int32)strlen(string));
++	}
++
++	float StringWidth(const char* string, int32 length) const
++	{
++		return BPrivate::gWidthBuffer->StringWidth(string, 0, length,
++			be_plain_font);
++	}
++
++	void GetFont(BFont* font) const
++	{
++		*font = *be_plain_font;
++	}
++};
++
++
++static const PlainFontMeasure sPlainFontMeasure;
++
++
+ float
+ WidgetAttributeText::TruncString(BString* outString, const char* inString,
+ 	int32 length, const BPoseView* view, float width, uint32 truncMode)
+ {
++	if (view == NULL) {
++		return TruncStringBase(outString, inString, length,
++			&sPlainFontMeasure, width, truncMode);
++	}
++
+ 	return TruncStringBase(outString, inString, length, view, width, truncMode);
+ }
+ 
+@@ -341,6 +374,9 @@ float
+ WidgetAttributeText::TruncFileSize(BString* outString, int64 value,
+ 	const BPoseView* view, float width)
+ {
++	if (view == NULL)
++		return TruncFileSizeBase(outString, value, &sPlainFontMeasure, width);
++
+ 	return TruncFileSizeBase(outString, value, view, width);
+ }
+ 
+@@ -349,6 +385,9 @@ float
+ WidgetAttributeText::TruncTime(BString* outString, int64 value,
+ 	const BPoseView* view, float width)
+ {
++	if (view == NULL)
++		return TruncTimeBase(outString, value, &sPlainFontMeasure, width);
++
+ 	return TruncTimeBase(outString, value, view, width);
+ }
+ 
+@@ -1315,12 +1354,12 @@ GenericAttributeText::FitValue(BString* outString, const BPoseView* view)
+ 
+ 	switch (fColumn->AttrType()) {
+ 		case B_SIZE_T_TYPE:
+-			TruncFileSizeBase(outString, fValue.int32t, view, fOldWidth);
++			TruncFileSize(outString, fValue.int32t, view, fOldWidth);
+ 			return;
+ 
+ 		case B_SSIZE_T_TYPE:
+ 			if (fValue.int32t > 0) {
+-				TruncFileSizeBase(outString, fValue.int32t, view, fOldWidth);
++				TruncFileSize(outString, fValue.int32t, view, fOldWidth);
+ 				return;
+ 			}
+ 			sprintf(buffer, "%s", strerror(fValue.int32t));
