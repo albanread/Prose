@@ -1,0 +1,2007 @@
+From e9b745b150bb01ada98adb479cdd4775dca4b289 Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 08:22:17 +0100
+Subject: [PATCH] libroot/malloc: thread caches, a page owner map, and a heap
+ that overcommits
+
+The Mojo compiler ran 60% slower with 8 threads than with one on an 8-CPU
+Prose machine. A sixth of its CPU time went to sleeping and waking on malloc's
+pool mutexes, which do not spin: free() of another thread's block locked the
+freeing thread's pool, then unlocked and locked each other pool in turn until
+it found the owner (findpool). And the pages under the pools were reshaped all
+the time: PagesAllocator grew its areas with resize_area for each allocation,
+committed them in full, and unmapped freed pages from the middle of areas,
+which split them. One compile made 11,855 unmaps and 9,247 resizes, and left
+2,414 "heap area" areas, most of them 4-32 KB.
+
+The OpenBSD core stays; the path around it changes, after what glibc and
+Darwin's libmalloc do:
+
+- Thread caches (thread_cache.c), as glibc's tcache: each thread keeps the
+  small blocks it frees, by size class, and hands them out first, without a
+  lock. A miss refills half a class from the thread's pool under one lock,
+  taking blocks in bitmap order; a full class gives half back to the pools
+  that own the blocks. A per-process key in each cached block catches a
+  double free by the same thread; a thread's cache is flushed at its exit.
+
+- A page owner map (wrapper.c): two bytes per allocator page, the owning pool
+  and the size class, in tables that overcommit. free() finds a block's owner
+  and size without a lock and without searching, as glibc does by masking a
+  pointer to its heap and Darwin by a region's trailer. findpool()'s search is
+  left for pointers the map does not know.
+
+- 16 KB allocator pages, the native page of Apple silicon, whatever the
+  system page is. Blocks up to 8 KB come from pages, in 32 classes; LLVM's
+  4 KB slabs are four to a page instead of a region each. OpenBSD's page
+  caches keep their sizes in bytes.
+
+- A heap that overcommits (PagesAllocator.cpp): one 64 GB area per heap,
+  committed page by page as it is first touched, never resized, split or
+  unmapped. Free runs past a limit go back with MADV_FREE, which returns the
+  pages and the commitment and keeps the addresses; least recently freed
+  first. The limit follows the memory the team recently had in use, at
+  least 32 MB, at most 1/64 of the machine's memory. A new allocation
+  prefers a free run whose pages are still resident. Only allocations over
+  16 GB get an area of their own. Memory that was given back is no longer
+  zeroed unless the caller needs zeroes.
+
+- Pools twice the CPUs, 8 to 32; pool and PagesAllocator locks spin briefly
+  before sleeping, as Darwin's magazine locks do.
+
+Heap memory is now committed when first touched, as on Linux and macOS, and
+as thread stacks already are here.
+
+Measured on Prose, 8 CPUs, with HaikuArmQemu's tools/malloc/mallocbench
+(4 million operations a thread):
+
+                                  before       after
+  small-block churn, 1 thread     20.0 M/s     88-98 M/s
+                     8 threads    0.25 M/s     136-155 M/s
+  frees from other threads        62 k/s       16-35 M/s
+  realloc growth, 1 thread        743/s        25-37 k/s
+                  4 threads       54/s         22-31 k/s
+
+`mojo build` of the standard library check, from a cold cache: one thread
+3.25 s -> 2.65-2.8 s; eight threads 5.2 s -> 3.5-3.75 s, with a third of the
+page faults and 37-44 areas instead of 2,000-2,900.
+
+Tests: tools/malloc/malloctest (10/10, and Haiku's calloc_test, memalign_test
+and signal_in_allocator_test[2]).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0138-libroot-malloc-thread-caches-a-page-owner-map-and-a-heap-tha.patch 5ce87912eaeec814a02044f8c99c2895edc3b3c0b3c188815a52d1dfb46c0aaa
+---
+ .../posix/malloc/openbsd/PagesAllocator.cpp   | 694 ++++++++----------
+ .../posix/malloc/openbsd/PagesAllocator.h     |  42 ++
+ .../libroot/posix/malloc/openbsd/malloc.c     | 118 ++-
+ .../posix/malloc/openbsd/thread_cache.c       | 429 +++++++++++
+ .../libroot/posix/malloc/openbsd/wrapper.c    | 187 ++++-
+ 5 files changed, 1040 insertions(+), 430 deletions(-)
+ create mode 100644 src/system/libroot/posix/malloc/openbsd/thread_cache.c
+
+diff --git a/src/system/libroot/posix/malloc/openbsd/PagesAllocator.cpp b/src/system/libroot/posix/malloc/openbsd/PagesAllocator.cpp
+index ce2d3a4bae..1888deecab 100644
+--- a/src/system/libroot/posix/malloc/openbsd/PagesAllocator.cpp
++++ b/src/system/libroot/posix/malloc/openbsd/PagesAllocator.cpp
+@@ -17,34 +17,73 @@
+ #include <locks.h>
+ #include <syscalls.h>
+ #include <util/SplayTree.h>
++#include <vm_defs.h>
++
++
++/*! The local page size: 16 KB, the native page of Apple silicon, so that the
++ * allocator's unit does not change if the system's page grows to it. Must be
++ * a multiple of the system page size, and equal to malloc's page size. */
++static const size_t kPageSize = B_PAGE_SIZE > 16384 ? B_PAGE_SIZE : 16384;
++
++/*! The size of one heap area. Heap areas overcommit: memory is committed
++ * page by page as it is first touched, so the size costs address space only,
++ * and the heap never has to be resized, split or unmapped to grow or to give
++ * memory back. */
++#ifdef B_HAIKU_64_BIT
++static const size_t kHeapAreaSize = (size_t)64 * 1024 * 1024 * 1024;
++#else
++static const size_t kHeapAreaSize = 256 * 1024 * 1024;
++#endif
+ 
++/*! The most heap areas a team can have. */
++static const int32 kMaxHeapAreas = 32;
+ 
+-/*! The local page size. Must be a multiple of the system page size. */
+-static const size_t kPageSize = B_PAGE_SIZE;
++/*! Allocations larger than this get an area of their own. */
++static const size_t kLargestUsefulChunk = kHeapAreaSize / 4;
+ 
+-/*! The "largest useful" chunk size: any allocations larger than this
+- * will get their own area, rather than sharing the common one(s). */
+-static const size_t kLargestUsefulChunk = 512 * kPageSize;
++/*! Free memory that still holds pages is kept for reuse up to as much as the
++ * team recently had in use -- a program that needed that much is likely to
++ * need it again -- but always this much ... */
++static const size_t kResidentFreeMinimum = 32 * 1024 * 1024;
+ 
+-/*! Amount of virtual address space to reserve when creating new areas. */
+-/* (The Haiku kernel will ignore reservations if there's no other address
+- * space left, so using a large value here should not hurt.) */
+-static const size_t kReserveAddressSpace = 1 * 1024 * 1024 * 1024;
++/*! ... and never more than this share of the machine's memory. */
++static const size_t kResidentFreeShareOfMemory = 64;
+ 
+-/*! Cache up to this many percentage points of free memory (compared to used.) */
+-static const size_t kFreePercentage = 25;
++/*! How many free chunks past the best fit are looked at for one whose pages
++ * are still resident. */
++static const int32 kResidentSearch = 8;
+ 
+-/*! Always forbid more free memory than this, even if it's below kFreePercentage. */
+-static const size_t kFreeMaximum = 128 * 1024 * 1024;
+ 
+-/*! Always allow this much free memory, even if it's above kFreePercentage. */
+-static const size_t kFreeMinimum = 128 * kPageSize;
++namespace {
+ 
+-/*! When a free chunk encompasses a whole area and is smaller than this, unmap it. */
+-static const size_t kMinimumFreeAreaSize = 16 * kPageSize;
++/*! MutexLocker, with a lock that spins before it sleeps. */
++class Locker {
++public:
++	Locker(mutex& lock)
++		:
++		fLock(&lock),
++		fLocked(true)
++	{
++		malloc_mutex_lock(fLock);
++	}
+ 
++	~Locker()
++	{
++		if (fLocked)
++			mutex_unlock(fLock);
++	}
++
++	void Unlock()
++	{
++		mutex_unlock(fLock);
++		fLocked = false;
++	}
++
++private:
++	mutex*	fLock;
++	bool	fLocked;
++};
+ 
+-namespace {
+ 
+ class PagesAllocator {
+ 	struct FreeChunk;
+@@ -53,9 +92,16 @@ public:
+ 	PagesAllocator()
+ 	{
+ 		mutex_init(&fLock, "PagesAllocator lock");
+-		fUsed = fFree = 0;
+-		fLastArea = -1;
+-		memset(fCachedAreaInfos, 0, sizeof(fCachedAreaInfos));
++		fUsed = fResidentFree = fRecentPeak = 0;
++		fLeastRecentHead = fLeastRecentTail = NULL;
++		fHeapAreaCount = 0;
++
++		system_info info;
++		get_system_info(&info);
++		fResidentFreeMaximum = (size_t)(info.max_pages * B_PAGE_SIZE
++			/ kResidentFreeShareOfMemory);
++		if (fResidentFreeMaximum < kResidentFreeMinimum)
++			fResidentFreeMaximum = kResidentFreeMinimum;
+ 	}
+ 
+ 	~PagesAllocator()
+@@ -64,457 +110,314 @@ public:
+ 
+ 	void BeforeFork()
+ 	{
+-		mutex_lock(&fLock);
++		malloc_mutex_lock(&fLock);
+ 	}
+ 
+ 	void AfterFork(bool parent)
+ 	{
+-		if (parent) {
++		if (parent)
+ 			mutex_unlock(&fLock);
+-		} else {
+-			if (fLastArea >= 0)
+-				fLastArea = area_for((void*)(fLastAreaTop - 1));
+-
++		else
+ 			mutex_init(&fLock, "PagesAllocator lock");
+-		}
+ 	}
+ 
+ 	status_t AllocatePages(size_t allocate, void*& address, bool& cleared)
+ 	{
+-		MutexLocker locker(fLock);
++		if (allocate > kLargestUsefulChunk)
++			return _AllocateLarge(allocate, address, cleared);
+ 
+-		if (allocate > kLargestUsefulChunk) {
+-			// Create an area just for this allocation.
+-			locker.Unlock();
+-			area_id area = create_area("heap large allocation",
+-				&address, B_ANY_ADDRESS, allocate,
+-				B_NO_LOCK, B_READ_AREA | B_WRITE_AREA);
+-			if (area >= 0) {
+-				locker.Lock();
+-				fUsed += allocate;
+-				cleared = true;
+-				_CacheAreaInfo((addr_t)address, allocate);
+-				return B_OK;
+-			}
+-			return area;
+-		}
++		Locker locker(fLock);
+ 
+-		if (fFree >= allocate) {
+-			// Try to use memory from the cache.
+-			FreeChunk* chunk = fChunksBySizeTree.FindClosest(allocate, true, true);
+-			if (chunk != NULL) {
+-				address = _Use(chunk, allocate);
+-				cleared = false;
+-				return B_OK;
+-			}
++		FreeChunk* chunk = fChunksBySizeTree.FindClosest(allocate, true, true);
++		if (chunk == NULL) {
++			status_t status = _AddHeapArea();
++			if (status != B_OK)
++				return status;
++
++			chunk = fChunksBySizeTree.FindClosest(allocate, true, true);
++			if (chunk == NULL)
++				return B_NO_MEMORY;
+ 		}
+ 
+-		// Not enough memory in the cache. Allocate some more.
+-		FreeChunk* chunk;
+-		bool mostlyClear = false;
+-		status_t status = _Map(allocate, chunk, mostlyClear);
+-		if (status != B_OK)
+-			return status;
++		// The best fit may be one whose pages were given back, and would be
++		// faulted in again; a slightly larger one whose pages are still there
++		// is better.
++		FreeChunk* resident = chunk;
++		for (int32 i = 0; i < kResidentSearch && resident != NULL
++				&& resident->resident < allocate; i++) {
++			resident = resident->size_tree_list_link;
++		}
++		if (resident != NULL && resident->resident >= allocate)
++			chunk = resident;
+ 
+-		address = _Use(chunk, allocate);
+-		cleared = mostlyClear;
++		address = _Use(chunk, allocate, cleared);
+ 		return B_OK;
+ 	}
+ 
+-	status_t AllocatePagesAt(void* _address, size_t allocate, bool& cleared)
++	status_t AllocatePagesAt(void* address, size_t allocate, bool& cleared)
+ 	{
+-		const addr_t address = (addr_t)_address;
+-		MutexLocker locker(fLock);
+-
+-		if (allocate <= kLargestUsefulChunk) {
+-			FreeChunk* chunk = fChunksByAddressTree.FindClosest(address, false, true);
+-			if (chunk != NULL && chunk->NextAddress() > address) {
+-				// The address is in a free chunk.
+-				size_t remainingAfter = chunk->size - (address - (addr_t)chunk);
+-				if (remainingAfter < allocate) {
+-					if (chunk->NextAddress() != fLastAreaTop)
+-						return B_NO_MEMORY;
+-
+-					size_t add = allocate - remainingAfter;
+-					status_t status = _ResizeLastArea(add);
+-					if (status != B_OK)
+-						return status;
+-
+-					chunk = _Insert((void*)chunk->NextAddress(), add);
+-				}
+-
+-				// Cut the beginning?
+-				if (address == (addr_t)chunk) {
+-					_Use(chunk, allocate);
+-					cleared = false;
+-					return B_OK;
+-				}
+-
+-				// Why would anyone want to allocate such a specific address, anyway?
+-				debugger("PagesAllocator: middle-chunk allocation not implemented!");
+-				return B_ERROR;
+-			}
+-		}
+-
+-		if (address == fLastAreaTop) {
+-			if (allocate > kLargestUsefulChunk)
+-				return B_NO_MEMORY;
+-
+-			status_t status = _ResizeLastArea(allocate);
+-			if (status == B_OK) {
+-				fUsed += allocate;
+-				cleared = true;
+-				return B_OK;
+-			}
+-			return status;
+-		}
+-		if (address >= (fLastAreaTop - fLastAreaSize) && address < fLastAreaTop) {
+-			// We didn't find a matching free chunk, so that isn't going to work.
+-			return EEXIST;
+-		}
+-
+-		locker.Unlock();
+-
+-		// One last try: see if we can resize the area this belongs to.
+-		area_info info;
+-		info.area = area_for((void*)(address - 1));
+-		if (info.area < 0)
+-			return info.area;
+-
+-		status_t status = get_area_info(info.area, &info);
+-		if (status != B_OK)
+-			return status;
+-
+-		if (((addr_t)info.address + info.size) != address)
++		Locker locker(fLock);
++
++		// Only the start of a free chunk can be handed out: that is where
++		// the region being extended ends.
++		FreeChunk* chunk = fChunksByAddressTree.FindClosest((addr_t)address,
++			false, true);
++		if (chunk == NULL || (addr_t)chunk != (addr_t)address
++			|| chunk->size < allocate) {
+ 			return B_NO_MEMORY;
+-
+-		status = resize_area(info.area, info.size + allocate);
+-		if (status == B_OK) {
+-			locker.Lock();
+-			fUsed += allocate;
+-			cleared = true;
+-			return B_OK;
+ 		}
+ 
+-		// TODO: We could add a "resize allowing move" feature to resize_area,
+-		// which would avoid having to memcpy() the data of large allocations.
+-		return status;
++		_Use(chunk, allocate, cleared);
++		return B_OK;
+ 	}
+ 
+-	status_t FreePages(void* _address, size_t size)
++	status_t FreePages(void* address, size_t size)
+ 	{
+-		MutexLocker locker(fLock);
++		Locker locker(fLock);
+ 
+ 		if (size > fUsed)
+ 			debugger("PagesAllocator: request to free more than allocated");
+ 		fUsed -= size;
+ 
+-		FreeChunk* freedChunk = _Insert(_address, size);
++		if (!_InHeapArea((addr_t)address, size)) {
++			// A large allocation's own area, or a part of it.
++			locker.Unlock();
++			if (munmap(address, size) != 0)
++				return errno;
++			return B_OK;
++		}
+ 
+-		if (size > kLargestUsefulChunk) {
+-			// TODO: This doesn't deal with a free of a smaller number of pages
+-			// within a "large allocation" area. We should probably free those
+-			// immediately also, or at least mark them specially in the trees
+-			// (so they don't get reused for anything but the large allocation.)
++		_Insert(address, size, size, false);
++		_DiscardAboveLimit();
++		return B_OK;
++	}
+ 
+-			locker.Detach();
+-			return _UnlockingRemoveAndUnmap(freedChunk, false);
+-		}
++private:
++	status_t _AllocateLarge(size_t allocate, void*& address, bool& cleared)
++	{
++		addr_t reservation;
++		const size_t reserved = allocate + kPageSize;
++		status_t status = _kern_reserve_address_range(&reservation,
++			B_RANDOMIZED_ANY_ADDRESS, reserved);
++		if (status != B_OK)
++			return status;
+ 
+-		if (!_InLastArea(freedChunk) && freedChunk->size < kMinimumFreeAreaSize) {
+-			// If this chunk covers a whole area, or is at the head or tail of one
+-			// that's smaller than kMinimumFreeAreaSize, we unmap it immediately.
+-			addr_t areaAddress = 0;
+-			size_t areaSize = 0;
+-			_GetAreaInfoFor(freedChunk, &areaAddress, &areaSize);
+-			if (areaSize == size || (areaSize < kMinimumFreeAreaSize
+-					&& (areaAddress == (addr_t)freedChunk
+-						|| (areaAddress + areaSize) == freedChunk->NextAddress()))) {
+-				locker.Detach();
+-				return _UnlockingRemoveAndUnmap(freedChunk, false);
+-			}
++		const addr_t base = (reservation + kPageSize - 1) & ~(kPageSize - 1);
++		void* areaAddress = (void*)base;
++		area_id area = create_area("heap large allocation", &areaAddress,
++			B_EXACT_ADDRESS, allocate, B_NO_LOCK,
++			B_READ_AREA | B_WRITE_AREA | B_OVERCOMMITTING_AREA);
++		if (area < 0) {
++			_kern_unreserve_address_range(reservation, reserved);
++			return area;
+ 		}
+ 
+-		if (fFree <= _FreeLimit()) {
+-			// TODO: If not decommitting/unmapping, we might free the pages
+-			// using MADV_FREE (perhaps on medium-sized chunks with others
+-			// of equal sizes already present in the tree, at least.)
+-			return B_OK;
++		// Give back what the alignment left over on either side.
++		if (base > reservation)
++			_kern_unreserve_address_range(reservation, base - reservation);
++		if (base + allocate < reservation + reserved) {
++			_kern_unreserve_address_range(base + allocate,
++				reservation + reserved - (base + allocate));
+ 		}
+ 
+-		while (fFree > _FreeLimit()) {
+-			FreeChunk* chunk = fChunksBySizeTree.FindMax();
+-
+-			// Try to avoid unmapping the just-freed chunk, or any in the last area
+-			// besides the topmost.
+-			while (chunk == freedChunk || _InLastArea(chunk)) {
+-				if (chunk->NextAddress() == fLastAreaTop)
+-					break;
+-
+-				FreeChunk* previousChunk = fChunksBySizeTree.PreviousDontSplay(chunk);
+-				if (previousChunk == NULL) {
+-					// Just free the maximum-size chunk, whatever it was.
+-					chunk = fChunksBySizeTree.FindMax();
+-					break;
+-				}
+-				chunk = previousChunk;
+-			}
++		Locker locker(fLock);
++		fUsed += allocate;
++		address = areaAddress;
++		cleared = true;
++		return B_OK;
++	}
+ 
+-			status_t status = _UnlockingRemoveAndUnmap(chunk);
+-			if (status != B_OK)
+-				return status;
++	status_t _AddHeapArea()
++	{
++		if (fHeapAreaCount == kMaxHeapAreas)
++			return B_NO_MEMORY;
++
++		// Reserve a page more than the area needs, so that the area can start
++		// on an allocator page.
++		addr_t reservation;
++		const size_t reserved = kHeapAreaSize + kPageSize;
++		status_t status = _kern_reserve_address_range(&reservation,
++			B_RANDOMIZED_ANY_ADDRESS, reserved);
++		if (status != B_OK)
++			return status;
++
++		const addr_t base = (reservation + kPageSize - 1) & ~(kPageSize - 1);
++		void* address = (void*)base;
++		area_id area = create_area("heap", &address, B_EXACT_ADDRESS,
++			kHeapAreaSize, B_NO_LOCK,
++			B_READ_AREA | B_WRITE_AREA | B_OVERCOMMITTING_AREA);
++		if (area < 0) {
++			_kern_unreserve_address_range(reservation, reserved);
++			return area;
+ 		}
+ 
++		fHeapAreas[fHeapAreaCount].base = base;
++		fHeapAreas[fHeapAreaCount].top = base + kHeapAreaSize;
++		fHeapAreaCount++;
++
++		_Insert(address, kHeapAreaSize, 0, true);
+ 		return B_OK;
+ 	}
+ 
+-private:
+-	void* _Use(FreeChunk* chunk, size_t amount)
++	bool _InHeapArea(addr_t address, size_t size) const
+ 	{
+-		fChunksBySizeTree.Remove(chunk);
+-		fChunksByAddressTree.Remove(chunk);
+-
+-		if (chunk->size == amount) {
+-			// The whole chunk will be used.
+-			// Nothing special to do in this case.
+-		} else {
+-			// Some will be left over.
+-			// Break the remainder off and reinsert into the trees.
+-			FreeChunk* newChunk = (FreeChunk*)((addr_t)chunk + amount);
+-			newChunk->size = (chunk->size - amount);
++		for (int32 i = 0; i < fHeapAreaCount; i++) {
++			if (address >= fHeapAreas[i].base
++				&& address + size <= fHeapAreas[i].top) {
++				return true;
++			}
++		}
++		return false;
++	}
+ 
+-			fChunksBySizeTree.Insert(newChunk);
+-			fChunksByAddressTree.Insert(newChunk);
++	/*! Takes \a amount bytes from the start of \a chunk. */
++	void* _Use(FreeChunk* chunk, size_t amount, bool& cleared)
++	{
++		_Remove(chunk);
++
++		const bool clean = chunk->clean;
++		if (chunk->size > amount) {
++			// Break the remainder off and put it back. Its neighbours are
++			// not free (or they would have been merged with the chunk), so
++			// there is nothing to merge it with. Which part of the chunk its
++			// pages are in is not known; the remainder is charged with what
++			// the used part cannot have.
++			FreeChunk* rest = (FreeChunk*)((addr_t)chunk + amount);
++			rest->size = chunk->size - amount;
++			rest->resident = chunk->resident > amount
++				? chunk->resident - amount : 0;
++			rest->clean = clean;
++			_InsertNode(rest);
+ 		}
+ 
+ 		fUsed += amount;
+-		fFree -= amount;
+ 
+ 		memset(chunk, 0, sizeof(FreeChunk));
++		cleared = clean;
+ 		return (void*)chunk;
+ 	}
+ 
+-	FreeChunk* _Insert(void* _address, size_t size)
++	/*! Adds a free range to the trees, merged with the free ranges on either
++	 * side of it. \a resident is how much of it may hold pages; \a clean says
++	 * it was never touched, and so reads as zeroes. */
++	FreeChunk* _Insert(void* _address, size_t size, size_t resident,
++		bool clean)
+ 	{
+-		fFree += size;
+-
+ 		const addr_t address = (addr_t)_address;
+ 		FreeChunk* chunk;
+ 
+-		FreeChunk* preceding = fChunksByAddressTree.FindClosest(address, false, false);
++		FreeChunk* preceding = fChunksByAddressTree.FindClosest(address, false,
++			false);
+ 		if (preceding != NULL && preceding->NextAddress() == address) {
+-			fChunksBySizeTree.Remove(preceding);
++			_Remove(preceding);
+ 			chunk = preceding;
+ 			chunk->size += size;
++			chunk->resident += resident;
++			chunk->clean = chunk->clean && clean;
+ 		} else {
+ 			chunk = (FreeChunk*)_address;
+ 			chunk->size = size;
+-			fChunksByAddressTree.Insert(chunk);
++			chunk->resident = resident;
++			chunk->clean = clean;
+ 		}
+ 
+-		FreeChunk* following = chunk->address_tree_list_link;
++		FreeChunk* following = fChunksByAddressTree.FindClosest(
++			chunk->NextAddress(), true, true);
+ 		if (following != NULL && chunk->NextAddress() == (addr_t)following) {
+-			fChunksBySizeTree.Remove(following);
+-			fChunksByAddressTree.Remove(following);
++			_Remove(following);
+ 			chunk->size += following->size;
++			chunk->resident += following->resident;
++			chunk->clean = chunk->clean && following->clean;
+ 		}
+-		fChunksBySizeTree.Insert(chunk);
+ 
++		_InsertNode(chunk);
+ 		return chunk;
+ 	}
+ 
+-	size_t _FreeLimit() const
+-	{
+-		size_t freeLimit = ((fUsed * kFreePercentage) / 100);
+-		if (freeLimit < kFreeMinimum)
+-			freeLimit = kFreeMinimum;
+-		else if (freeLimit > kFreeMaximum)
+-			freeLimit = kFreeMaximum;
+-		else
+-			freeLimit = (freeLimit + (kPageSize - 1)) & ~(kPageSize - 1);
+-		return freeLimit;
+-	}
+-
+-private:
+-	status_t _Map(size_t allocate, FreeChunk*& allocated, bool& mostlyClear)
+-	{
+-		if (fLastArea >= 0) {
+-			addr_t oldTop = fLastAreaTop;
+-			status_t status = _ResizeLastArea(allocate);
+-			if (status == B_OK) {
+-				allocated = _Insert((void*)oldTop, allocate);
+-				mostlyClear = (allocated == (void*)oldTop);
+-				return B_OK;
+-			}
+-		}
+-
+-		// Create a new area.
+-		// TODO: We could use an inner lock here to avoid contention.
+-		addr_t newAreaBase;
+-		status_t status = _kern_reserve_address_range(&newAreaBase,
+-			B_RANDOMIZED_ANY_ADDRESS, kReserveAddressSpace);
+-		size_t newReservation = (status == B_OK) ? kReserveAddressSpace : 0;
+-
+-		status = create_area("heap area", (void**)&newAreaBase,
+-			(status == B_OK) ? B_EXACT_ADDRESS : B_RANDOMIZED_ANY_ADDRESS,
+-			allocate, B_NO_LOCK, B_READ_AREA | B_WRITE_AREA);
+-		if (status < B_OK)
+-			return status;
+-
+-		if (fLastAreaReservedTop > fLastAreaTop)
+-			_kern_unreserve_address_range(fLastAreaTop, fLastAreaReservedTop - fLastAreaTop);
+-
+-		fLastArea = status;
+-		fLastAreaTop = newAreaBase + allocate;
+-		fLastAreaSize = allocate;
+-		fLastAreaReservedTop = newAreaBase + newReservation;
+-
+-		allocated = _Insert((void*)newAreaBase, allocate);
+-		mostlyClear = (allocated == (void*)newAreaBase);
+-		return B_OK;
+-	}
+-
+-	bool _InLastArea(const void* chunk) const
++	void _InsertNode(FreeChunk* chunk)
+ 	{
+-		return ((addr_t)chunk < fLastAreaTop
+-			&& (addr_t)chunk >= (fLastAreaTop - fLastAreaSize));
+-	}
+-
+-	status_t _ResizeLastArea(size_t amount)
+-	{
+-		// TODO: We could use an inner lock here to avoid contention.
+-		status_t status = resize_area(fLastArea, fLastAreaSize + amount);
+-		if (status == B_OK) {
+-			fLastAreaTop += amount;
+-			fLastAreaSize += amount;
++		fChunksByAddressTree.Insert(chunk);
++		fChunksBySizeTree.Insert(chunk);
++		fResidentFree += chunk->resident;
++
++		// Chunks with pages to give back are kept from the most recently
++		// freed to the least.
++		chunk->lru_previous = NULL;
++		if (chunk->resident > B_PAGE_SIZE) {
++			chunk->lru_next = fLeastRecentHead;
++			if (fLeastRecentHead != NULL)
++				fLeastRecentHead->lru_previous = chunk;
++			else
++				fLeastRecentTail = chunk;
++			fLeastRecentHead = chunk;
++			chunk->in_lru = true;
++		} else {
++			chunk->lru_next = NULL;
++			chunk->in_lru = false;
+ 		}
+-		return status;
+ 	}
+ 
+-	status_t _UnlockingRemoveAndUnmap(FreeChunk* chunk, bool relock = true)
++	void _Remove(FreeChunk* chunk)
+ 	{
+ 		fChunksByAddressTree.Remove(chunk);
+ 		fChunksBySizeTree.Remove(chunk);
+-		fFree -= chunk->size;
+-
+-		status_t status = _UnlockingUnmap(chunk);
+-		if (relock)
+-			mutex_lock(&fLock);
+-		if (status != B_OK) {
+-			if (!relock)
+-				mutex_lock(&fLock);
+-
+-			// Unmap failed; reinsert the chunk.
+-			fChunksByAddressTree.Insert(chunk);
+-			fChunksBySizeTree.Insert(chunk);
+-			fFree += chunk->size;
+-
+-			if (!relock)
+-				mutex_unlock(&fLock);
++		fResidentFree -= chunk->resident;
++
++		if (chunk->in_lru) {
++			if (chunk->lru_previous != NULL)
++				chunk->lru_previous->lru_next = chunk->lru_next;
++			else
++				fLeastRecentHead = chunk->lru_next;
++			if (chunk->lru_next != NULL)
++				chunk->lru_next->lru_previous = chunk->lru_previous;
++			else
++				fLeastRecentTail = chunk->lru_previous;
++			chunk->in_lru = false;
+ 		}
+-		return status;
+ 	}
+ 
+-	status_t _UnlockingUnmap(FreeChunk* chunk)
++	size_t _ResidentFreeLimit()
+ 	{
+-		// TODO: We could use an inner lock here to avoid contention.
+-		MutexLocker locker(fLock, true);
+-
+-		const size_t size = chunk->size;
+-		const addr_t address = (addr_t)chunk;
+-		const addr_t top = address + size;
+-
+-		const addr_t lastAreaBase = (fLastAreaTop - fLastAreaSize);
+-		if (address <= lastAreaBase && top >= fLastAreaTop) {
+-			// The whole area is being deleted.
+-			const addr_t lastTop = fLastAreaTop, reservedTop = fLastAreaReservedTop;
+-			fLastArea = -1;
+-			fLastAreaTop = fLastAreaSize = fLastAreaReservedTop = 0;
+-			locker.Unlock();
+-
+-			if (reservedTop > lastTop)
+-				_kern_unreserve_address_range(lastTop, reservedTop - lastTop);
+-		} else if (top == fLastAreaTop) {
+-			// Shrink the top.
+-			status_t status = resize_area(fLastArea, fLastAreaSize - size);
+-			if (status != B_OK)
+-				return status;
+-
+-			fLastAreaSize -= size;
+-			fLastAreaTop -= size;
+-			return B_OK;
+-		} else if (address == lastAreaBase) {
+-			// Shrink the bottom.
+-			if (munmap(chunk, size) != 0)
+-				return errno;
+-			fLastAreaSize -= size;
+-			return B_OK;
+-		} else if (address >= lastAreaBase && address < fLastAreaTop) {
+-			// Cut the middle and get the new ID.
+-			if (munmap(chunk, size) != 0)
+-				return errno;
+-
+-			fLastAreaSize = fLastAreaTop - top;
+-			fLastArea = area_for((void*)(fLastAreaTop - 1));
+-			return B_OK;
+-		} else {
+-			// Not in the last area.
+-			for (size_t i = 0; i < B_COUNT_OF(fCachedAreaInfos); i++) {
+-				if (address >= fCachedAreaInfos[i].base && address < fCachedAreaInfos[i].top) {
+-					fCachedAreaInfos[i].base = fCachedAreaInfos[i].top = 0;
+-					break;
+-				}
+-			}
+-			locker.Unlock();
+-		}
+-
+-		if (munmap(chunk, size) != 0)
+-			return errno;
+-		return B_OK;
++		// The recent peak decays towards the memory in use a little with every
++		// free, so that a peak long past stops holding memory.
++		if (fUsed > fRecentPeak)
++			fRecentPeak = fUsed;
++		else
++			fRecentPeak -= (fRecentPeak - fUsed) / 64;
++
++		size_t limit = fRecentPeak;
++		if (limit < kResidentFreeMinimum)
++			limit = kResidentFreeMinimum;
++		else if (limit > fResidentFreeMaximum)
++			limit = fResidentFreeMaximum;
++		return limit;
+ 	}
+ 
+-private:
+-	void _GetAreaInfoFor(void* address, addr_t* areaBase, size_t* areaSize)
++	/*! Gives the pages of the least recently freed chunks back to the system,
++	 * keeping their addresses, until the free memory still holding pages is
++	 * within the limit. MADV_FREE returns an overcommitting area's commitment
++	 * along with its pages. Each chunk keeps its first page, which holds its
++	 * header. */
++	void _DiscardAboveLimit()
+ 	{
+-		if (_InLastArea(address))
+-			debugger(NULL);
+-
+-		for (size_t i = 0; i < B_COUNT_OF(fCachedAreaInfos); i++) {
+-			if ((addr_t)address < fCachedAreaInfos[i].base
+-					|| (addr_t)address >= fCachedAreaInfos[i].top)
+-				continue;
+-
+-			*areaBase = fCachedAreaInfos[i].base;
+-			*areaSize = fCachedAreaInfos[i].top - fCachedAreaInfos[i].base;
+-
+-			if (i != 0) {
+-				// Move to the front of the cache.
+-				memmove(&fCachedAreaInfos[1], &fCachedAreaInfos[0],
+-					sizeof(CachedAreaInfo) * i);
+-				fCachedAreaInfos[0].base = *areaBase;
+-				fCachedAreaInfos[0].top = *areaBase + *areaSize;
+-			}
+-			return;
+-		}
+-
+-		// Not in the cache. Fetch and store it.
+-		area_info info = {};
+-		status_t status = get_area_info(area_for(address), &info);
+-		if (status != B_OK)
+-			debugger(NULL);
+-
+-		*areaBase = (addr_t)info.address;
+-		*areaSize = info.size;
+-		_CacheAreaInfo((addr_t)info.address, info.size);
+-	}
++		const size_t limit = _ResidentFreeLimit();
++		while (fResidentFree > limit) {
++			FreeChunk* chunk = fLeastRecentTail;
++			if (chunk == NULL)
++				break;
++
++			// Out of the trees while the lock is dropped for the syscall,
++			// so no one allocates from it meanwhile.
++			_Remove(chunk);
++			const size_t size = chunk->size;
++			mutex_unlock(&fLock);
+ 
+-	void _CacheAreaInfo(addr_t areaBase, size_t areaSize)
+-	{
+-		memmove(&fCachedAreaInfos[1], &fCachedAreaInfos[0],
+-			sizeof(fCachedAreaInfos) - sizeof(fCachedAreaInfos[0]));
++			_kern_memory_advice((void*)((addr_t)chunk + B_PAGE_SIZE),
++				size - B_PAGE_SIZE, MADV_FREE);
+ 
+-		fCachedAreaInfos[0].base = areaBase;
+-		fCachedAreaInfos[0].top = areaBase + areaSize;
++			malloc_mutex_lock(&fLock);
++			_Insert(chunk, size, B_PAGE_SIZE, false);
++		}
+ 	}
+ 
+ private:
+@@ -525,6 +428,11 @@ private:
+ 		FreeChunk* size_tree_list_link;
+ 
+ 		size_t size;
++		size_t resident;
++		FreeChunk* lru_previous;
++		FreeChunk* lru_next;
++		bool in_lru;
++		bool clean;
+ 
+ 	public:
+ 		inline addr_t NextAddress() const { return ((addr_t)this + size); }
+@@ -597,20 +505,20 @@ private:
+ 	mutex	fLock;
+ 
+ 	size_t	fUsed;
+-	size_t	fFree;
++	size_t	fRecentPeak;
++	size_t	fResidentFree;
++	size_t	fResidentFreeMaximum;
+ 
+ 	ChunksByAddressTree	fChunksByAddressTree;
+ 	ChunksBySizeTree	fChunksBySizeTree;
++	FreeChunk*			fLeastRecentHead;
++	FreeChunk*			fLeastRecentTail;
+ 
+-	area_id		fLastArea;
+-	addr_t		fLastAreaTop;
+-	size_t		fLastAreaSize;
+-	size_t		fLastAreaReservedTop;
+-
+-	struct CachedAreaInfo {
++	struct HeapArea {
+ 		addr_t base;
+ 		addr_t top;
+-	} fCachedAreaInfos[8];
++	} fHeapAreas[kMaxHeapAreas];
++	int32	fHeapAreaCount;
+ };
+ 
+ } // namespace
+@@ -654,7 +562,6 @@ __allocate_pages(void** address, size_t length, int flags, uint8* cleared)
+ 	if ((flags & MAP_FIXED) != 0)
+ 		return sPagesAllocator->AllocatePagesAt(*address, length, *(bool*)cleared);
+ 
+-	//fprintf(stderr, "AllocatePages! 0x%x\n", (int)length);
+ 	return sPagesAllocator->AllocatePages(length, *address, *(bool*)cleared);
+ }
+ 
+@@ -665,7 +572,6 @@ __free_pages(void* address, size_t length)
+ 	if ((length % kPageSize) != 0)
+ 		debugger("PagesAllocator: incorrectly sized free");
+ 
+-	//fprintf(stderr, "FreePages! %p, 0x%x\n", address, (int)length);
+ 	sPagesAllocator->FreePages(address, length);
+ 
+ 	// Errors returned from FreePages() indicate problems unmapping memory;
+diff --git a/src/system/libroot/posix/malloc/openbsd/PagesAllocator.h b/src/system/libroot/posix/malloc/openbsd/PagesAllocator.h
+index a580e3baee..f981082c13 100644
+--- a/src/system/libroot/posix/malloc/openbsd/PagesAllocator.h
++++ b/src/system/libroot/posix/malloc/openbsd/PagesAllocator.h
+@@ -8,11 +8,53 @@
+ 
+ #include <OS.h>
+ 
++#include <locks.h>
++#include <user_mutex_defs.h>
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+ 
+ 
++/*! How many times a contended allocator lock is tried before its holder is
++ * waited for in the kernel. */
++#define MALLOC_LOCK_SPINS 200
++
++
++/*! Locks one of the allocator's mutexes. They are held for short stretches,
++ * and a contended mutex costs a syscall to sleep, one to wake and the
++ * wake-up's latency; so the lock is spun for a little first, as Darwin's
++ * malloc spins its magazine locks. */
++static inline void
++malloc_mutex_lock(mutex* lock)
++{
++	int32 unlocked = 0;
++	int spins;
++
++	if (__atomic_compare_exchange_n(&lock->lock, &unlocked,
++			B_USER_MUTEX_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
++		return;
++	}
++
++	for (spins = 0; spins < MALLOC_LOCK_SPINS; spins++) {
++#if defined(__aarch64__)
++		__asm__ __volatile__("isb" ::: "memory");
++#elif defined(__i386__) || defined(__x86_64__)
++		__asm__ __volatile__("pause" ::: "memory");
++#endif
++		unlocked = 0;
++		if (__atomic_load_n(&lock->lock, __ATOMIC_RELAXED) == 0
++			&& __atomic_compare_exchange_n(&lock->lock, &unlocked,
++				B_USER_MUTEX_LOCKED, false, __ATOMIC_ACQUIRE,
++				__ATOMIC_RELAXED)) {
++			return;
++		}
++	}
++
++	mutex_lock(lock);
++}
++
++
+ void __init_pages_allocator();
+ void __pages_allocator_before_fork();
+ void __pages_allocator_after_fork(int parent);
+diff --git a/src/system/libroot/posix/malloc/openbsd/malloc.c b/src/system/libroot/posix/malloc/openbsd/malloc.c
+index bf564b6791..c2cfa4b21b 100644
+--- a/src/system/libroot/posix/malloc/openbsd/malloc.c
++++ b/src/system/libroot/posix/malloc/openbsd/malloc.c
+@@ -131,8 +131,14 @@ LIST_HEAD(chunk_head, chunk_info);
+  * Small cache is an array per size, big cache is one array with different
+  * sized regions
+  */
++#ifdef __HAIKU__
++/* the same sizes in bytes as OpenBSD's with 4 KB pages: ours are 16 KB */
++#define MAX_SMALLCACHEABLE_SIZE	8
++#define MAX_BIGCACHEABLE_SIZE	128
++#else
+ #define MAX_SMALLCACHEABLE_SIZE	32
+ #define MAX_BIGCACHEABLE_SIZE	512
++#endif
+ /* If the total # of pages is larger than this, evict before inserting */
+ #define BIGCACHE_FILL(sz)	(MAX_BIGCACHEABLE_SIZE * (sz) / 4)
+ 
+@@ -551,8 +557,10 @@ omalloc_init(void)
+ 	/*
+ 	 * Default options
+ 	 */
++#ifdef __HAIKU__
++	mopts.malloc_mutexes = malloc_pool_count();
++#else
+ 	mopts.malloc_mutexes = 8;
+-#ifndef __HAIKU__
+ 	mopts.def_malloc_junk = 1;
+ #endif
+ 	mopts.def_maxcache = MALLOC_DEFAULT_CACHE;
+@@ -620,16 +628,27 @@ omalloc_init(void)
+ static void
+ omalloc_poolinit(struct dir_info *d, int mmap_flag)
+ {
++#ifndef __HAIKU__
+ 	u_int i, j;
++#endif
+ 
+ 	d->r = NULL;
+ 	d->rbytesused = sizeof(d->rbytes);
+ 	d->regions_free = d->regions_total = 0;
++#ifdef __HAIKU__
++	/*
++	 * The pools are mapped zero-filled, which is all LIST_INIT writes. Not
++	 * writing it keeps the pages of the lists of the buckets no size rounds
++	 * to untouched, and keeps short the time the first thread a program
++	 * starts holds pool 1's lock while setting up the other pools.
++	 */
++#else
+ 	for (i = 0; i <= BUCKETS; i++) {
+ 		LIST_INIT(&d->chunk_info_list[i]);
+ 		for (j = 0; j < MALLOC_CHUNK_LISTS; j++)
+ 			LIST_INIT(&d->chunk_dir[i][j]);
+ 	}
++#endif
+ 	d->mmap_flag = mmap_flag;
+ 	d->malloc_junk = mopts.def_malloc_junk;
+ #ifdef MALLOC_STATS
+@@ -993,7 +1012,11 @@ map(struct dir_info *d, size_t sz, int zero_fill)
+ 			return p;
+ 		}
+ 		if (psz <= 1) {
++#ifdef __HAIKU__
++			p = MMAP(cache->max * sz, d->mmap_flag | __MAP_NOZERO);
++#else
+ 			p = MMAP(cache->max * sz, d->mmap_flag);
++#endif
+ 			if (p != MAP_FAILED) {
+ 				STATS_ADD(d->malloc_used, cache->max * sz);
+ 				cache->length = cache->max - 1;
+@@ -1007,13 +1030,22 @@ map(struct dir_info *d, size_t sz, int zero_fill)
+ 					mprotect(p, (cache->max - 1) * sz,
+ 					    PROT_NONE);
+ 				p = (char*)p + (cache->max - 1) * sz;
++#ifdef __HAIKU__
++				if (zero_fill)
++					memset(p, 0, sz);
++#else
+ 				/* zero fill not needed, freshly mmapped */
++#endif
+ 				return p;
+ 			}
+ 		}
+ 
+ 	}
++#ifdef __HAIKU__
++	p = MMAP(sz, d->mmap_flag | (zero_fill ? 0 : __MAP_NOZERO));
++#else
+ 	p = MMAP(sz, d->mmap_flag);
++#endif
+ 	if (p != MAP_FAILED)
+ 		STATS_ADD(d->malloc_used, sz);
+ 	/* zero fill not needed */
+@@ -1122,6 +1154,9 @@ omalloc_make_chunks(struct dir_info *d, u_int bucket, u_int listnum)
+ 	if (insert(d, (void *)((uintptr_t)pp | (bucket + 1)), (uintptr_t)bp,
+ 	    ff))
+ 		goto err;
++#ifdef __HAIKU__
++	owner_map_set(pp, OWNER(d->mutex, bucket + 1));
++#endif
+ 	LIST_INSERT_HEAD(&d->chunk_dir[bucket][listnum], bp, entries);
+ 
+ 	if (bucket > 0 && d->malloc_junk != 0)
+@@ -1362,6 +1397,9 @@ free_bytes(struct dir_info *d, struct region_info *r, void *ptr)
+ 
+ 	if (info->bucket == 0 && !mopts.malloc_freeunmap)
+ 		mprotect(info->page, MALLOC_PAGESIZE, PROT_READ | PROT_WRITE);
++#ifdef __HAIKU__
++	owner_map_set(info->page, 0);
++#endif
+ 	unmap(d, info->page, MALLOC_PAGESIZE, 0);
+ #ifdef MALLOC_STATS
+ 	if (r->f != NULL) {
+@@ -1402,6 +1440,9 @@ omalloc(struct dir_info *pool, size_t sz, int zero_fill)
+ 			errno = ENOMEM;
+ 			return NULL;
+ 		}
++#ifdef __HAIKU__
++		owner_map_set(p, OWNER(pool->mutex, 0));
++#endif
+ 		if (mopts.malloc_guard) {
+ 			if (mprotect((char *)p + psz - mopts.malloc_guard,
+ 			    mopts.malloc_guard, PROT_NONE))
+@@ -1564,6 +1605,22 @@ _malloc_init(int from_rthreads)
+ }
+ DEF_STRONG(_malloc_init);
+ 
++#ifdef __HAIKU__
++#include "thread_cache.c"
++
++
++/* the pool that owns a block, or the thread's own if the block is unknown */
++static inline struct dir_info *
++pool_of(void *p)
++{
++	uint16 owner = owner_map_get(p);
++
++	if (owner == 0)
++		return getpool();
++	return owner_pool(owner, p);
++}
++#endif
++
+ #define PROLOGUE(p, fn)			\
+ 	d = (p); 			\
+ 	if (d == NULL) { 		\
+@@ -1590,8 +1647,13 @@ malloc(size_t size)
+ {
+ 	void *r;
+ 	struct dir_info *d;
+-	int saved_errno = errno;
++	int saved_errno;
+ 
++#ifdef __HAIKU__
++	if ((r = thread_cache_malloc(size)) != NULL)
++		return r;
++#endif
++	saved_errno = errno;
+ 	PROLOGUE(getpool(), "malloc")
+ 	SET_CALLER(d, caller(d));
+ 	r = omalloc(d, size, 0);
+@@ -1740,6 +1802,9 @@ ofree(struct dir_info **argpool, void *p, int clear, int check, size_t argsz)
+ 			}
+ 			STATS_SUB(pool->malloc_guarded, mopts.malloc_guard);
+ 		}
++#ifdef __HAIKU__
++		owner_map_set(p, 0);
++#endif
+ 		unmap(pool, p, PAGEROUND(sz), clear ? argsz : 0);
+ 		delete(pool, r);
+ 	} else {
+@@ -1805,13 +1870,21 @@ void
+ free(void *ptr)
+ {
+ 	struct dir_info *d;
+-	int saved_errno = errno;
++	int saved_errno;
+ 
+ 	/* This is legal. */
+ 	if (ptr == NULL)
+ 		return;
+ 
++#ifdef __HAIKU__
++	if (thread_cache_free(ptr))
++		return;
++	saved_errno = errno;
++	d = pool_of(ptr);
++#else
++	saved_errno = errno;
+ 	d = getpool();
++#endif
+ 	if (d == NULL)
+ 		wrterror(d, "free() called before allocation");
+ 	_MALLOC_LOCK(d->mutex);
+@@ -1931,8 +2004,13 @@ orealloc(struct dir_info **argpool, void *p, size_t newsz)
+ 				size_t needed = rnewsz - roldsz;
+ 
+ 				STATS_INC(pool->cheap_realloc_tries);
++#ifdef __HAIKU__
++				q = MMAPA(hint, needed, MAP_FIXED | __MAP_NOZERO |
++				    __MAP_NOREPLACE | pool->mmap_flag);
++#else
+ 				q = MMAPA(hint, needed, MAP_FIXED |
+ 				    __MAP_NOREPLACE | pool->mmap_flag);
++#endif
+ 				if (q == hint) {
+ 					STATS_ADD(pool->malloc_used, needed);
+ 					if (pool->malloc_junk == 2)
+@@ -2043,9 +2121,19 @@ realloc(void *ptr, size_t size)
+ {
+ 	struct dir_info *d;
+ 	void *r;
+-	int saved_errno = errno;
++	int saved_errno;
+ 
++#ifdef __HAIKU__
++	if (ptr == NULL)
++		return malloc(size);
++	if (thread_cache_realloc(ptr, size, &r))
++		return r;
++	saved_errno = errno;
++	PROLOGUE(pool_of(ptr), "realloc")
++#else
++	saved_errno = errno;
+ 	PROLOGUE(getpool(), "realloc")
++#endif
+ 	SET_CALLER(d, caller(d));
+ 	r = orealloc(&d, ptr, size);
+ 	EPILOGUE()
+@@ -2080,7 +2168,12 @@ malloc_usable_size(void *ptr)
+ 	size_t r;
+ 	int saved_errno = errno;
+ 
+-	d = getpool();
++	if (ptr == NULL)
++		return 0;
++	if (thread_cache_usable_size(ptr, &r))
++		return r;
++
++	d = pool_of(ptr);
+ 	_MALLOC_LOCK(d->mutex);
+ 	d->active++;
+ 	d->func = "malloc_usable_size";
+@@ -2106,8 +2199,18 @@ calloc(size_t nmemb, size_t size)
+ {
+ 	struct dir_info *d;
+ 	void *r;
+-	int saved_errno = errno;
++	int saved_errno;
+ 
++#ifdef __HAIKU__
++	if ((nmemb < MUL_NO_OVERFLOW && size < MUL_NO_OVERFLOW)
++	    || nmemb == 0 || SIZE_MAX / nmemb >= size) {
++		if ((r = thread_cache_malloc(nmemb * size)) != NULL) {
++			memset(r, 0, nmemb * size);
++			return r;
++		}
++	}
++#endif
++	saved_errno = errno;
+ 	PROLOGUE(getpool(), "calloc")
+ 	SET_CALLER(d, caller(d));
+ 	if ((nmemb >= MUL_NO_OVERFLOW || size >= MUL_NO_OVERFLOW) &&
+@@ -2399,6 +2502,9 @@ omemalign(struct dir_info *pool, size_t alignment, size_t sz, int zero_fill)
+ 		errno = ENOMEM;
+ 		return NULL;
+ 	}
++#ifdef __HAIKU__
++	owner_map_set(p, OWNER(pool->mutex, 0));
++#endif
+ 
+ 	if (mopts.malloc_guard) {
+ 		if (mprotect((char *)p + psz - mopts.malloc_guard,
+diff --git a/src/system/libroot/posix/malloc/openbsd/thread_cache.c b/src/system/libroot/posix/malloc/openbsd/thread_cache.c
+new file mode 100644
+index 0000000000..b93abe060b
+--- /dev/null
++++ b/src/system/libroot/posix/malloc/openbsd/thread_cache.c
+@@ -0,0 +1,429 @@
++/*
++ * Copyright 2026, HaikuArmQemu (PROSE fork). All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++/*!	Thread caches. Each thread keeps the small blocks it frees, by size class,
++	and hands them out again first, so that most malloc() and free() calls take
++	no lock at all. A miss refills half a class from the thread's pool under
++	one lock; a class that is full gives half of itself back to the pools that
++	own the blocks, locking each pool once for a run of its blocks. This is
++	glibc's tcache over OpenBSD's allocator; the page owner map (wrapper.c) is
++	what lets free() find a block's size and owner without a lock.
++
++	Included by malloc.c, after the allocator's own definitions.
++*/
++
++
++/* size classes: the buckets bin_of() rounds to, up to MALLOC_MAXCHUNK */
++#define THREAD_CACHE_CLASSES	32
++
++/* a class holds at most this many bytes' worth of blocks ... */
++#define THREAD_CACHE_CLASS_BYTES	32768
++/* ... and between this many ... */
++#define THREAD_CACHE_MIN_BLOCKS	4
++/* ... and this many blocks */
++#define THREAD_CACHE_MAX_BLOCKS	64
++
++#define THREAD_CACHE_NO_CLASS	0xff
++
++struct thread_cache {
++	void*					heads[THREAD_CACHE_CLASSES];
++	uint16					counts[THREAD_CACHE_CLASSES];
++	int32					id;
++		// the thread's malloc id, which picks its pool; it stays with the
++		// cache when the cache is reused by another thread
++	struct thread_cache*	next_free;
++};
++
++
++/* the thread's slot, after its cache was flushed at its exit */
++#define THREAD_CACHE_EXITED		((struct thread_cache*)1)
++
++static uint8 sClassOfBucket[BUCKETS + 1];
++static uint16 sBucketOfClass[THREAD_CACHE_CLASSES];
++static uint16 sClassLimit[THREAD_CACHE_CLASSES];
++
++/* A cached block holds this in its second word, so that freeing a block that
++ * is already in the cache can be noticed. It is odd: no pointer. */
++static uintptr_t sThreadCacheKey;
++
++static mutex sThreadCacheLock = MUTEX_INITIALIZER("heap thread caches");
++static struct thread_cache* sFreeThreadCaches;
++static struct thread_cache* sThreadCacheSlab;
++static size_t sThreadCacheSlabLeft;
++static int32 sNextMallocThreadID;
++
++
++static void
++thread_cache_init(void)
++{
++	u_int bucket;
++	u_int cls = 0;
++
++#ifdef B_HAIKU_64_BIT
++	sThreadCacheKey = ((uintptr_t)malloc_arc4random() << 32)
++		| malloc_arc4random() | 1;
++#else
++	sThreadCacheKey = malloc_arc4random() | 1;
++#endif
++
++	memset(sClassOfBucket, THREAD_CACHE_NO_CLASS, sizeof(sClassOfBucket));
++	for (bucket = 1; bucket <= BUCKETS; bucket++) {
++		const size_t size = B2SIZE(bucket);
++		size_t limit;
++
++		// only the buckets find_bucket() rounds to
++		if (find_bucket(size) != bucket)
++			continue;
++		if (cls == THREAD_CACHE_CLASSES)
++			debugger("malloc: more size classes than the thread caches have");
++
++		limit = THREAD_CACHE_CLASS_BYTES / size;
++		if (limit > THREAD_CACHE_MAX_BLOCKS)
++			limit = THREAD_CACHE_MAX_BLOCKS;
++		else if (limit < THREAD_CACHE_MIN_BLOCKS)
++			limit = THREAD_CACHE_MIN_BLOCKS;
++
++		sClassOfBucket[bucket] = cls;
++		sBucketOfClass[cls] = bucket;
++		sClassLimit[cls] = limit;
++		cls++;
++	}
++}
++
++
++static struct thread_cache*
++thread_cache_create(void)
++{
++	struct thread_cache* cache;
++
++	mutex_lock(&sThreadCacheLock);
++	cache = sFreeThreadCaches;
++	if (cache != NULL)
++		sFreeThreadCaches = cache->next_free;
++	else {
++		if (sThreadCacheSlabLeft == 0) {
++			void* slab = NULL;
++			uint8 cleared;
++			if (__allocate_pages(&slab, MALLOC_PAGESIZE, 0, &cleared)
++					!= B_OK) {
++				mutex_unlock(&sThreadCacheLock);
++				return NULL;
++			}
++			sThreadCacheSlab = (struct thread_cache*)slab;
++			sThreadCacheSlabLeft = MALLOC_PAGESIZE
++				/ sizeof(struct thread_cache);
++		}
++		cache = sThreadCacheSlab++;
++		sThreadCacheSlabLeft--;
++		cache->id = sNextMallocThreadID++;
++	}
++	mutex_unlock(&sThreadCacheLock);
++
++	memset(cache->heads, 0, sizeof(cache->heads));
++	memset(cache->counts, 0, sizeof(cache->counts));
++	cache->next_free = NULL;
++	malloc_tls_set(cache);
++	return cache;
++}
++
++
++/*!	The thread's cache, made on its first use; NULL once the thread has
++	exited, or if there is no memory for one. */
++static inline struct thread_cache*
++thread_cache_get(void)
++{
++	struct thread_cache* cache = (struct thread_cache*)malloc_tls_get();
++	if ((uintptr_t)cache > (uintptr_t)THREAD_CACHE_EXITED)
++		return cache;
++	if (cache == THREAD_CACHE_EXITED)
++		return NULL;
++	return thread_cache_create();
++}
++
++
++static int32
++get_thread_malloc_id(void)
++{
++	struct thread_cache* cache = thread_cache_get();
++	return cache != NULL ? cache->id : 0;
++}
++
++
++/*!	The pool that owns a page, from its owner map entry. */
++static inline struct dir_info*
++owner_pool(uint16 owner, void* block)
++{
++	const u_int pool = owner >> OWNER_POOL_SHIFT;
++	if (pool == 0 || pool > mopts.malloc_mutexes)
++		wrterror(NULL, "bogus pointer (double free?) %p", block);
++	return mopts.malloc_pool[pool - 1];
++}
++
++
++/*!	Takes up to \a count free blocks of a class from pool \a d, in the order
++	of their pages' bitmaps, onto the cache's list. The pool must be locked.
++	Returns how many it took. */
++static u_int
++malloc_bytes_batch(struct dir_info* d, struct thread_cache* cache, u_int cls,
++	u_int count)
++{
++	const u_int bucket = sBucketOfClass[cls];
++	u_int taken = 0;
++
++	while (taken < count) {
++		struct chunk_info* bp = NULL;
++		u_int list;
++		u_int i;
++
++		for (list = 0; list < MALLOC_CHUNK_LISTS && bp == NULL; list++)
++			bp = LIST_FIRST(&d->chunk_dir[bucket][list]);
++		if (bp == NULL) {
++			bp = omalloc_make_chunks(d, bucket, 0);
++			if (bp == NULL)
++				break;
++		}
++		if (bp->canary != (u_short)d->canary1 || bp->bucket != bucket)
++			wrterror(d, "chunk info corrupted");
++
++		for (i = 0; i < bp->offset && taken < count; i++) {
++			u_short bits = bp->bits[i];
++			while (bits != 0 && taken < count) {
++				const u_int k = ffs(bits) - 1;
++				void* block = (char*)bp->page
++					+ (i * MALLOC_BITS + k) * B2ALLOC(bucket);
++
++				bits &= bits - 1;
++				*(void**)block = cache->heads[cls];
++				((uintptr_t*)block)[1] = sThreadCacheKey;
++				cache->heads[cls] = block;
++				cache->counts[cls]++;
++				bp->free--;
++				taken++;
++			}
++			bp->bits[i] = bits;
++		}
++
++		if (bp->free == 0)
++			LIST_REMOVE(bp, entries);
++	}
++
++	return taken;
++}
++
++
++static void*
++thread_cache_refill(struct thread_cache* cache, u_int cls)
++{
++	struct dir_info* d = getpool();
++
++	_MALLOC_LOCK(d->mutex);
++	d->active++;
++	d->func = "malloc";
++	malloc_bytes_batch(d, cache, cls, (sClassLimit[cls] + 1) / 2);
++	d->active--;
++	_MALLOC_UNLOCK(d->mutex);
++
++	return cache->heads[cls];
++}
++
++
++/*!	Gives a class's blocks back to their pools until \a keep are left. */
++static void
++thread_cache_flush(struct thread_cache* cache, u_int cls, u_int keep)
++{
++	struct dir_info* locked = NULL;
++
++	while (cache->counts[cls] > keep) {
++		void* block = cache->heads[cls];
++		struct dir_info* pool = owner_pool(owner_map_get(block), block);
++		struct region_info* r;
++
++		cache->heads[cls] = *(void**)block;
++		cache->counts[cls]--;
++
++		if (pool != locked) {
++			if (locked != NULL) {
++				locked->active--;
++				_MALLOC_UNLOCK(locked->mutex);
++			}
++			_MALLOC_LOCK(pool->mutex);
++			pool->active++;
++			pool->func = "free";
++			locked = pool;
++		}
++
++		r = find(pool, block);
++		if (r == NULL)
++			wrterror(pool, "bogus pointer (double free?) %p", block);
++		free_bytes(pool, r, block);
++	}
++
++	if (locked != NULL) {
++		locked->active--;
++		_MALLOC_UNLOCK(locked->mutex);
++	}
++}
++
++
++static void
++thread_cache_check_double_free(struct thread_cache* cache, u_int cls,
++	void* block)
++{
++	void* cached;
++	for (cached = cache->heads[cls]; cached != NULL; cached = *(void**)cached) {
++		if (cached == block)
++			wrterror(NULL, "double free %p", block);
++	}
++}
++
++
++/*!	A small block from the thread's cache, or NULL if the size is not a small
++	one or there is no cache: then the caller takes the locked path. */
++static inline void*
++thread_cache_malloc(size_t size)
++{
++	struct thread_cache* cache;
++	void* block;
++	u_int cls;
++
++	// 0 (for malloc(0)'s own pages) and sizes above the small blocks
++	if (size - 1 >= MALLOC_MAXCHUNK)
++		return NULL;
++
++	cls = sClassOfBucket[find_bucket(size)];
++	if (cls == THREAD_CACHE_NO_CLASS)
++		return NULL;
++	cache = thread_cache_get();
++	if (cache == NULL)
++		return NULL;
++
++	block = cache->heads[cls];
++	if (block == NULL) {
++		block = thread_cache_refill(cache, cls);
++		if (block == NULL)
++			return NULL;
++	}
++	cache->heads[cls] = *(void**)block;
++	cache->counts[cls]--;
++	((uintptr_t*)block)[1] = 0;
++	return block;
++}
++
++
++/*!	Frees a small block into the thread's cache. Returns false if \a block is
++	not a small block (or there is no cache), for the locked path. */
++static inline bool
++thread_cache_free(void* block)
++{
++	const u_int bucketPlusOne = owner_map_get(block) & OWNER_BUCKET_MASK;
++	struct thread_cache* cache;
++	u_int cls;
++
++	// unknown, a region, or one of malloc(0)'s
++	if (bucketPlusOne <= 1)
++		return false;
++	cls = sClassOfBucket[bucketPlusOne - 1];
++	if (cls == THREAD_CACHE_NO_CLASS)
++		return false;
++	if (((uintptr_t)block & (MALLOC_MINSIZE - 1)) != 0)
++		wrterror(NULL, "modified chunk-pointer %p", block);
++
++	cache = thread_cache_get();
++	if (cache == NULL)
++		return false;
++
++	if (((uintptr_t*)block)[1] == sThreadCacheKey)
++		thread_cache_check_double_free(cache, cls, block);
++	if (cache->counts[cls] >= sClassLimit[cls])
++		thread_cache_flush(cache, cls, sClassLimit[cls] / 2);
++
++	*(void**)block = cache->heads[cls];
++	((uintptr_t*)block)[1] = sThreadCacheKey;
++	cache->heads[cls] = block;
++	cache->counts[cls]++;
++	return true;
++}
++
++
++/*!	realloc() of a small block: stays in place if the new size rounds to the
++	same class, and moves through malloc() and free() otherwise, without the
++	pool's lock. Returns false if \a block is not a small block. */
++static bool
++thread_cache_realloc(void* block, size_t size, void** _result)
++{
++	const u_int bucketPlusOne = owner_map_get(block) & OWNER_BUCKET_MASK;
++	size_t oldSize;
++	void* moved;
++
++	if (bucketPlusOne <= 1)
++		return false;
++
++	oldSize = B2SIZE(bucketPlusOne - 1);
++	if (size != 0 && size <= MALLOC_MAXCHUNK
++		&& find_bucket(size) == bucketPlusOne - 1) {
++		*_result = block;
++		return true;
++	}
++
++	moved = malloc(size);
++	if (moved != NULL) {
++		memcpy(moved, block, oldSize < size ? oldSize : size);
++		free(block);
++	}
++	*_result = moved;
++	return true;
++}
++
++
++/*!	The size of a small block, from the owner map. Returns false if \a block
++	is not one of the small blocks. */
++static inline bool
++thread_cache_usable_size(void* block, size_t* _size)
++{
++	const u_int bucketPlusOne = owner_map_get(block) & OWNER_BUCKET_MASK;
++	if (bucketPlusOne == 0)
++		return false;
++	*_size = B2SIZE(bucketPlusOne - 1);
++	return true;
++}
++
++
++/*!	At a thread's exit: its blocks go back to their pools, and its cache to
++	the next thread. */
++static void
++thread_cache_exit(void)
++{
++	struct thread_cache* cache = (struct thread_cache*)malloc_tls_get();
++	u_int cls;
++
++	malloc_tls_set(THREAD_CACHE_EXITED);
++	if ((uintptr_t)cache <= (uintptr_t)THREAD_CACHE_EXITED)
++		return;
++
++	for (cls = 0; cls < THREAD_CACHE_CLASSES; cls++)
++		thread_cache_flush(cache, cls, 0);
++
++	mutex_lock(&sThreadCacheLock);
++	cache->next_free = sFreeThreadCaches;
++	sFreeThreadCaches = cache;
++	mutex_unlock(&sThreadCacheLock);
++}
++
++
++static void
++thread_cache_before_fork(void)
++{
++	mutex_lock(&sThreadCacheLock);
++}
++
++
++static void
++thread_cache_after_fork(int parent)
++{
++	if (parent)
++		mutex_unlock(&sThreadCacheLock);
++	else
++		mutex_init(&sThreadCacheLock, "heap thread caches");
++}
+diff --git a/src/system/libroot/posix/malloc/openbsd/wrapper.c b/src/system/libroot/posix/malloc/openbsd/wrapper.c
+index cae764594c..b32d3c76f6 100644
+--- a/src/system/libroot/posix/malloc/openbsd/wrapper.c
++++ b/src/system/libroot/posix/malloc/openbsd/wrapper.c
+@@ -12,20 +12,27 @@
+ #include <libroot_private.h>
+ #include <shared/locks.h>
+ #include <system/tls.h>
++#include <user_mutex_defs.h>
++#include <vm_defs.h>
+ 
+ #include "PagesAllocator.h"
+ 
+ 
+ /* generic stuff */
+-#if B_PAGE_SIZE == 4096
+-#define _MAX_PAGE_SHIFT 12
+-#endif
++
++/* The allocator's page is 16 KB, the native page of Apple silicon, whatever
++ * the system's page is; PagesAllocator's kPageSize must match it. */
++#define _MAX_PAGE_SHIFT 14
+ 
+ extern char* __progname;
++extern int32 __gCPUCount;
+ 
+ #define MAP_CONCEAL			(0)
+ #define __MAP_NOREPLACE		(0)
+ 
++/* malloc's own flag for mmap(): the caller does not need the memory zeroed */
++#define __MAP_NOZERO		(0x40000000)
++
+ #define DEF_STRONG(X)
+ #define	DEF_WEAK(x)
+ 
+@@ -100,18 +107,20 @@ mimmutable(void* address, size_t length)
+ static void*
+ malloc_mmap(void* address, size_t length, int protection, int flags, int fd, off_t offset)
+ {
++	const size_t pageSize = (size_t)1 << _MAX_PAGE_SHIFT;
+ 	status_t status;
+ 	uint8 cleared;
+ 
+-	length = (length + (B_PAGE_SIZE - 1)) & ~(B_PAGE_SIZE - 1);;
++	length = (length + (pageSize - 1)) & ~(pageSize - 1);
+ 
+-	status = __allocate_pages(&address, length, flags, &cleared);
++	status = __allocate_pages(&address, length, flags & ~__MAP_NOZERO,
++		&cleared);
+ 	if (status != B_OK) {
+ 		__set_errno(status);
+ 		return MAP_FAILED;
+ 	}
+ 
+-	if (!cleared)
++	if (!cleared && (flags & __MAP_NOZERO) == 0)
+ 		memset(address, 0, length);
+ 	return address;
+ }
+@@ -121,7 +130,12 @@ malloc_mmap(void* address, size_t length, int protection, int flags, int fd, off
+ static int
+ malloc_munmap(void* address, size_t length)
+ {
+-	status_t status = __free_pages(address, length);
++	const size_t pageSize = (size_t)1 << _MAX_PAGE_SHIFT;
++	status_t status;
++
++	length = (length + (pageSize - 1)) & ~(pageSize - 1);
++
++	status = __free_pages(address, length);
+ 	if (status < 0) {
+ 		errno = status;
+ 		return -1;
+@@ -131,6 +145,114 @@ malloc_munmap(void* address, size_t length)
+ #define munmap malloc_munmap
+ 
+ 
++/* the thread's malloc slot, read without a call */
++
++static inline void*
++malloc_tls_get(void)
++{
++#if defined(__aarch64__)
++	void** tls;
++	__asm__("mrs %0, tpidr_el0" : "=r" (tls));
++	return tls[TLS_MALLOC_SLOT];
++#else
++	return tls_get(TLS_MALLOC_SLOT);
++#endif
++}
++
++
++static inline void
++malloc_tls_set(void* value)
++{
++	tls_set(TLS_MALLOC_SLOT, value);
++}
++
++
++/* The page owner map: for every allocator page the heap hands out, the pool
++ * that owns it and, if the page holds small blocks, their bucket. free()
++ * finds a block's owner and size here, without a lock and without searching
++ * the pools. One table covers 64 GB of address space (OWNER_MAP_SLOT_SHIFT);
++ * tables are made as address space is used, and they overcommit, so only the
++ * parts describing used heap take memory. Entries are written by the owning
++ * pool, under its lock. */
++
++#ifdef B_HAIKU_64_BIT
++#	define OWNER_MAP_ADDRESS_BITS	48
++#	define OWNER_MAP_SLOT_SHIFT		36
++#else
++#	define OWNER_MAP_ADDRESS_BITS	32
++#	define OWNER_MAP_SLOT_SHIFT		28
++#endif
++#define OWNER_MAP_SLOTS \
++	((size_t)1 << (OWNER_MAP_ADDRESS_BITS - OWNER_MAP_SLOT_SHIFT))
++#define OWNER_MAP_ENTRIES \
++	((size_t)1 << (OWNER_MAP_SLOT_SHIFT - _MAX_PAGE_SHIFT))
++
++/* an entry: (pool + 1) << OWNER_POOL_SHIFT | (bucket + 1, or 0 for a region);
++ * 0 means unknown */
++#define OWNER_POOL_SHIFT			10
++#define OWNER_BUCKET_MASK			((1 << OWNER_POOL_SHIFT) - 1)
++#define OWNER(pool, bucketPlusOne) \
++	((uint16)((((pool) + 1) << OWNER_POOL_SHIFT) | (bucketPlusOne)))
++
++static uint16* sOwnerMap[OWNER_MAP_SLOTS];
++static mutex sOwnerMapLock = MUTEX_INITIALIZER("heap owner map");
++
++
++static inline uint16
++owner_map_get(const void* pointer)
++{
++	const uintptr_t address = (uintptr_t)pointer;
++	uint16* table;
++
++	if ((address >> OWNER_MAP_ADDRESS_BITS) != 0)
++		return 0;
++	table = __atomic_load_n(&sOwnerMap[address >> OWNER_MAP_SLOT_SHIFT],
++		__ATOMIC_ACQUIRE);
++	if (table == NULL)
++		return 0;
++	return __atomic_load_n(&table[(address >> _MAX_PAGE_SHIFT)
++		& (OWNER_MAP_ENTRIES - 1)], __ATOMIC_RELAXED);
++}
++
++
++static void
++owner_map_set(const void* page, uint16 owner)
++{
++	const uintptr_t address = (uintptr_t)page;
++	uint16** slot;
++	uint16* table;
++
++	if ((address >> OWNER_MAP_ADDRESS_BITS) != 0)
++		return;
++	slot = &sOwnerMap[address >> OWNER_MAP_SLOT_SHIFT];
++	table = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
++	if (table == NULL) {
++		if (owner == 0)
++			return;
++
++		mutex_lock(&sOwnerMapLock);
++		table = *slot;
++		if (table == NULL) {
++			void* tableAddress = NULL;
++			area_id area = create_area("heap owner map", &tableAddress,
++				B_ANY_ADDRESS, OWNER_MAP_ENTRIES * sizeof(uint16), B_NO_LOCK,
++				B_READ_AREA | B_WRITE_AREA | B_OVERCOMMITTING_AREA);
++			if (area >= 0) {
++				table = (uint16*)tableAddress;
++				__atomic_store_n(slot, table, __ATOMIC_RELEASE);
++			}
++		}
++		mutex_unlock(&sOwnerMapLock);
++
++		// Without a table, free() finds this page's owner by searching.
++		if (table == NULL)
++			return;
++	}
++	__atomic_store_n(&table[(address >> _MAX_PAGE_SHIFT)
++		& (OWNER_MAP_ENTRIES - 1)], owner, __ATOMIC_RELAXED);
++}
++
++
+ /* public methods */
+ 
+ void*
+@@ -164,16 +286,19 @@ valloc(size_t size)
+ static mutex sMallocMutexes[_MALLOC_MUTEXES];
+ static pthread_once_t sThreadedMallocInitOnce = PTHREAD_ONCE_INIT;
+ 
+-static int32 sNextMallocThreadID = 1;
+-
+ static u_int mopts_nmutexes();
+ static void _malloc_init(int from_rthreads);
++static int32 get_thread_malloc_id(void);
++static void thread_cache_init(void);
++static void thread_cache_exit(void);
++static void thread_cache_before_fork(void);
++static void thread_cache_after_fork(int parent);
+ 
+ 
+ static inline void
+ _MALLOC_LOCK(int32 index)
+ {
+-	mutex_lock(&sMallocMutexes[index]);
++	malloc_mutex_lock(&sMallocMutexes[index]);
+ }
+ 
+ 
+@@ -184,6 +309,17 @@ _MALLOC_UNLOCK(int32 index)
+ }
+ 
+ 
++/*!	Twice as many pools as CPUs, from 8 to _MALLOC_MUTEXES; a power of two. */
++static u_int
++malloc_pool_count(void)
++{
++	u_int count = 8;
++	while (count < 2 * (u_int)__gCPUCount && count < _MALLOC_MUTEXES)
++		count <<= 1;
++	return count;
++}
++
++
+ static void
+ init_threaded_malloc()
+ {
+@@ -200,44 +336,28 @@ init_threaded_malloc()
+ status_t
+ __init_heap()
+ {
+-	tls_set(TLS_MALLOC_SLOT, (void*)0);
++	malloc_tls_set(NULL);
+ 	__init_pages_allocator();
+ 	mutex_init(&sMallocMutexes[0], "heap mutex");
+ 	mutex_init(&sMallocMutexes[1], "heap mutex");
+ 	_malloc_init(0);
++	thread_cache_init();
+ 	return B_OK;
+ }
+ 
+ 
+-static int32
+-get_thread_malloc_id()
+-{
+-	int32 result = (int32)(intptr_t)tls_get(TLS_MALLOC_SLOT);
+-	if (result == -1) {
+-		// thread has never called malloc() before; assign it an ID.
+-		result = atomic_add(&sNextMallocThreadID, 1);
+-		tls_set(TLS_MALLOC_SLOT, (void*)(intptr_t)result);
+-	}
+-	return result;
+-}
+-
+-
+ void
+ __heap_thread_init()
+ {
+ 	pthread_once(&sThreadedMallocInitOnce, &init_threaded_malloc);
+-	tls_set(TLS_MALLOC_SLOT, (void*)(intptr_t)-1);
++	malloc_tls_set(NULL);
+ }
+ 
+ 
+ void
+ __heap_thread_exit()
+ {
+-	const int32 id = (int32)(intptr_t)tls_get(TLS_MALLOC_SLOT);
+-	if (id != -1 && id == (sNextMallocThreadID - 1)) {
+-		// Try to "de-allocate" this thread's ID.
+-		atomic_test_and_set(&sNextMallocThreadID, id, id + 1);
+-	}
++	thread_cache_exit();
+ }
+ 
+ 
+@@ -246,8 +366,11 @@ __heap_before_fork()
+ {
+ 	u_int i;
+ 	u_int nmutexes = mopts_nmutexes();
++
++	thread_cache_before_fork();
+ 	for (i = 0; i < nmutexes; i++)
+ 		_MALLOC_LOCK(i);
++	mutex_lock(&sOwnerMapLock);
+ 
+ 	__pages_allocator_before_fork();
+ }
+@@ -260,6 +383,8 @@ __heap_after_fork_child()
+ 	u_int nmutexes = mopts_nmutexes();
+ 	for (i = 0; i < nmutexes; i++)
+ 		mutex_init(&sMallocMutexes[i], "heap mutex");
++	mutex_init(&sOwnerMapLock, "heap owner map");
++	thread_cache_after_fork(0);
+ 
+ 	__pages_allocator_after_fork(0);
+ }
+@@ -272,6 +397,8 @@ __heap_after_fork_parent()
+ 	u_int nmutexes = mopts_nmutexes();
+ 	for (i = 0; i < nmutexes; i++)
+ 		_MALLOC_UNLOCK(i);
++	mutex_unlock(&sOwnerMapLock);
++	thread_cache_after_fork(1);
+ 
+ 	__pages_allocator_after_fork(1);
+ }
