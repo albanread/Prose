@@ -1,0 +1,223 @@
+From 2c5b1ef317283f29c689e57c9496fc5a1b7ca2af Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 06:57:12 +0100
+Subject: [PATCH] kernel/arm64: stack traces for the profilers
+
+arch_get_stack_trace() returned no addresses and arch_debug_get_interrupt_pc()
+returned NULL on arm64, so neither profiler could say where time went:
+`profile` on a program attributed every tick to the commpage, and the
+system profiler (`profile -a`) counted every tick as unknown.
+
+Both now work as on x86. The walk follows the frame records from the
+current frame pointer; at an iframe -- exception entry points the frame
+pointer at the one it builds -- it continues from the interrupted code's
+PC and frame pointer, and past the kernel stack, when user frames are
+wanted, it reads the user stack with user_memcpy(), which fails rather
+than faults with interrupts disabled. The interrupt PC is the innermost
+iframe's ELR, and it was a syscall if its exception class is SVC64.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0136-kernel-arm64-stack-traces-for-the-profilers.patch 9ef934ca42a458664008669c600ba32522eddd7aa1709bdd23f54673f9986cba
+---
+ src/system/kernel/arch/arm64/arch_debug.cpp | 164 +++++++++++++++++++-
+ 1 file changed, 162 insertions(+), 2 deletions(-)
+
+diff --git a/src/system/kernel/arch/arm64/arch_debug.cpp b/src/system/kernel/arch/arm64/arch_debug.cpp
+index 666e56ead4..3797031ed4 100644
+--- a/src/system/kernel/arch/arm64/arch_debug.cpp
++++ b/src/system/kernel/arch/arm64/arch_debug.cpp
+@@ -6,6 +6,9 @@
+ 
+ #include <arch/debug.h>
+ 
++#include <limits.h>
++#include <string.h>
++
+ #include <arch_cpu.h>
+ #include <debug.h>
+ #include <debug_heap.h>
+@@ -63,6 +66,75 @@ get_next_frame(addr_t fp, addr_t *next, addr_t *ip)
+ }
+ 
+ 
++static bool
++is_kernel_stack_address(Thread* thread, addr_t address)
++{
++	// Early in the boot there may be no thread, or one whose kernel stack
++	// is not set yet; then we are on a kernel stack anyway.
++	if (thread == NULL || thread->kernel_stack_top == 0)
++		return IS_KERNEL_ADDRESS(address);
++
++	return address >= thread->kernel_stack_base
++		&& address < thread->kernel_stack_top;
++}
++
++
++/*!	The thread's iframe whose address  fp is, if any: exception entry
++	points the frame pointer at the iframe it builds.
++*/
++static iframe*
++find_iframe(Thread* thread, addr_t fp)
++{
++	struct iframe_stack* stack = &thread->arch_info.iframes;
++	for (int32 i = stack->index - 1; i >= 0; i--) {
++		if (fp == (addr_t)stack->frames[i])
++			return stack->frames[i];
++	}
++	return NULL;
++}
++
++
++//! The innermost iframe of the thread that was entered from user mode.
++static iframe*
++get_user_iframe(Thread* thread)
++{
++	struct iframe_stack* stack = &thread->arch_info.iframes;
++	for (int32 i = stack->index - 1; i >= 0; i--) {
++		if ((stack->frames[i]->spsr & PSR_M_MASK) == PSR_M_EL0t)
++			return stack->frames[i];
++	}
++	return NULL;
++}
++
++
++/*!	Reads the frame record at  fp -- the caller's frame pointer and the
++	return address -- without the kernel debugger's help: a user frame is
++	read with user_memcpy(), which fails rather than faults when the page is
++	not there (the profiler calls this with interrupts disabled).
++*/
++static status_t
++get_next_frame_no_debugger(addr_t fp, addr_t* _next, addr_t* _ip,
++	bool onKernelStack, Thread* thread)
++{
++	if ((fp & 0xf) != 0)
++		return B_BAD_ADDRESS;
++
++	addr_t frame[2];
++	if (onKernelStack) {
++		if (fp + sizeof(frame) > thread->kernel_stack_top)
++			return B_BAD_ADDRESS;
++		memcpy(frame, (void*)fp, sizeof(frame));
++	} else if (!IS_USER_ADDRESS(fp)
++		|| user_memcpy(frame, (void*)fp, sizeof(frame)) != B_OK) {
++		return B_BAD_ADDRESS;
++	}
++
++	*_next = frame[0];
++	*_ip = frame[1];
++	return B_OK;
++}
++
++
+ static status_t
+ lookup_symbol(Thread* thread, addr_t address, addr_t* _baseAddress,
+ 	const char** _symbolName, const char** _imageName, bool* _exactMatch)
+@@ -366,18 +438,106 @@ arch_debug_stack_trace(void)
+ }
+ 
+ 
++/*!	Captures a stack trace (the return addresses) of the current thread.
++	\param returnAddresses The array the return address shall be written to.
++	\param maxCount The maximum number of return addresses to be captured.
++	\param skipIframes The number of interrupt frames that shall be skipped.
++		If greater than 0, \a skipFrames is ignored.
++	\param skipFrames The number of stack frames that shall be skipped.
++	\param flags A combination of one or two of the following:
++		- \c STACK_TRACE_KERNEL: Capture kernel return addresses.
++		- \c STACK_TRACE_USER: Capture user return addresses.
++	\return The number of return addresses written to the given array.
++*/
+ int32
+ arch_get_stack_trace(addr_t* returnAddresses, int32 maxCount,
+ 	int32 skipIframes, int32 skipFrames, uint32 flags)
+ {
+-	return 0;
++	// Keep skipping normal stack frames until we've skipped the iframes we're
++	// supposed to skip.
++	if (skipIframes > 0)
++		skipFrames = INT_MAX;
++
++	Thread* thread = thread_get_current_thread();
++	if (thread == NULL)
++		return 0;
++
++	int32 count = 0;
++	addr_t fp = arm64_get_fp();
++	bool onKernelStack = true;
++
++	if ((flags & (STACK_TRACE_KERNEL | STACK_TRACE_USER)) == STACK_TRACE_USER) {
++		iframe* frame = get_user_iframe(thread);
++		if (frame == NULL)
++			return 0;
++
++		fp = (addr_t)frame;
++	}
++
++	while (fp != 0 && count < maxCount) {
++		onKernelStack = onKernelStack && is_kernel_stack_address(thread, fp);
++		if (!onKernelStack && (flags & STACK_TRACE_USER) == 0)
++			break;
++
++		addr_t ip;
++		addr_t nextFp;
++
++		iframe* frame = onKernelStack ? find_iframe(thread, fp) : NULL;
++		if (frame != NULL) {
++			ip = frame->elr;
++			nextFp = frame->fp;
++
++			if (skipIframes > 0) {
++				if (--skipIframes == 0)
++					skipFrames = 0;
++			}
++		} else if (get_next_frame_no_debugger(fp, &nextFp, &ip, onKernelStack,
++				thread) != B_OK) {
++			break;
++		}
++
++		if (ip == 0)
++			break;
++
++		if (skipFrames > 0)
++			skipFrames--;
++		else
++			returnAddresses[count++] = ip;
++
++		// A frame record's caller is always further up the stack; anything
++		// else is not a frame chain (a user stack is walked as found).
++		if (!onKernelStack && nextFp != 0 && nextFp <= fp)
++			break;
++
++		fp = nextFp;
++	}
++
++	return count;
+ }
+ 
+ 
++/*!	Returns the program counter of the currently debugged (respectively this)
++	thread where the innermost interrupts happened. \a _isSyscall, if specified,
++	is set to whether this interrupt frame was created by a syscall. Returns
++	\c NULL, if there's no such frame or a problem occurred retrieving it;
++	\a _isSyscall won't be set in this case.
++*/
+ void*
+ arch_debug_get_interrupt_pc(bool* _isSyscall)
+ {
+-	return NULL;
++	Thread* thread = debug_get_debugged_thread();
++	if (thread == NULL)
++		return NULL;
++
++	struct iframe_stack* stack = &thread->arch_info.iframes;
++	if (stack->index <= 0)
++		return NULL;
++
++	iframe* frame = stack->frames[stack->index - 1];
++	if (_isSyscall != NULL)
++		*_isSyscall = ESR_ELx_EXCEPTION(frame->esr) == EXCP_SVC64;
++
++	return (void*)frame->elr;
+ }
+ 
+ 

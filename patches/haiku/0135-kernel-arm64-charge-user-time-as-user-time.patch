@@ -1,0 +1,50 @@
+From 1e4dbdbbc050ee74b6a16c8372c6de057b08934e Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 06:56:10 +0100
+Subject: [PATCH] kernel/arm64: charge user time as user time
+
+A thread's user time runs from its last return to user mode to its next
+entry into the kernel, which thread_at_kernel_entry() records. On arm64
+only a syscall called it: an interrupt or a fault taken in user mode did
+not, and their return still called thread_at_kernel_exit(), which charged
+the whole stretch since the last recorded crossing to kernel time. So
+nearly all computation was reported as kernel time -- a loop of pure
+arithmetic for 2 s showed 0.004 s of user time and 1.996 s of kernel time
+-- and time, top and the team usage calls all said so.
+
+InterruptScope, through which every exception and interrupt passes, now
+records the entry for a frame from user mode, as x86 does on every entry;
+the syscall path no longer does it separately.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0135-kernel-arm64-charge-user-time-as-user-time.patch 23b183648345dc75d466f180b925beb772c2ceec5ccc73380cc4fd993c936a9d
+---
+ src/system/kernel/arch/arm64/arch_int.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/system/kernel/arch/arm64/arch_int.cpp b/src/system/kernel/arch/arm64/arch_int.cpp
+index 58002391c1..f4de854818 100644
+--- a/src/system/kernel/arch/arm64/arch_int.cpp
++++ b/src/system/kernel/arch/arm64/arch_int.cpp
+@@ -222,6 +222,13 @@ public:
+ 			arm64_push_iframe(&fThread->arch_info.iframes, iframe);
+ 		else
+ 			arm64_push_iframe(&gBootFrameStack, iframe);
++
++		// The time since the thread last returned to user mode was user
++		// time, however it came back into the kernel: an interrupt, a fault
++		// or a syscall. The destructor charges the time from here on as
++		// kernel time.
++		if (fThread != NULL && (iframe->spsr & PSR_M_MASK) == PSR_M_EL0t)
++			thread_at_kernel_entry(system_time());
+ 	}
+ 
+ 	virtual ~InterruptScope() {
+@@ -468,7 +475,6 @@ do_sync_handler(iframe * frame)
+ 				}
+ 			}
+ 
+-			thread_at_kernel_entry(system_time());
+ 			thread_get_current_thread()->arch_info.old_x0 = frame->x[0];
+ 
+ 			enable_interrupts();

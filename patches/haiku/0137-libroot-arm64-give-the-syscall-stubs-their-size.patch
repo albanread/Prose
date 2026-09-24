@@ -1,0 +1,31 @@
+From 8b4af92dfe1f386c42a828caa68742936180122e Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 07:01:13 +0100
+Subject: [PATCH] libroot/arm64: give the syscall stubs their size
+
+The arm64 syscall stubs had no .size, so their symbols were empty: an
+address in one -- where every thread in a syscall is, `svc` then `ret` --
+matched no function. The profiler skipped such a sample to the next frame
+it could name, charging a syscall-bound loop to its caller's caller. The
+x86_64 stubs have always had a size (FUNCTION_END).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0137-libroot-arm64-give-the-syscall-stubs-their-size.patch 77a25df57a7489f42a6ee7dadf07bed6568790e05246aeb73ad2436af0d660e1
+---
+ src/system/libroot/os/arch/arm64/syscalls.inc | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/system/libroot/os/arch/arm64/syscalls.inc b/src/system/libroot/os/arch/arm64/syscalls.inc
+index 7370c21581..81c0c0b86f 100644
+--- a/src/system/libroot/os/arch/arm64/syscalls.inc
++++ b/src/system/libroot/os/arch/arm64/syscalls.inc
+@@ -8,7 +8,8 @@
+ .p2align 2; \
+ name: \
+ 	svc #(code); \
+-	ret
++	ret; \
++.size name, . - name
+ 
+ #define SYSCALL0(name, n) _AARCH64_SYSCALL_ENCODE(name, n)
+ #define SYSCALL1(name, n) _AARCH64_SYSCALL_ENCODE(name, n)

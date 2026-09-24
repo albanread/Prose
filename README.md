@@ -414,6 +414,9 @@ table there also records why each one exists.
 | 0132 | Programs built by Prose's own clang can use thread-local storage (`thread_local`, `std::call_once`): the loader now handles the TLS descriptors clang emits on arm64 |
 | 0133 | `posix_spawn()` runs the program it is given, whatever `argv[0]` says; it used to run `argv[0]`, so spawning `/some/path/tool` as `tool` failed |
 | 0134 | A program that fails to spawn another no longer prints its own pending output twice |
+| 0135 | CPU time is reported correctly: computation counts as user time, not kernel time (`time`, `top`, ActivityMonitor were all wrong on arm64) |
+| 0136 | The profiler works: `profile` and `profile -a` name the functions time goes to, user and kernel |
+| 0137 | Profiles charge time spent in a syscall to the syscall, not to the caller's caller |
 
 There is no 0058 or 0063. The first was exported by mistake and withdrawn
 (`fa9851f`); the second is a number a session took and did not use. The series
