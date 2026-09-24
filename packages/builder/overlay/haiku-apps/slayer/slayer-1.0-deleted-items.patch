@@ -1,0 +1,20 @@
+Slayer 1.0: MainWindow::RemoveProcessItems() deletes the thread rows of the
+remove list in its first loop, but leaves their pointers in the list; the
+second loop then dynamic_casts every entry, the deleted ones too, which
+reads their vtable pointers from freed memory. That worked while freed
+blocks kept their bytes. Prose's allocator of patch 0138 wrote into freed
+blocks, and Slayer crashed at the first refresh after a thread ended
+(0140 made the allocator leave freed blocks alone again, which hides the
+bug but does not fix it). Clear the entry once its row is deleted.
+
+--- a/src/MainWindow.cpp
++++ b/src/MainWindow.cpp
+@@ -404,6 +404,8 @@
+ 				team_item->thread_items_list->del(p1->thread);
+ 
+ 			delete p1;
++			// the loop below must not dynamic_cast the deleted item
++			items->ReplaceItem(i, NULL);
+ 		}
+ 	}
+ 
