@@ -52,6 +52,34 @@ wc -l < "$OUT/ast-grep.json"
 echo ">>> GCC -fanalyzer (C files of the kernel and libroot)"
 python3 "$HERE/gccanalyzer.py" "$OUT/jam.txt" "$OUT/gcc-analyzer.txt"
 
+echo ">>> flawfinder (level 4 and up)"
+if command -v flawfinder > /dev/null; then
+	flawfinder --minlevel=4 --csv --quiet src/system/kernel src/system/libroot \
+		src/system/runtime_loader src/system/libnetwork src/kits src/servers \
+		src/add-ons/kernel src/apps/deskbar > "$OUT/flawfinder.csv" 2> /dev/null || true
+fi
+
+if [ "$QUICK" != quick ] && command -v cppcheck > /dev/null; then
+	# cppcheck does not know the target: it must be told the architecture
+	# (HaikuConfig.h stops at "Unsupported architecture!" otherwise) and that
+	# the environment is hosted (libstdc++ checks __STDC_HOSTED__)
+	echo ">>> cppcheck"
+	mkdir -p "$OUT/cppcheck" "$OUT/cppcheck-build"
+	python3 "$HERE/cppcheckdb.py" "$OUT/compile_commands.json" \
+		"$OUT/cppcheck/compile_commands.json"
+	cppcheck --project="$OUT/cppcheck/compile_commands.json" \
+		-D__aarch64__=1 -D__ARM_ARCH=8 -D__HAIKU__=1 -D__LP64__=1 -D__ELF__=1 \
+		-D__GNUC__=13 -D__GNUC_MINOR__=3 -D__STDC_HOSTED__=1 --library=posix \
+		-j "$JOBS" --enable=warning,portability --platform=unix64 \
+		--cppcheck-build-dir="$OUT/cppcheck-build" \
+		--suppress=missingInclude --suppress=missingIncludeSystem \
+		--suppress=unmatchedSuppression --suppress=toomanyconfigs \
+		--suppress=normalCheckLevelMaxBranches --suppress=checkersReport \
+		--suppress=uninitMemberVarNoCtor --suppress=dangerousTypeCast \
+		--template='{file}:{line}:{column}: {severity}: {message} [{id}]' \
+		--quiet 2> "$OUT/cppcheck.txt" > /dev/null || true
+fi
+
 if [ "$QUICK" != quick ]; then
 	echo ">>> clang-tidy and the clang static analyzer"
 	"$LLVM/run-clang-tidy" -clang-tidy-binary "$LLVM/clang-tidy" -p "$OUT" \

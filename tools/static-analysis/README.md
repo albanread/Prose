@@ -28,10 +28,19 @@ What each step writes into the output directory:
   and kernel hazards by syntax.
 - **`gcc-analyzer.txt`**: GCC 13's `-fanalyzer` over the kernel's and
   libroot's C files, with the cross compiler and the real flags.
+- **`flawfinder.csv`**: flawfinder's level 4 and 5 hits (lexical: `strcpy`,
+  `sprintf`, `system`, check-then-use races).
+- **`cppcheck.txt`**: cppcheck at warning and portability level, run from
+  a copy of the database without the gcc and libstdc++ headers
+  (`cppcheckdb.py`), which cppcheck cannot parse. It is told the
+  target's architecture and that the environment is hosted. Without those
+  it stops at `HaikuConfig.h`'s "Unsupported architecture!" in every file
+  and reports nothing.
 - **`clang-tidy.txt`** and **`clang-tidy-findings.json`**: the clang
   static analyzer and bugprone checks (`clang-tidy-checks.txt`),
   deduplicated and classified by `tidysum.py`.
 
-The needs: Homebrew's `llvm` (clang, clang-tidy, clang-query), ast-grep
+The needs: Homebrew's `llvm` (clang, clang-tidy, clang-query), `cppcheck`
+and `flawfinder` (Homebrew; skipped if absent), ast-grep
 (on PATH, or the copy in NewReview's tool cache), jam in `~/bin`, and the
 tree at `/Volumes/HaikuSrc/haiku` with its cross tools built.
