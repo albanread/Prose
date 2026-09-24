@@ -1,0 +1,13 @@
+id: io-result-compared-to-b-ok-c
+language: c
+severity: warning
+message: Read/Write-style calls return the number of bytes (ssize_t); comparing with B_OK treats every successful partial or full transfer as an error, or misses short transfers.
+rule:
+  any:
+    - pattern: $OBJ.$M($$$ARGS) != B_OK
+    - pattern: $OBJ.$M($$$ARGS) == B_OK
+    - pattern: $OBJ->$M($$$ARGS) != B_OK
+    - pattern: $OBJ->$M($$$ARGS) == B_OK
+constraints:
+  M:
+    regex: ^(Read|Write|ReadAt|WriteAt|ReadAttr|WriteAttr)$

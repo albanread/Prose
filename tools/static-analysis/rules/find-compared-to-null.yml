@@ -1,0 +1,13 @@
+id: find-index-compared-to-null
+language: cpp
+severity: warning
+message: BString's Find/IFind methods return an int32 index (B_ERROR when absent), never a pointer; compare with < 0.
+rule:
+  any:
+    - pattern: $OBJ.$M($$$ARGS) == NULL
+    - pattern: $OBJ.$M($$$ARGS) != NULL
+    - pattern: $OBJ->$M($$$ARGS) == NULL
+    - pattern: $OBJ->$M($$$ARGS) != NULL
+constraints:
+  M:
+    regex: ^I?Find(First|Last)$

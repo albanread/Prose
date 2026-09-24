@@ -1,0 +1,28 @@
+id: user-pointer-dereferenced
+language: cpp
+severity: warning
+message: A userland pointer is dereferenced directly in kernel code; it must go through user_memcpy()/user_strlcpy() (and IS_USER_ADDRESS()).
+rule:
+  any:
+    - kind: pointer_expression
+      has:
+        field: argument
+        kind: identifier
+        regex: ^_?user[A-Z]
+      regex: ^\*
+    - kind: field_expression
+      has:
+        field: argument
+        kind: identifier
+        regex: ^_?user[A-Z]
+      regex: '->'
+    - kind: subscript_expression
+      has:
+        field: argument
+        kind: identifier
+        regex: ^_?user[A-Z]
+  not:
+    has:
+      stopBy: end
+      kind: identifier
+      regex: ^userThread$

@@ -1,0 +1,8 @@
+id: snprintf-accumulated-length
+language: cpp
+severity: warning
+message: snprintf returns the length it would have written; adding it to an offset without clamping walks past the buffer once output is truncated.
+rule:
+  any:
+    - pattern: $LEN += snprintf($$$ARGS)
+    - pattern: $LEN += vsnprintf($$$ARGS)

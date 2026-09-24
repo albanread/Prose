@@ -1,0 +1,2 @@
+set output diag
+match binaryOperator(hasAnyOperatorName("==", "!="), hasEitherOperand(ignoringParenImpCasts(cxxMemberCallExpr(callee(cxxMethodDecl(returns(asString("ssize_t"))))).bind("byte-count-call"))), hasEitherOperand(ignoringParenCasts(integerLiteral(equals(0))))).bind("byte-count-compared-with-zero")

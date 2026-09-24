@@ -1,0 +1,4 @@
+set output diag
+match varDecl(hasType(pointerType()), hasInitializer(ignoringImplicit(cxxMemberCallExpr(hasType(pointerType(pointee(anyOf(isAnyCharacter(), voidType())))), on(cxxBindTemporaryExpr()))))).bind("pointer-kept-from-temporary")
+match binaryOperator(isAssignmentOperator(), hasLHS(ignoringParenImpCasts(anyOf(declRefExpr(to(varDecl(hasType(pointerType())))), memberExpr(hasType(pointerType()))))), hasRHS(ignoringImplicit(cxxMemberCallExpr(hasType(pointerType(pointee(anyOf(isAnyCharacter(), voidType())))), on(cxxBindTemporaryExpr()))))).bind("pointer-assigned-from-temporary")
+match returnStmt(hasReturnValue(ignoringImplicit(cxxMemberCallExpr(hasType(pointerType(pointee(anyOf(isAnyCharacter(), voidType())))), on(cxxBindTemporaryExpr()))))).bind("pointer-returned-from-temporary")
