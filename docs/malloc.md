@@ -165,14 +165,24 @@ caches all keep their behaviour. What changes is the path around them.
    without taking a lock and without searching, as glibc's heap mask,
    Darwin's region trailer and xzone's segment table do. `findpool()`'s walk
    stays only as a fallback, for pointers the map does not know.
-4. **Thread caches for objects up to 8 KB.**
-   - Each class holds up to 64 blocks and at most 32 KB.
-   - A miss refills half a class under one lock, taking free blocks in
-     bitmap order. An overflow flushes half a class, locking each owning
-     pool once per run.
-   - A per-process key in each cached block catches a double free by the
-     same thread.
-   - A thread's cache is flushed when the thread exits.
+4. **Thread caches for objects up to 8 KB.** Each thread keeps, per size
+   class, an array of pointers to blocks it freed: up to 64 blocks and at
+   most 32 KB a class. A miss refills half a class under one lock, taking
+   free blocks in bitmap order. A full class gives its older half back,
+   locking each owning pool once per run. A second `free()` of the block
+   last freed in its class is stopped at once; other double frees are
+   caught when the cache gives the block back. A thread's cache is flushed
+   when the thread exits.
+
+   The classes are arrays, as jemalloc's thread caches are, rather than
+   lists linked through the blocks, as glibc's are. So a freed block is not
+   written to until it is handed out again. Haiku's allocators never wrote
+   into freed blocks, and programs have come to depend on that without
+   knowing it. With linked lists (0138), Slayer crashed at every refresh: it
+   `dynamic_cast`s items it has just deleted, and the cast read the list
+   link where the vtable pointer had been. Patch 0140 made the classes
+   arrays. As a bonus, `free()` no longer touches the block's cache line,
+   which doubled the throughput of frees from other threads.
 5. **Pools and locks.**
    - Pools number twice the CPUs, rounded to a power of two, from 8 to 32.
    - A pool lock spins for about a microsecond before it sleeps in the

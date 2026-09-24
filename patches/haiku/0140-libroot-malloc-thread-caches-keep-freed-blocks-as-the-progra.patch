@@ -1,0 +1,357 @@
+From 185ad530e1ef81302c5d93154a484c2a692ce60d Mon Sep 17 00:00:00 2001
+From: albanread <albanread@googlemail.com>
+Date: Thu, 24 Sep 2026 09:32:47 +0100
+Subject: [PATCH] libroot/malloc: thread caches keep freed blocks as the
+ program left them
+
+The thread caches of 0138 linked cached blocks through their first word, as
+glibc's tcache does. Haiku's allocators never wrote into a freed block until
+it was reused, and programs have come to depend on that without knowing it:
+Slayer deletes the thread items of a list, then dynamic_casts every entry of
+the same list, deleted ones included. With the old allocator the cast read an
+intact vtable pointer and returned NULL; with 0138 it read the free list's
+link and crashed, at every refresh of its window.
+
+A class is now an array of pointers in the thread's cache, as jemalloc's
+thread caches are. A freed block is not written to until it is handed out
+again; the cache hands out the most recently freed block first and gives its
+oldest half back when a class is full. free() no longer touches the block's
+cache line either, which helps most when another thread allocated it: frees
+from other threads went from 16-35 to 45-61 million a second with one to four
+producer/consumer pairs.
+
+A second free() of the block last freed in its class is still stopped at
+once; other double frees are caught when the cache gives the block back.
+
+Tests: HaikuArmQemu's tools/malloc/malloctest 10/10; Haiku's calloc_test,
+memalign_test, signal_in_allocator_test[2]; Slayer runs (it crashed within
+seconds on 0138). The Mojo compile is unchanged (2.9 s -j 1, 3.7 s -j 8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Prose-Patch: 0140-libroot-malloc-thread-caches-keep-freed-blocks-as-the-progra.patch 33620a9d174faa5434dd3baad663e01ad4474e3e4296a0fbf8b6e6b70283600b
+---
+ .../posix/malloc/openbsd/thread_cache.c       | 161 +++++++++---------
+ 1 file changed, 85 insertions(+), 76 deletions(-)
+
+diff --git a/src/system/libroot/posix/malloc/openbsd/thread_cache.c b/src/system/libroot/posix/malloc/openbsd/thread_cache.c
+index b93abe060b..9046ef8f51 100644
+--- a/src/system/libroot/posix/malloc/openbsd/thread_cache.c
++++ b/src/system/libroot/posix/malloc/openbsd/thread_cache.c
+@@ -6,10 +6,18 @@
+ /*!	Thread caches. Each thread keeps the small blocks it frees, by size class,
+ 	and hands them out again first, so that most malloc() and free() calls take
+ 	no lock at all. A miss refills half a class from the thread's pool under
+-	one lock; a class that is full gives half of itself back to the pools that
+-	own the blocks, locking each pool once for a run of its blocks. This is
+-	glibc's tcache over OpenBSD's allocator; the page owner map (wrapper.c) is
+-	what lets free() find a block's size and owner without a lock.
++	one lock; a class that is full gives its older half back to the pools that
++	own the blocks, locking each pool once for a run of its blocks. The page
++	owner map (wrapper.c) is what lets free() find a block's size and owner
++	without a lock.
++
++	A class is an array of pointers, as jemalloc's thread caches are, rather
++	than a list linked through the blocks, as glibc's is: a freed block is not
++	written to until it is handed out again. Programs that read memory they
++	have freed -- a virtual call through a deleted object, a string kept past
++	its owner -- found it as they left it with the allocators Haiku had before,
++	and still do; a linked list puts a pointer where an object's vtable was.
++	And free() touches only the thread's cache, not the block's cache line.
+ 
+ 	Included by malloc.c, after the allocator's own definitions.
+ */
+@@ -28,12 +36,14 @@
+ #define THREAD_CACHE_NO_CLASS	0xff
+ 
+ struct thread_cache {
+-	void*					heads[THREAD_CACHE_CLASSES];
+-	uint16					counts[THREAD_CACHE_CLASSES];
+ 	int32					id;
+ 		// the thread's malloc id, which picks its pool; it stays with the
+ 		// cache when the cache is reused by another thread
+ 	struct thread_cache*	next_free;
++	uint16					counts[THREAD_CACHE_CLASSES];
++	void*					blocks[];
++		// each class's blocks, at sClassFirst[class], the most recently freed
++		// last
+ };
+ 
+ 
+@@ -43,14 +53,12 @@ struct thread_cache {
+ static uint8 sClassOfBucket[BUCKETS + 1];
+ static uint16 sBucketOfClass[THREAD_CACHE_CLASSES];
+ static uint16 sClassLimit[THREAD_CACHE_CLASSES];
+-
+-/* A cached block holds this in its second word, so that freeing a block that
+- * is already in the cache can be noticed. It is odd: no pointer. */
+-static uintptr_t sThreadCacheKey;
++static uint16 sClassFirst[THREAD_CACHE_CLASSES];
++static size_t sThreadCacheSize;
+ 
+ static mutex sThreadCacheLock = MUTEX_INITIALIZER("heap thread caches");
+ static struct thread_cache* sFreeThreadCaches;
+-static struct thread_cache* sThreadCacheSlab;
++static char* sThreadCacheSlab;
+ static size_t sThreadCacheSlabLeft;
+ static int32 sNextMallocThreadID;
+ 
+@@ -60,13 +68,7 @@ thread_cache_init(void)
+ {
+ 	u_int bucket;
+ 	u_int cls = 0;
+-
+-#ifdef B_HAIKU_64_BIT
+-	sThreadCacheKey = ((uintptr_t)malloc_arc4random() << 32)
+-		| malloc_arc4random() | 1;
+-#else
+-	sThreadCacheKey = malloc_arc4random() | 1;
+-#endif
++	u_int slots = 0;
+ 
+ 	memset(sClassOfBucket, THREAD_CACHE_NO_CLASS, sizeof(sClassOfBucket));
+ 	for (bucket = 1; bucket <= BUCKETS; bucket++) {
+@@ -88,8 +90,13 @@ thread_cache_init(void)
+ 		sClassOfBucket[bucket] = cls;
+ 		sBucketOfClass[cls] = bucket;
+ 		sClassLimit[cls] = limit;
++		sClassFirst[cls] = slots;
++		slots += limit;
+ 		cls++;
+ 	}
++
++	sThreadCacheSize = (sizeof(struct thread_cache) + slots * sizeof(void*)
++		+ 63) & ~(size_t)63;
+ }
+ 
+ 
+@@ -103,25 +110,25 @@ thread_cache_create(void)
+ 	if (cache != NULL)
+ 		sFreeThreadCaches = cache->next_free;
+ 	else {
+-		if (sThreadCacheSlabLeft == 0) {
++		if (sThreadCacheSlabLeft < sThreadCacheSize) {
++			// caches are carved from runs of allocator pages
++			const size_t slabSize = 4 * MALLOC_PAGESIZE;
+ 			void* slab = NULL;
+ 			uint8 cleared;
+-			if (__allocate_pages(&slab, MALLOC_PAGESIZE, 0, &cleared)
+-					!= B_OK) {
++			if (__allocate_pages(&slab, slabSize, 0, &cleared) != B_OK) {
+ 				mutex_unlock(&sThreadCacheLock);
+ 				return NULL;
+ 			}
+-			sThreadCacheSlab = (struct thread_cache*)slab;
+-			sThreadCacheSlabLeft = MALLOC_PAGESIZE
+-				/ sizeof(struct thread_cache);
++			sThreadCacheSlab = (char*)slab;
++			sThreadCacheSlabLeft = slabSize;
+ 		}
+-		cache = sThreadCacheSlab++;
+-		sThreadCacheSlabLeft--;
++		cache = (struct thread_cache*)sThreadCacheSlab;
++		sThreadCacheSlab += sThreadCacheSize;
++		sThreadCacheSlabLeft -= sThreadCacheSize;
+ 		cache->id = sNextMallocThreadID++;
+ 	}
+ 	mutex_unlock(&sThreadCacheLock);
+ 
+-	memset(cache->heads, 0, sizeof(cache->heads));
+ 	memset(cache->counts, 0, sizeof(cache->counts));
+ 	cache->next_free = NULL;
+ 	malloc_tls_set(cache);
+@@ -163,13 +170,15 @@ owner_pool(uint16 owner, void* block)
+ 
+ 
+ /*!	Takes up to \a count free blocks of a class from pool \a d, in the order
+-	of their pages' bitmaps, onto the cache's list. The pool must be locked.
+-	Returns how many it took. */
++	of their pages' bitmaps, into the cache. The pool must be locked. Returns
++	how many it took. */
+ static u_int
+ malloc_bytes_batch(struct dir_info* d, struct thread_cache* cache, u_int cls,
+ 	u_int count)
+ {
+ 	const u_int bucket = sBucketOfClass[cls];
++	void** blocks = cache->blocks + sClassFirst[cls];
++	const u_int first = cache->counts[cls];
+ 	u_int taken = 0;
+ 
+ 	while (taken < count) {
+@@ -191,14 +200,10 @@ malloc_bytes_batch(struct dir_info* d, struct thread_cache* cache, u_int cls,
+ 			u_short bits = bp->bits[i];
+ 			while (bits != 0 && taken < count) {
+ 				const u_int k = ffs(bits) - 1;
+-				void* block = (char*)bp->page
+-					+ (i * MALLOC_BITS + k) * B2ALLOC(bucket);
+ 
+ 				bits &= bits - 1;
+-				*(void**)block = cache->heads[cls];
+-				((uintptr_t*)block)[1] = sThreadCacheKey;
+-				cache->heads[cls] = block;
+-				cache->counts[cls]++;
++				blocks[first + taken] = (char*)bp->page
++					+ (i * MALLOC_BITS + k) * B2ALLOC(bucket);
+ 				bp->free--;
+ 				taken++;
+ 			}
+@@ -209,40 +214,56 @@ malloc_bytes_batch(struct dir_info* d, struct thread_cache* cache, u_int cls,
+ 			LIST_REMOVE(bp, entries);
+ 	}
+ 
++	// Blocks are handed out from the end: reverse the new ones, so that they
++	// go in address order.
++	if (taken > 1) {
++		void** low = blocks + first;
++		void** high = blocks + first + taken - 1;
++		while (low < high) {
++			void* swap = *low;
++			*low++ = *high;
++			*high-- = swap;
++		}
++	}
++	cache->counts[cls] += taken;
+ 	return taken;
+ }
+ 
+ 
+-static void*
++static bool
+ thread_cache_refill(struct thread_cache* cache, u_int cls)
+ {
+ 	struct dir_info* d = getpool();
++	u_int taken;
+ 
+ 	_MALLOC_LOCK(d->mutex);
+ 	d->active++;
+ 	d->func = "malloc";
+-	malloc_bytes_batch(d, cache, cls, (sClassLimit[cls] + 1) / 2);
++	taken = malloc_bytes_batch(d, cache, cls, (sClassLimit[cls] + 1) / 2);
+ 	d->active--;
+ 	_MALLOC_UNLOCK(d->mutex);
+ 
+-	return cache->heads[cls];
++	return taken > 0;
+ }
+ 
+ 
+-/*!	Gives a class's blocks back to their pools until \a keep are left. */
++/*!	Gives a class's \a count least recently freed blocks back to their pools,
++	locking each pool once for a run of its blocks. */
+ static void
+-thread_cache_flush(struct thread_cache* cache, u_int cls, u_int keep)
++thread_cache_flush(struct thread_cache* cache, u_int cls, u_int count)
+ {
++	void** blocks = cache->blocks + sClassFirst[cls];
+ 	struct dir_info* locked = NULL;
++	u_int i;
++
++	if (count > cache->counts[cls])
++		count = cache->counts[cls];
+ 
+-	while (cache->counts[cls] > keep) {
+-		void* block = cache->heads[cls];
++	for (i = 0; i < count; i++) {
++		void* block = blocks[i];
+ 		struct dir_info* pool = owner_pool(owner_map_get(block), block);
+ 		struct region_info* r;
+ 
+-		cache->heads[cls] = *(void**)block;
+-		cache->counts[cls]--;
+-
+ 		if (pool != locked) {
+ 			if (locked != NULL) {
+ 				locked->active--;
+@@ -264,18 +285,9 @@ thread_cache_flush(struct thread_cache* cache, u_int cls, u_int keep)
+ 		locked->active--;
+ 		_MALLOC_UNLOCK(locked->mutex);
+ 	}
+-}
+-
+ 
+-static void
+-thread_cache_check_double_free(struct thread_cache* cache, u_int cls,
+-	void* block)
+-{
+-	void* cached;
+-	for (cached = cache->heads[cls]; cached != NULL; cached = *(void**)cached) {
+-		if (cached == block)
+-			wrterror(NULL, "double free %p", block);
+-	}
++	cache->counts[cls] -= count;
++	memmove(blocks, blocks + count, cache->counts[cls] * sizeof(void*));
+ }
+ 
+ 
+@@ -285,7 +297,6 @@ static inline void*
+ thread_cache_malloc(size_t size)
+ {
+ 	struct thread_cache* cache;
+-	void* block;
+ 	u_int cls;
+ 
+ 	// 0 (for malloc(0)'s own pages) and sizes above the small blocks
+@@ -299,16 +310,10 @@ thread_cache_malloc(size_t size)
+ 	if (cache == NULL)
+ 		return NULL;
+ 
+-	block = cache->heads[cls];
+-	if (block == NULL) {
+-		block = thread_cache_refill(cache, cls);
+-		if (block == NULL)
+-			return NULL;
+-	}
+-	cache->heads[cls] = *(void**)block;
+-	cache->counts[cls]--;
+-	((uintptr_t*)block)[1] = 0;
+-	return block;
++	if (cache->counts[cls] == 0 && !thread_cache_refill(cache, cls))
++		return NULL;
++
++	return cache->blocks[sClassFirst[cls] + --cache->counts[cls]];
+ }
+ 
+ 
+@@ -319,6 +324,8 @@ thread_cache_free(void* block)
+ {
+ 	const u_int bucketPlusOne = owner_map_get(block) & OWNER_BUCKET_MASK;
+ 	struct thread_cache* cache;
++	void** blocks;
++	u_int count;
+ 	u_int cls;
+ 
+ 	// unknown, a region, or one of malloc(0)'s
+@@ -334,15 +341,17 @@ thread_cache_free(void* block)
+ 	if (cache == NULL)
+ 		return false;
+ 
+-	if (((uintptr_t*)block)[1] == sThreadCacheKey)
+-		thread_cache_check_double_free(cache, cls, block);
+-	if (cache->counts[cls] >= sClassLimit[cls])
+-		thread_cache_flush(cache, cls, sClassLimit[cls] / 2);
++	blocks = cache->blocks + sClassFirst[cls];
++	count = cache->counts[cls];
++	if (count > 0 && blocks[count - 1] == block)
++		wrterror(NULL, "double free %p", block);
++	if (count == sClassLimit[cls]) {
++		thread_cache_flush(cache, cls, count / 2);
++		count = cache->counts[cls];
++	}
+ 
+-	*(void**)block = cache->heads[cls];
+-	((uintptr_t*)block)[1] = sThreadCacheKey;
+-	cache->heads[cls] = block;
+-	cache->counts[cls]++;
++	blocks[count] = block;
++	cache->counts[cls] = count + 1;
+ 	return true;
+ }
+ 
+@@ -403,7 +412,7 @@ thread_cache_exit(void)
+ 		return;
+ 
+ 	for (cls = 0; cls < THREAD_CACHE_CLASSES; cls++)
+-		thread_cache_flush(cache, cls, 0);
++		thread_cache_flush(cache, cls, cache->counts[cls]);
+ 
+ 	mutex_lock(&sThreadCacheLock);
+ 	cache->next_free = sFreeThreadCaches;
