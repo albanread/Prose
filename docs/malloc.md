@@ -302,8 +302,11 @@ build: 5 runs in 5.
 
 **Still owed:**
 
-- a full image with 0138, and a desktop session on it: boot memory, apps,
-  the compiler;
+- a desktop session on a full image with 0138: boot memory, apps. (The
+  compiler on the full image, with 0138-0150, is done: 3.0 s with one
+  thread and 3.7 s with eight, and the standard library's suite passes
+  193, fails the 2 that need Python, in 39% less time than before --
+  MojoProse's PORT-JOURNAL, "The suite again".)
 - the kernel follow-ups K1–K3;
 - Haiku's `pthread_mutex` and `pthread_rwlock`, which do not spin, and whose
   rwlock readers serialise;
