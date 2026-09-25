@@ -1165,9 +1165,13 @@ final class Presenter: NSObject {
         startingLabel?.isHidden = text == nil
     }
 
-    /// decorate: the toolbar and status bar go on before the window is shown.
-    func makeWindow(vm: VZVirtualMachine, source: PresentSource, decorate: (NSWindow, VMContentView) -> Void) {
-        guard let surface = source.surface else { return }
+    /// The Metal state a render needs: a window's frames, and a capture --
+    /// which a headless machine must be able to take too, game panes and all
+    /// (they are composited here, never in the guest's display buffer).
+    @discardableResult
+    func prepareRendering(source: PresentSource) -> Bool {
+        guard let surface = source.surface else { return false }
+        if pipeline != nil { return true }
         presenterMetalDevice = device
         queue = device.makeCommandQueue()
         buffer = device.makeBuffer(bytesNoCopy: surface.base, length: surface.length,
@@ -1199,6 +1203,12 @@ final class Presenter: NSObject {
             log("FATAL: shader: \(error)")
             exit(1)
         }
+        return true
+    }
+
+    /// decorate: the toolbar and status bar go on before the window is shown.
+    func makeWindow(vm: VZVirtualMachine, source: PresentSource, decorate: (NSWindow, VMContentView) -> Void) {
+        guard prepareRendering(source: source) else { return }
 
         let frame = NSRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
         var displayViews: [NSView] = []
@@ -1721,6 +1731,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVir
             }
             vsync.resume()
             headlessVsync = vsync
+            // No window to draw in, but a capture still renders the panes.
+            presenter.prepareRendering(source: displaySource)
         }
         presenterGPU = displaySource
         portal.onHello = { [weak self] in
